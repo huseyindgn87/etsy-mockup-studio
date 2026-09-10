@@ -10,6 +10,27 @@ vi.mock("@/lib/etsy/auth", () => ({
   })),
 }));
 
+vi.mock("@/lib/etsy/listings", () => ({
+  EtsyApiError: class extends Error {
+    status: number;
+    constructor(msg: string, status = 500) {
+      super(msg);
+      this.status = status;
+    }
+  },
+  getShopId: vi.fn(async () => 4242),
+}));
+
+const uploadCalls: { rank?: number; contentType: string; listingId: number }[] = [];
+vi.mock("@/lib/etsy/listing-images", () => ({
+  uploadListingImage: vi.fn(
+    async (p: { rank?: number; contentType: string; listingId: number }) => {
+      uploadCalls.push({ rank: p.rank, contentType: p.contentType, listingId: p.listingId });
+      return { listingImageId: 9000 + (p.rank ?? 0), rank: p.rank ?? 1, url: null };
+    },
+  ),
+}));
+
 import { getEtsySession } from "@/lib/etsy/auth";
 import { POST } from "@/app/api/mockups/render/route";
 import { getRenderPool } from "@/lib/mockup/render-pool";
@@ -135,6 +156,68 @@ describe("POST /api/mockups/render", () => {
     const res = await POST(
       form(
         { mockups: [], designs: [], jobs: [{ mockup: 0 }] },
+        [{ field: "mockup", buf: mock, name: "m.png" }],
+      ),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  test("publishTo uploads the renders to an Etsy listing at sequential ranks", async () => {
+    uploadCalls.length = 0;
+    const mock = await png(120, 100, [90, 100, 110]);
+    const design = await png(50, 50, [10, 200, 10]);
+
+    const res = await POST(
+      form(
+        {
+          format: "jpeg",
+          publishTo: { listingId: 777, startRank: 1 },
+          mockups: [
+            { name: "tee", width: 120, height: 100, calibration: { shade: 10 } },
+          ],
+          designs: [{ name: "a" }, { name: "b" }],
+          jobs: [
+            { mockup: 0, design: 0 },
+            { mockup: 0, design: 1 },
+          ],
+        },
+        [
+          { field: "mockup", buf: mock, name: "m.png" },
+          { field: "design", buf: design, name: "a.png" },
+          { field: "design", buf: design, name: "b.png" },
+        ],
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    const body = (await res.json()) as {
+      listingId: number;
+      shopId: number;
+      uploaded: { rank: number }[];
+      failed: unknown[];
+      skipped: number;
+    };
+    expect(body.listingId).toBe(777);
+    expect(body.shopId).toBe(4242);
+    expect(body.uploaded).toHaveLength(2);
+    expect(body.failed).toHaveLength(0);
+    expect(body.skipped).toBe(0);
+    expect(uploadCalls.map((c) => c.rank)).toEqual([1, 2]);
+    expect(uploadCalls.every((c) => c.listingId === 777)).toBe(true);
+    expect(uploadCalls.every((c) => c.contentType === "image/jpeg")).toBe(true);
+  }, 30_000);
+
+  test("publishTo rejects a bad listingId", async () => {
+    const mock = await png(20, 20, [0, 0, 0]);
+    const res = await POST(
+      form(
+        {
+          publishTo: { listingId: 0 },
+          mockups: [{ name: "m", calibration: {} }],
+          designs: [],
+          jobs: [{ mockup: 0 }],
+        },
         [{ field: "mockup", buf: mock, name: "m.png" }],
       ),
     );

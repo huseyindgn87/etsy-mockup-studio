@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { blobToRaster, dataUrlToBlob } from "@/lib/mockup/client";
 import { quadList } from "@/lib/mockup/geometry";
 import type { Calibration, Overlay, Quad, Raster } from "@/lib/mockup/types";
@@ -45,6 +45,17 @@ interface DesignItem {
   url: string;
 }
 
+interface ListingOption {
+  listingId: number;
+  title: string;
+}
+
+interface PublishResult {
+  uploaded: { name: string; rank: number }[];
+  failed: { name: string; error: string }[];
+  skipped: number;
+}
+
 const SLIDERS = [
   { key: "shade", label: "Kumaş gölgesi", min: 0, max: 130 },
   { key: "disp", label: "Kırışıklık", min: 0, max: 40 },
@@ -72,8 +83,29 @@ export default function MockupsPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const [listings, setListings] = useState<ListingOption[]>([]);
+  const [publishId, setPublishId] = useState<number | null>(null);
+  const [publishResult, setPublishResult] = useState<PublishResult | null>(null);
+
   const psdInput = useRef<HTMLInputElement>(null);
   const designInput = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch("/api/etsy/listings?state=active&limit=100", { signal: controller.signal })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((body: { listings?: { listingId: number; title: string }[] } | null) => {
+        if (!body?.listings) return;
+        setListings(
+          body.listings.map((l) => ({ listingId: l.listingId, title: l.title })),
+        );
+        setPublishId((cur) => cur ?? body.listings?.[0]?.listingId ?? null);
+      })
+      .catch(() => {
+        /* not connected / no shop — the publish control just stays hidden */
+      });
+    return () => controller.abort();
+  }, []);
 
   const active = mockups.find((m) => m.id === activeId) ?? null;
   const previewDesign =
@@ -236,11 +268,10 @@ export default function MockupsPage() {
 
   const included = useMemo(() => mockups.filter((m) => m.include), [mockups]);
   const jobCount = included.length * designs.length;
+  const publishCount = Math.min(jobCount, 10);
 
-  const runBatch = useCallback(async () => {
-    if (!included.length || !designs.length) return;
-    setError(null);
-    try {
+  const buildBatchForm = useCallback(
+    (publishTo?: { listingId: number }) => {
       const fd = new FormData();
       const overlayBase: number[] = [];
       let flat = 0;
@@ -277,11 +308,24 @@ export default function MockupsPage() {
         jobs: included.flatMap((_, i) =>
           designs.map((__, k) => ({ mockup: i, design: k })),
         ),
+        ...(publishTo ? { publishTo } : {}),
       };
       fd.set("payload", JSON.stringify(payload));
+      return fd;
+    },
+    [included, designs],
+  );
 
+  const runBatch = useCallback(async () => {
+    if (!included.length || !designs.length) return;
+    setError(null);
+    setPublishResult(null);
+    try {
       setBusy(`${jobCount} görsel render ediliyor…`);
-      const res = await fetch("/api/mockups/render", { method: "POST", body: fd });
+      const res = await fetch("/api/mockups/render", {
+        method: "POST",
+        body: buildBatchForm(),
+      });
       if (!res.ok) throw new Error(await errorFrom(res));
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
@@ -295,7 +339,40 @@ export default function MockupsPage() {
     } finally {
       setBusy(null);
     }
-  }, [included, designs, jobCount]);
+  }, [included, designs, jobCount, buildBatchForm]);
+
+  const publishToEtsy = useCallback(async () => {
+    if (!included.length || !designs.length || publishId == null) return;
+    setError(null);
+    setPublishResult(null);
+    try {
+      setBusy(`${publishCount} görsel Etsy'ye yükleniyor…`);
+      const res = await fetch("/api/mockups/render", {
+        method: "POST",
+        body: buildBatchForm({ listingId: publishId }),
+      });
+      const body = (await res.json().catch(() => null)) as
+        | (PublishResult & { error?: string })
+        | null;
+      if (!res.ok || !body) {
+        throw new Error(
+          body?.error ||
+            (res.status === 401
+              ? "Etsy bağlantısı yok — ana sayfadan tekrar bağlan."
+              : `Yükleme başarısız (${res.status})`),
+        );
+      }
+      setPublishResult({
+        uploaded: body.uploaded ?? [],
+        failed: body.failed ?? [],
+        skipped: body.skipped ?? 0,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Etsy yüklemesi başarısız.");
+    } finally {
+      setBusy(null);
+    }
+  }, [included, designs, publishId, publishCount, buildBatchForm]);
 
   const areaCount = active ? quadList(active.calibration).length : 0;
   const areaIndex = Math.min(activeArea, Math.max(0, areaCount - 1));
@@ -319,19 +396,62 @@ export default function MockupsPage() {
               ayarla, toplu üret.
             </p>
           </div>
-          <button
-            type="button"
-            onClick={runBatch}
-            disabled={!!busy || jobCount === 0}
-            className="h-10 rounded-full bg-[#f56400] px-5 text-sm font-medium text-white transition-colors hover:bg-[#d95700] disabled:opacity-40"
-          >
-            {busy ?? `Toplu üret (${jobCount})`}
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            {listings.length > 0 && (
+              <>
+                <select
+                  value={publishId ?? ""}
+                  onChange={(e) => setPublishId(Number(e.target.value))}
+                  disabled={!!busy}
+                  className="h-10 max-w-[220px] truncate rounded-full border border-black/10 bg-white px-3 text-sm dark:border-white/15 dark:bg-zinc-950"
+                >
+                  {listings.map((l) => (
+                    <option key={l.listingId} value={l.listingId}>
+                      {l.title}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={publishToEtsy}
+                  disabled={!!busy || publishCount === 0 || publishId == null}
+                  className="h-10 rounded-full border border-[#f56400] px-4 text-sm font-medium text-[#f56400] transition-colors hover:bg-[#f56400]/10 disabled:opacity-40"
+                >
+                  Etsy&apos;ye yükle ({publishCount})
+                </button>
+              </>
+            )}
+            <button
+              type="button"
+              onClick={runBatch}
+              disabled={!!busy || jobCount === 0}
+              className="h-10 rounded-full bg-[#f56400] px-5 text-sm font-medium text-white transition-colors hover:bg-[#d95700] disabled:opacity-40"
+            >
+              {busy ?? `Toplu üret (${jobCount})`}
+            </button>
+          </div>
         </header>
 
         {error && (
           <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-300">
             {error}
+          </div>
+        )}
+
+        {publishResult && (
+          <div className="mt-4 rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800 dark:border-green-900 dark:bg-green-950/50 dark:text-green-300">
+            {publishResult.uploaded.length} görsel Etsy listing&apos;e yüklendi
+            {publishResult.skipped > 0 &&
+              ` · ${publishResult.skipped} atlandı (10 görsel sınırı)`}
+            {publishResult.failed.length > 0 && (
+              <ul className="mt-1 list-disc pl-5 text-red-700 dark:text-red-300">
+                {publishResult.failed.slice(0, 5).map((f, i) => (
+                  <li key={i}>
+                    {f.name}: {f.error}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
 

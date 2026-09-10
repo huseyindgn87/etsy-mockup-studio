@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { getEtsySession } from "@/lib/etsy/auth";
+import { uploadListingImage } from "@/lib/etsy/listing-images";
+import { EtsyApiError, getShopId } from "@/lib/etsy/listings";
 import { getRenderPool } from "@/lib/mockup/render-pool";
 import type { RenderJobInput } from "@/lib/mockup/render-types";
 import {
@@ -18,6 +20,7 @@ const MAX_TOTAL_BYTES = 400 * 1024 * 1024;
 const MAX_FILES = 400;
 const MAX_JOBS = 500;
 const MAX_DIMENSION = 8000;
+const MAX_LISTING_IMAGES = 10; // Etsy's per-listing image cap
 const DEFAULT_TARGET_MB: [number, number] = [1.2, 1.7];
 
 interface OverlaySpec {
@@ -42,6 +45,13 @@ interface JobSpec {
   areaDesigns?: (number | null)[];
   name?: string;
 }
+interface PublishSpec {
+  listingId: number;
+  startRank?: number;
+  /** Replace the image already at each rank (default true). */
+  overwrite?: boolean;
+  altText?: string;
+}
 interface RenderPayload {
   format?: "jpeg" | "png";
   targetMB?: [number, number];
@@ -50,6 +60,8 @@ interface RenderPayload {
   mockups?: MockupSpec[];
   designs?: { name?: string }[];
   jobs?: JobSpec[];
+  /** When set, upload the renders to this Etsy listing instead of zipping. */
+  publishTo?: PublishSpec;
 }
 
 const FORBIDDEN_NAME_CHARS = '/\\:*?"<>|';
@@ -90,6 +102,11 @@ const isIndex = (v: unknown, count: number): v is number =>
  * do not abort the batch — they are collected into a `_errors.txt` entry. The
  * response streams as jobs finish, so the request/response shape already fits a
  * future async `jobId` + progress-poll variant.
+ *
+ * With `payload.publishTo: { listingId, startRank?, overwrite?, altText? }` the
+ * renders are uploaded straight to that Etsy listing (first {@link MAX_LISTING_IMAGES},
+ * sequential ranks) and the response is JSON `{ uploaded, failed, skipped }`
+ * instead of a ZIP.
  */
 export async function POST(request: Request) {
   if (!(await getEtsySession())) {
@@ -248,6 +265,86 @@ export async function POST(request: Request) {
     usedNames.set(base, seen + 1);
     return `${seen === 0 ? base : `${base}-${seen + 1}`}.${ext}`;
   };
+
+  // ---- publish branch: render, then push straight to an Etsy listing ----
+  const publish = payload.publishTo;
+  if (publish && typeof publish === "object") {
+    if (!Number.isInteger(publish.listingId) || publish.listingId <= 0) {
+      return NextResponse.json(
+        { error: "publishTo.listingId must be a positive integer." },
+        { status: 400 },
+      );
+    }
+    const startRank =
+      typeof publish.startRank === "number" && publish.startRank >= 1
+        ? Math.trunc(publish.startRank)
+        : 1;
+    const overwrite = publish.overwrite !== false;
+    const contentType = format === "png" ? "image/png" : "image/jpeg";
+
+    const capped = jobs.slice(0, MAX_LISTING_IMAGES);
+    const skipped = jobs.length - capped.length;
+
+    let shopId: number;
+    try {
+      shopId = await getShopId();
+    } catch (err) {
+      const status = err instanceof EtsyApiError ? err.status : 502;
+      return NextResponse.json(
+        { error: err instanceof Error ? err.message : "Etsy shop lookup failed." },
+        { status: status >= 400 && status < 600 ? status : 502 },
+      );
+    }
+
+    // Render all in parallel on the pool; upload sequentially so Etsy ranks
+    // stay contiguous (rank N needs N-1 images already present).
+    const rendered = await Promise.all(capped.map((j) => pool.run(buildInput(j))));
+
+    const uploaded: {
+      name: string;
+      rank: number;
+      listingImageId: number;
+      url: string | null;
+    }[] = [];
+    const failed: { name: string; error: string }[] = [];
+
+    for (let i = 0; i < capped.length; i++) {
+      const j = capped[i];
+      const res = rendered[i];
+      if (!res.ok) {
+        failed.push({ name: label(j), error: res.error });
+        continue;
+      }
+      try {
+        const img = await uploadListingImage({
+          shopId,
+          listingId: publish.listingId,
+          bytes: new Uint8Array(res.bytes),
+          filename: uniqueName(baseName(j), res.ext),
+          contentType,
+          rank: startRank + i,
+          overwrite,
+          altText: publish.altText,
+        });
+        uploaded.push({
+          name: label(j),
+          rank: img.rank,
+          listingImageId: img.listingImageId,
+          url: img.url,
+        });
+      } catch (err) {
+        failed.push({
+          name: label(j),
+          error: err instanceof Error ? err.message : "upload failed",
+        });
+      }
+    }
+
+    return NextResponse.json(
+      { listingId: publish.listingId, shopId, uploaded, failed, skipped },
+      { status: uploaded.length > 0 ? 200 : 502 },
+    );
+  }
 
   const tagged = jobs.map((j, k) =>
     pool.run(buildInput(j)).then((res) => ({ k, job: j, res })),
