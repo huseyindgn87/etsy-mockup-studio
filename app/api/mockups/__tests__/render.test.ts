@@ -21,14 +21,51 @@ vi.mock("@/lib/etsy/listings", () => ({
   getShopId: vi.fn(async () => 4242),
 }));
 
-const uploadCalls: { rank?: number; contentType: string; listingId: number }[] = [];
+const uploadCalls: {
+  rank?: number;
+  contentType: string;
+  listingId: number;
+  overwrite?: boolean;
+}[] = [];
 vi.mock("@/lib/etsy/listing-images", () => ({
   uploadListingImage: vi.fn(
-    async (p: { rank?: number; contentType: string; listingId: number }) => {
-      uploadCalls.push({ rank: p.rank, contentType: p.contentType, listingId: p.listingId });
+    async (p: {
+      rank?: number;
+      contentType: string;
+      listingId: number;
+      overwrite?: boolean;
+    }) => {
+      uploadCalls.push({
+        rank: p.rank,
+        contentType: p.contentType,
+        listingId: p.listingId,
+        overwrite: p.overwrite,
+      });
       return { listingImageId: 9000 + (p.rank ?? 0), rank: p.rank ?? 1, url: null };
     },
   ),
+}));
+
+const createCalls: unknown[] = [];
+vi.mock("@/lib/etsy/listing-create", () => ({
+  getListingStructure: vi.fn(async () => ({
+    title: "Source tee",
+    description: "a shirt",
+    quantity: 3,
+    price: 24,
+    currencyCode: "USD",
+    whoMade: "i_did",
+    whenMade: "made_to_order",
+    taxonomyId: 1234,
+    shippingProfileId: 55,
+    returnPolicyId: 66,
+    tags: ["a", "b"],
+    materials: ["cotton"],
+  })),
+  createDraftListing: vi.fn(async (_shop: number, input: unknown) => {
+    createCalls.push(input);
+    return 999001;
+  }),
 }));
 
 import { getEtsySession } from "@/lib/etsy/auth";
@@ -206,6 +243,94 @@ describe("POST /api/mockups/render", () => {
     expect(uploadCalls.map((c) => c.rank)).toEqual([1, 2]);
     expect(uploadCalls.every((c) => c.listingId === 777)).toBe(true);
     expect(uploadCalls.every((c) => c.contentType === "image/jpeg")).toBe(true);
+    // never replaces images unless explicitly asked
+    expect(uploadCalls.every((c) => c.overwrite === false)).toBe(true);
+  }, 30_000);
+
+  test("mode:copy creates a draft seeded from the source and uploads there", async () => {
+    uploadCalls.length = 0;
+    createCalls.length = 0;
+    const mock = await png(120, 100, [90, 100, 110]);
+    const design = await png(50, 50, [10, 200, 10]);
+
+    const res = await POST(
+      form(
+        {
+          publishTo: { mode: "copy", listingId: 500 },
+          mockups: [{ name: "tee", width: 120, height: 100, calibration: {} }],
+          designs: [{ name: "a" }],
+          jobs: [{ mockup: 0, design: 0 }],
+        },
+        [
+          { field: "mockup", buf: mock, name: "m.png" },
+          { field: "design", buf: design, name: "a.png" },
+        ],
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      mode: string;
+      sourceListingId: number;
+      listingId: number;
+      createdDraft: boolean;
+    };
+    expect(body.mode).toBe("copy");
+    expect(body.sourceListingId).toBe(500);
+    expect(body.listingId).toBe(999001);
+    expect(body.createdDraft).toBe(true);
+    expect(createCalls).toHaveLength(1);
+    expect(createCalls[0]).toMatchObject({
+      title: "Source tee (kopya)",
+      taxonomyId: 1234,
+      shippingProfileId: 55,
+      tags: ["a", "b"],
+    });
+    // uploaded to the NEW draft, not the source
+    expect(uploadCalls.every((c) => c.listingId === 999001)).toBe(true);
+  }, 30_000);
+
+  test("mode:new needs a title and borrows only structure from the source", async () => {
+    uploadCalls.length = 0;
+    createCalls.length = 0;
+    const mock = await png(80, 80, [0, 0, 0]);
+
+    const noTitle = await POST(
+      form(
+        {
+          publishTo: { mode: "new", listingId: 500, newListing: {} },
+          mockups: [{ name: "m", calibration: {} }],
+          designs: [],
+          jobs: [{ mockup: 0 }],
+        },
+        [{ field: "mockup", buf: mock, name: "m.png" }],
+      ),
+    );
+    expect(noTitle.status).toBe(400);
+
+    const ok = await POST(
+      form(
+        {
+          publishTo: {
+            mode: "new",
+            listingId: 500,
+            newListing: { title: "Blank draft", quantity: 7 },
+          },
+          mockups: [{ name: "m", calibration: {} }],
+          designs: [],
+          jobs: [{ mockup: 0 }],
+        },
+        [{ field: "mockup", buf: mock, name: "m.png" }],
+      ),
+    );
+    expect(ok.status).toBe(200);
+    expect(createCalls[0]).toMatchObject({
+      title: "Blank draft",
+      quantity: 7,
+      taxonomyId: 1234,
+      tags: [],
+      materials: [],
+    });
   }, 30_000);
 
   test("publishTo rejects a bad listingId", async () => {

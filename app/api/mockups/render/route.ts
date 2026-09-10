@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getEtsySession } from "@/lib/etsy/auth";
+import { createDraftListing, getListingStructure } from "@/lib/etsy/listing-create";
 import { uploadListingImage } from "@/lib/etsy/listing-images";
 import { EtsyApiError, getShopId } from "@/lib/etsy/listings";
 import { getRenderPool } from "@/lib/mockup/render-pool";
@@ -46,11 +47,27 @@ interface JobSpec {
   name?: string;
 }
 interface PublishSpec {
+  /**
+   * "existing" — append to `listingId` (never replaces unless `overwrite`).
+   * "copy"     — new draft seeded from `listingId`, upload there.
+   * "new"      — new draft (borrows only category/shipping from `listingId`),
+   *              fields from `newListing`, upload there.
+   * A live listing is never modified except in "existing" mode, and even then
+   * images are only added unless the caller explicitly sets `overwrite`.
+   */
+  mode?: "existing" | "copy" | "new";
   listingId: number;
   startRank?: number;
-  /** Replace the image already at each rank (default true). */
+  /** "existing" mode only. Replace the image at each rank. Default false. */
   overwrite?: boolean;
   altText?: string;
+  copyTitle?: string;
+  newListing?: {
+    title?: string;
+    description?: string;
+    price?: number;
+    quantity?: number;
+  };
 }
 interface RenderPayload {
   format?: "jpeg" | "png";
@@ -103,10 +120,12 @@ const isIndex = (v: unknown, count: number): v is number =>
  * response streams as jobs finish, so the request/response shape already fits a
  * future async `jobId` + progress-poll variant.
  *
- * With `payload.publishTo: { listingId, startRank?, overwrite?, altText? }` the
- * renders are uploaded straight to that Etsy listing (first {@link MAX_LISTING_IMAGES},
- * sequential ranks) and the response is JSON `{ uploaded, failed, skipped }`
- * instead of a ZIP.
+ * With `payload.publishTo` the renders go to Etsy (first {@link MAX_LISTING_IMAGES},
+ * sequential ranks) and the response is JSON, not a ZIP. `mode`:
+ *   - "existing" — add to `listingId` (only replaces if `overwrite: true`)
+ *   - "copy"     — new draft seeded from `listingId`
+ *   - "new"      — new draft from `newListing`, category/shipping borrowed from `listingId`
+ * A live listing is never modified except an explicit "existing" + `overwrite`.
  */
 export async function POST(request: Request) {
   if (!(await getEtsySession())) {
@@ -266,7 +285,7 @@ export async function POST(request: Request) {
     return `${seen === 0 ? base : `${base}-${seen + 1}`}.${ext}`;
   };
 
-  // ---- publish branch: render, then push straight to an Etsy listing ----
+  // ---- publish branch: render, then push to Etsy ----
   const publish = payload.publishTo;
   if (publish && typeof publish === "object") {
     if (!Number.isInteger(publish.listingId) || publish.listingId <= 0) {
@@ -275,23 +294,61 @@ export async function POST(request: Request) {
         { status: 400 },
       );
     }
+    const mode = publish.mode === "copy" || publish.mode === "new" ? publish.mode : "existing";
+    if (mode === "new" && !publish.newListing?.title?.trim()) {
+      return NextResponse.json(
+        { error: "publishTo.newListing.title is required for a new listing." },
+        { status: 400 },
+      );
+    }
     const startRank =
       typeof publish.startRank === "number" && publish.startRank >= 1
         ? Math.trunc(publish.startRank)
         : 1;
-    const overwrite = publish.overwrite !== false;
+    // A live listing's images are only ever ADDED. Replacing happens only in
+    // "existing" mode and only when the caller explicitly opts in.
+    const overwrite = mode === "existing" && publish.overwrite === true;
     const contentType = format === "png" ? "image/png" : "image/jpeg";
 
     const capped = jobs.slice(0, MAX_LISTING_IMAGES);
     const skipped = jobs.length - capped.length;
 
     let shopId: number;
+    let targetListingId = publish.listingId;
+    let createdDraft = false;
     try {
       shopId = await getShopId();
+      if (mode !== "existing") {
+        const src = await getListingStructure(publish.listingId);
+        const nl = publish.newListing ?? {};
+        targetListingId = await createDraftListing(shopId, {
+          title:
+            mode === "copy"
+              ? publish.copyTitle?.trim() || `${src.title} (kopya)`
+              : (nl.title as string).trim(),
+          description: mode === "copy" ? src.description : nl.description || (nl.title as string),
+          quantity:
+            mode === "new" && Number.isInteger(nl.quantity) && (nl.quantity as number) > 0
+              ? (nl.quantity as number)
+              : src.quantity,
+          price:
+            mode === "new" && typeof nl.price === "number" && nl.price > 0
+              ? nl.price
+              : src.price,
+          whoMade: src.whoMade,
+          whenMade: src.whenMade,
+          taxonomyId: src.taxonomyId,
+          shippingProfileId: src.shippingProfileId,
+          returnPolicyId: src.returnPolicyId,
+          tags: mode === "copy" ? src.tags : [],
+          materials: mode === "copy" ? src.materials : [],
+        });
+        createdDraft = true;
+      }
     } catch (err) {
       const status = err instanceof EtsyApiError ? err.status : 502;
       return NextResponse.json(
-        { error: err instanceof Error ? err.message : "Etsy shop lookup failed." },
+        { error: err instanceof Error ? err.message : "Etsy request failed." },
         { status: status >= 400 && status < 600 ? status : 502 },
       );
     }
@@ -318,7 +375,7 @@ export async function POST(request: Request) {
       try {
         const img = await uploadListingImage({
           shopId,
-          listingId: publish.listingId,
+          listingId: targetListingId,
           bytes: new Uint8Array(res.bytes),
           filename: uniqueName(baseName(j), res.ext),
           contentType,
@@ -341,8 +398,17 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.json(
-      { listingId: publish.listingId, shopId, uploaded, failed, skipped },
-      { status: uploaded.length > 0 ? 200 : 502 },
+      {
+        mode,
+        sourceListingId: publish.listingId,
+        listingId: targetListingId,
+        createdDraft,
+        shopId,
+        uploaded,
+        failed,
+        skipped,
+      },
+      { status: uploaded.length > 0 || createdDraft ? 200 : 502 },
     );
   }
 

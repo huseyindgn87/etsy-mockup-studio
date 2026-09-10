@@ -50,7 +50,12 @@ interface ListingOption {
   title: string;
 }
 
+type PublishMode = "existing" | "copy" | "new";
+
 interface PublishResult {
+  mode: PublishMode;
+  listingId: number;
+  createdDraft: boolean;
   uploaded: { name: string; rank: number }[];
   failed: { name: string; error: string }[];
   skipped: number;
@@ -85,6 +90,9 @@ export default function MockupsPage() {
 
   const [listings, setListings] = useState<ListingOption[]>([]);
   const [publishId, setPublishId] = useState<number | null>(null);
+  const [publishMode, setPublishMode] = useState<PublishMode>("copy");
+  const [overwriteExisting, setOverwriteExisting] = useState(false);
+  const [newTitle, setNewTitle] = useState("");
   const [publishResult, setPublishResult] = useState<PublishResult | null>(null);
 
   const psdInput = useRef<HTMLInputElement>(null);
@@ -271,7 +279,7 @@ export default function MockupsPage() {
   const publishCount = Math.min(jobCount, 10);
 
   const buildBatchForm = useCallback(
-    (publishTo?: { listingId: number }) => {
+    (publishTo?: Record<string, unknown>) => {
       const fd = new FormData();
       const overlayBase: number[] = [];
       let flat = 0;
@@ -343,13 +351,28 @@ export default function MockupsPage() {
 
   const publishToEtsy = useCallback(async () => {
     if (!included.length || !designs.length || publishId == null) return;
+    if (publishMode === "new" && !newTitle.trim()) {
+      setError("Yeni taslak için bir başlık gir.");
+      return;
+    }
     setError(null);
     setPublishResult(null);
     try {
-      setBusy(`${publishCount} görsel Etsy'ye yükleniyor…`);
+      setBusy(
+        publishMode === "existing"
+          ? `${publishCount} görsel Etsy'ye ekleniyor…`
+          : "Taslak oluşturuluyor ve görseller yükleniyor…",
+      );
+      const publishTo: Record<string, unknown> = {
+        mode: publishMode,
+        listingId: publishId,
+      };
+      if (publishMode === "existing") publishTo.overwrite = overwriteExisting;
+      if (publishMode === "new") publishTo.newListing = { title: newTitle.trim() };
+
       const res = await fetch("/api/mockups/render", {
         method: "POST",
-        body: buildBatchForm({ listingId: publishId }),
+        body: buildBatchForm(publishTo),
       });
       const body = (await res.json().catch(() => null)) as
         | (PublishResult & { error?: string })
@@ -363,6 +386,9 @@ export default function MockupsPage() {
         );
       }
       setPublishResult({
+        mode: body.mode ?? publishMode,
+        listingId: body.listingId ?? publishId,
+        createdDraft: !!body.createdDraft,
         uploaded: body.uploaded ?? [],
         failed: body.failed ?? [],
         skipped: body.skipped ?? 0,
@@ -372,7 +398,16 @@ export default function MockupsPage() {
     } finally {
       setBusy(null);
     }
-  }, [included, designs, publishId, publishCount, buildBatchForm]);
+  }, [
+    included,
+    designs,
+    publishId,
+    publishMode,
+    overwriteExisting,
+    newTitle,
+    publishCount,
+    buildBatchForm,
+  ]);
 
   const areaCount = active ? quadList(active.calibration).length : 0;
   const areaIndex = Math.min(activeArea, Math.max(0, areaCount - 1));
@@ -396,40 +431,14 @@ export default function MockupsPage() {
               ayarla, toplu üret.
             </p>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            {listings.length > 0 && (
-              <>
-                <select
-                  value={publishId ?? ""}
-                  onChange={(e) => setPublishId(Number(e.target.value))}
-                  disabled={!!busy}
-                  className="h-10 max-w-[220px] truncate rounded-full border border-black/10 bg-white px-3 text-sm dark:border-white/15 dark:bg-zinc-950"
-                >
-                  {listings.map((l) => (
-                    <option key={l.listingId} value={l.listingId}>
-                      {l.title}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  onClick={publishToEtsy}
-                  disabled={!!busy || publishCount === 0 || publishId == null}
-                  className="h-10 rounded-full border border-[#f56400] px-4 text-sm font-medium text-[#f56400] transition-colors hover:bg-[#f56400]/10 disabled:opacity-40"
-                >
-                  Etsy&apos;ye yükle ({publishCount})
-                </button>
-              </>
-            )}
-            <button
-              type="button"
-              onClick={runBatch}
-              disabled={!!busy || jobCount === 0}
-              className="h-10 rounded-full bg-[#f56400] px-5 text-sm font-medium text-white transition-colors hover:bg-[#d95700] disabled:opacity-40"
-            >
-              {busy ?? `Toplu üret (${jobCount})`}
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={runBatch}
+            disabled={!!busy || jobCount === 0}
+            className="h-10 rounded-full bg-[#f56400] px-5 text-sm font-medium text-white transition-colors hover:bg-[#d95700] disabled:opacity-40"
+          >
+            {busy ?? `Toplu üret ve indir (${jobCount})`}
+          </button>
         </header>
 
         {error && (
@@ -438,11 +447,117 @@ export default function MockupsPage() {
           </div>
         )}
 
+        {listings.length > 0 && (
+          <div className="mt-4 rounded-xl border border-black/10 bg-white p-4 dark:border-white/15 dark:bg-zinc-950">
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <span className="font-medium text-zinc-700 dark:text-zinc-300">
+                Etsy&apos;ye gönder:
+              </span>
+              {(
+                [
+                  ["copy", "Kopyala → kopyaya"],
+                  ["new", "Yeni taslak → ona"],
+                  ["existing", "Seçili listing'e ekle"],
+                ] as const
+              ).map(([m, lbl]) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setPublishMode(m)}
+                  className={`h-8 rounded-full px-3 text-xs font-medium ${
+                    publishMode === m
+                      ? "bg-black text-white dark:bg-white dark:text-black"
+                      : "border border-black/10 text-zinc-600 dark:border-white/15 dark:text-zinc-400"
+                  }`}
+                >
+                  {lbl}
+                </button>
+              ))}
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <label className="text-xs text-zinc-500">
+                {publishMode === "existing" ? "Hedef listing" : "Kaynak listing"}
+              </label>
+              <select
+                value={publishId ?? ""}
+                onChange={(e) => setPublishId(Number(e.target.value))}
+                disabled={!!busy}
+                className="h-9 max-w-[280px] truncate rounded-lg border border-black/10 bg-white px-2 text-sm dark:border-white/15 dark:bg-zinc-950"
+              >
+                {listings.map((l) => (
+                  <option key={l.listingId} value={l.listingId}>
+                    {l.title}
+                  </option>
+                ))}
+              </select>
+
+              {publishMode === "new" && (
+                <input
+                  type="text"
+                  value={newTitle}
+                  onChange={(e) => setNewTitle(e.target.value)}
+                  placeholder="Yeni taslak başlığı"
+                  disabled={!!busy}
+                  className="h-9 min-w-[200px] flex-1 rounded-lg border border-black/10 bg-white px-2 text-sm dark:border-white/15 dark:bg-zinc-950"
+                />
+              )}
+
+              {publishMode === "existing" && (
+                <label className="flex items-center gap-1.5 text-xs text-zinc-600 dark:text-zinc-400">
+                  <input
+                    type="checkbox"
+                    checked={overwriteExisting}
+                    onChange={(e) => setOverwriteExisting(e.target.checked)}
+                    className="accent-[#f56400]"
+                  />
+                  mevcut görselleri değiştir (rank sırasıyla)
+                </label>
+              )}
+
+              <button
+                type="button"
+                onClick={publishToEtsy}
+                disabled={!!busy || publishCount === 0 || publishId == null}
+                className="ml-auto h-9 rounded-full border border-[#f56400] px-4 text-sm font-medium text-[#f56400] transition-colors hover:bg-[#f56400]/10 disabled:opacity-40"
+              >
+                {publishMode === "existing"
+                  ? `Ekle (${publishCount})`
+                  : `Taslak oluştur ve yükle (${publishCount})`}
+              </button>
+            </div>
+
+            <p className="mt-2 text-xs text-zinc-500">
+              {publishMode === "existing"
+                ? overwriteExisting
+                  ? "Seçili listing’in ilk sıralarındaki görseller bu render’larla değiştirilir."
+                  : "Görseller seçili listing’e eklenir (10 sınırını aşanlar atlanır). Hiçbir görsel silinmez."
+                : "Yeni bir taslak listing oluşturulur ve görseller ona yüklenir. Canlı listing’e dokunulmaz."}
+            </p>
+          </div>
+        )}
+
         {publishResult && (
           <div className="mt-4 rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800 dark:border-green-900 dark:bg-green-950/50 dark:text-green-300">
-            {publishResult.uploaded.length} görsel Etsy listing&apos;e yüklendi
+            {publishResult.createdDraft
+              ? `Taslak listing #${publishResult.listingId} oluşturuldu · `
+              : ""}
+            {publishResult.uploaded.length} görsel yüklendi
             {publishResult.skipped > 0 &&
               ` · ${publishResult.skipped} atlandı (10 görsel sınırı)`}
+            {publishResult.createdDraft && (
+              <>
+                {" · "}
+                <a
+                  href={`https://www.etsy.com/your/shops/me/listings/${publishResult.listingId}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline"
+                >
+                  Etsy&apos;de aç
+                </a>
+              </>
+            )}
             {publishResult.failed.length > 0 && (
               <ul className="mt-1 list-disc pl-5 text-red-700 dark:text-red-300">
                 {publishResult.failed.slice(0, 5).map((f, i) => (
