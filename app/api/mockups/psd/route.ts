@@ -1,0 +1,143 @@
+import { NextResponse } from "next/server";
+import sharp from "sharp";
+import { getEtsySession } from "@/lib/etsy/auth";
+import { parsePsd, PsdParseError, type PsdParseResult } from "@/lib/mockup/psd";
+import { measureTone } from "@/lib/mockup/tone";
+import { DEFAULT_QUAD, type Calibration, type Quad } from "@/lib/mockup/types";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+/** Reject uploads above this before reading them into memory. */
+const MAX_PSD_BYTES = 80 * 1024 * 1024;
+
+/** Slider defaults for a fresh calibration — mirrors the tool's `ensureCalib`. */
+const CALIBRATION_DEFAULTS = {
+  shade: 15,
+  disp: 10,
+  dispR: 12,
+  zoom: 100,
+  rot: 0,
+  b1: 0,
+  b2: 0,
+  w1: 255,
+  w2: 255,
+} as const;
+
+const cloneQuad = (q: Quad): Quad => q.map((p) => [...p]) as Quad;
+
+async function pngDataUrl(r: {
+  data: Uint8ClampedArray;
+  width: number;
+  height: number;
+}): Promise<string> {
+  const raw = Buffer.from(r.data.buffer, r.data.byteOffset, r.data.byteLength);
+  const png = await sharp(raw, {
+    raw: { width: r.width, height: r.height, channels: 4 },
+  })
+    .png()
+    .toBuffer();
+  return `data:image/png;base64,${png.toString("base64")}`;
+}
+
+/**
+ * Seed a calibration from the parsed print areas. With areas it is marked `set`
+ * (the PSD told us where the design goes); without, it is the untouched default
+ * over {@link DEFAULT_QUAD}, matching what the tool does on load.
+ */
+function suggestCalibration(quads: Quad[]): Calibration {
+  if (!quads.length) {
+    const d = cloneQuad(DEFAULT_QUAD);
+    return {
+      ...CALIBRATION_DEFAULTS,
+      q: d,
+      qs: [cloneQuad(d)],
+      ai: 0,
+      qs0: [cloneQuad(d)],
+      set0: false,
+      set: false,
+    };
+  }
+  return {
+    ...CALIBRATION_DEFAULTS,
+    q: quads[0],
+    qs: quads,
+    ai: 0,
+    qs0: quads.map(cloneQuad),
+    set0: true,
+    set: true,
+  };
+}
+
+/**
+ * Parse an uploaded `.psd` mockup template.
+ *
+ * `POST /api/mockups/psd` — `multipart/form-data`, field `psd`. Returns the PSD's
+ * composite as a PNG data URL, every readable print area (normalised quads) with
+ * its layer name, the overlay layers above the lowest area (each its own PNG), a
+ * garment tone reading, and a ready-to-edit calibration seeded from the areas.
+ * The geometry / compositing math stays in `lib/mockup`; this only decodes.
+ */
+export async function POST(request: Request) {
+  if (!(await getEtsySession())) {
+    return NextResponse.json({ error: "Not connected to Etsy." }, { status: 401 });
+  }
+
+  let file: File;
+  try {
+    const field = (await request.formData()).get("psd");
+    if (!(field instanceof File)) {
+      return NextResponse.json({ error: 'Missing "psd" file field.' }, { status: 400 });
+    }
+    file = field;
+  } catch {
+    return NextResponse.json({ error: "Expected multipart/form-data." }, { status: 400 });
+  }
+
+  if (file.size > MAX_PSD_BYTES) {
+    const mb = Math.floor(MAX_PSD_BYTES / 1024 / 1024);
+    return NextResponse.json({ error: `PSD too large (max ${mb} MB).` }, { status: 413 });
+  }
+
+  let parsed: PsdParseResult;
+  try {
+    parsed = parsePsd(await file.arrayBuffer());
+  } catch (err) {
+    if (err instanceof PsdParseError) {
+      return NextResponse.json({ error: err.message }, { status: 422 });
+    }
+    const message = err instanceof Error ? err.message : "PSD parse failed";
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+
+  const [composite, overlays] = await Promise.all([
+    pngDataUrl(parsed.composite),
+    Promise.all(
+      parsed.overlays.map(async (ov) => ({
+        x: ov.x,
+        y: ov.y,
+        w: ov.w,
+        h: ov.h,
+        blend: ov.blend,
+        alpha: ov.alpha,
+        clip: ov.clip,
+        name: ov.name,
+        image: await pngDataUrl({ data: ov.data, width: ov.w, height: ov.h }),
+      })),
+    ),
+  ]);
+
+  const tone = measureTone(parsed.composite, { isMock: true, name: file.name });
+
+  return NextResponse.json({
+    psd: { width: parsed.width, height: parsed.height },
+    composite,
+    areas: parsed.quads,
+    areaNames: parsed.areaNames,
+    layerName: parsed.layerName,
+    smartCount: parsed.smartCount,
+    overlays,
+    tone,
+    suggestedCalibration: suggestCalibration(parsed.quads),
+  });
+}
