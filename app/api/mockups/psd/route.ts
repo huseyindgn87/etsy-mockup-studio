@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
-import sharp from "sharp";
 import { getEtsySession } from "@/lib/etsy/auth";
 import { parsePsd, PsdParseError, type PsdParseResult } from "@/lib/mockup/psd";
+import { encodeRasterDataUrl } from "@/lib/mockup/server";
 import { measureTone } from "@/lib/mockup/tone";
 import { DEFAULT_QUAD, type Calibration, type Quad } from "@/lib/mockup/types";
 
@@ -25,20 +25,6 @@ const CALIBRATION_DEFAULTS = {
 } as const;
 
 const cloneQuad = (q: Quad): Quad => q.map((p) => [...p]) as Quad;
-
-async function pngDataUrl(r: {
-  data: Uint8ClampedArray;
-  width: number;
-  height: number;
-}): Promise<string> {
-  const raw = Buffer.from(r.data.buffer, r.data.byteOffset, r.data.byteLength);
-  const png = await sharp(raw, {
-    raw: { width: r.width, height: r.height, channels: 4 },
-  })
-    .png()
-    .toBuffer();
-  return `data:image/png;base64,${png.toString("base64")}`;
-}
 
 /**
  * Seed a calibration from the parsed print areas. With areas it is marked `set`
@@ -111,7 +97,7 @@ export async function POST(request: Request) {
   }
 
   const [composite, overlays] = await Promise.all([
-    pngDataUrl(parsed.composite),
+    encodeRasterDataUrl(parsed.composite),
     Promise.all(
       parsed.overlays.map(async (ov) => ({
         x: ov.x,
@@ -122,7 +108,11 @@ export async function POST(request: Request) {
         alpha: ov.alpha,
         clip: ov.clip,
         name: ov.name,
-        image: await pngDataUrl({ data: ov.data, width: ov.w, height: ov.h }),
+        image: await encodeRasterDataUrl({
+          data: ov.data,
+          width: ov.w,
+          height: ov.h,
+        }),
       })),
     ),
   ]);

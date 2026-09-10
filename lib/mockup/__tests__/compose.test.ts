@@ -89,3 +89,86 @@ test("compose upscales a smaller mock to the requested size", () => {
   expect(out.width).toBe(16);
   expect(px(out, 8, 8)).toEqual([200, 100, 50, 255]);
 });
+
+// mock with a sinusoidal fold pattern (normalised frequency) → wrinkle-map
+// gradients that actually vary across the print area
+function folds(S: number): ReturnType<typeof solid> {
+  const r = solid(S, S, 0, 0, 0, 255);
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      const i = (y * S + x) * 4;
+      const v = 128 + 90 * Math.sin((x / S) * Math.PI * 6) * Math.cos((y / S) * Math.PI * 5);
+      const c = Math.max(0, Math.min(255, Math.round(v)));
+      r.data[i] = r.data[i + 1] = r.data[i + 2] = c;
+    }
+  }
+  return r;
+}
+
+// horizontal grey gradient → any displacement difference shows as a value shift
+function gradientDesign(S: number): ReturnType<typeof solid> {
+  const d = solid(S, S, 0, 0, 0, 255);
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      const i = (y * S + x) * 4;
+      const v = Math.round((255 * x) / (S - 1));
+      d.data[i] = d.data[i + 1] = d.data[i + 2] = v;
+    }
+  }
+  return d;
+}
+
+const wrinkled: Calibration = {
+  ...flat,
+  qs: [
+    [
+      [0.2, 0.2],
+      [0.8, 0.2],
+      [0.8, 0.8],
+      [0.2, 0.8],
+    ],
+  ],
+  shade: 30,
+  disp: 24,
+  dispR: 18,
+};
+
+test("wrinkle displacement is resolution-independent (client/server parity)", () => {
+  const design = gradientDesign(64);
+  const N = 128;
+  const small = compose({ mock: folds(N), design, calibration: wrinkled }, N, N);
+  const large = compose({ mock: folds(2 * N), design, calibration: wrinkled }, 2 * N, 2 * N);
+
+  // box-average `large` 2×2 down to N, then mean abs diff against `small`
+  let sum = 0;
+  let count = 0;
+  for (let y = 0; y < N; y++) {
+    for (let x = 0; x < N; x++) {
+      for (let k = 0; k < 3; k++) {
+        let avg = 0;
+        for (let dy = 0; dy < 2; dy++) {
+          for (let dx = 0; dx < 2; dx++) {
+            avg += large.data[((2 * y + dy) * 2 * N + (2 * x + dx)) * 4 + k];
+          }
+        }
+        sum += Math.abs(avg / 4 - small.data[(y * N + x) * 4 + k]);
+        count++;
+      }
+    }
+  }
+  expect(sum / count).toBeLessThan(6);
+});
+
+test("displacement parity test is not vacuous — disp actually moves pixels", () => {
+  const design = gradientDesign(64);
+  const N = 128;
+  const on = compose({ mock: folds(N), design, calibration: wrinkled }, N, N);
+  const off = compose(
+    { mock: folds(N), design, calibration: { ...wrinkled, disp: 0 } },
+    N,
+    N,
+  );
+  let sum = 0;
+  for (let i = 0; i < on.data.length; i++) sum += Math.abs(on.data[i] - off.data[i]);
+  expect(sum / on.data.length).toBeGreaterThan(1);
+});

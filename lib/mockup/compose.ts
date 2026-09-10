@@ -6,10 +6,12 @@
  * Operates only on {@link Raster} buffers. `Calibration` slider units are
  * unchanged from the tool.
  *
- * NOTE(parity): the displacement blur radius is `max(W,H) / 1400`, i.e.
- * resolution-dependent — a client fit-scale preview and a full-res server render
- * will not match exactly. Phase 2 normalises the kernel to a fraction of quad
- * size. Kept as-is here so Phase 0 is a faithful port.
+ * PARITY (Phase 2): the wrinkle-displacement blur radius and gradient step are
+ * anchored to the print quad's own pixel span, not `max(W, H)`. The tool used
+ * `dispR * max(W,H) / 1400` with a fixed 2px gradient step, which made the
+ * displacement field depend on the render size — a fit-scale client preview and
+ * a full-res server render diverged. Both are now a fixed fraction of the quad,
+ * so the field (expressed in design UV) is the same at any resolution.
  */
 
 import { drawOverlays } from "./blend";
@@ -50,8 +52,14 @@ export function stampQuad(
 
   // contain-fit design, corrected for the quad's own aspect ratio
   const z = c.zoom / 100;
-  const { ar: quadAr } = quadMetrics(q);
+  const { w: quadW, h: quadH, ar: quadAr } = quadMetrics(q);
   const { uw, uh, uOff, vOff } = containFit(dw, dh, quadAr, z);
+
+  // wrinkle-map scale, as a fraction of the quad's pixel span (see PARITY note).
+  // At the tool's reference (quad ≈ half of a 1400px canvas) these reduce to the
+  // old `rad = dispR` and `step = 2`.
+  const quadSpan = Math.max(quadW, quadH);
+  const dstep = Math.max(2, Math.round(quadSpan / 350));
 
   // mean luminance inside quad
   let sum = 0;
@@ -88,8 +96,8 @@ export function stampQuad(
   let bw = 0;
   let bh = 0;
   if (disp > 0) {
-    const rad = Math.max(1, Math.round(((c.dispR || 12) * Math.max(W, H)) / 1400));
-    const pad = rad * 2 + 2;
+    const rad = Math.max(1, Math.round(((c.dispR || 12) * quadSpan) / 700));
+    const pad = rad * 2 + dstep + 2;
     bx0 = Math.max(0, x0 - pad);
     by0 = Math.max(0, y0 - pad);
     const bx1 = Math.min(W, x1 + pad);
@@ -152,8 +160,8 @@ export function stampQuad(
       if (u < -0.02 || u > 1.02 || v < -0.02 || v > 1.02) continue;
 
       if (BL) {
-        const gx = (bl2(x + 2, y) - bl2(x - 2, y)) / 255;
-        const gy = (bl2(x, y + 2) - bl2(x, y - 2)) / 255;
+        const gx = (bl2(x + dstep, y) - bl2(x - dstep, y)) / 255;
+        const gy = (bl2(x, y + dstep) - bl2(x, y - dstep)) / 255;
         u += gx * disp * 0.01;
         v += gy * disp * 0.01;
       }
