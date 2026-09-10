@@ -22,6 +22,13 @@ const DEFAULT_REDIRECT_URI = "http://localhost:3000/api/auth/etsy/callback";
 
 export interface EtsyConfig {
   clientId: string;
+  /**
+   * App "shared secret" from the Etsy app page. Not used in the OAuth flow
+   * (PKCE), but this app's key requires the `x-api-key` header to be
+   * `keystring:shared_secret` rather than the keystring alone. Optional:
+   * when unset, {@link etsyFetch} sends the keystring by itself.
+   */
+  sharedSecret?: string;
   redirectUri: string;
   /** Space-separated scope string, exactly as Etsy expects it. */
   scope: string;
@@ -56,6 +63,7 @@ export function getEtsyConfig(): EtsyConfig {
 
   cached = {
     clientId: clientId!,
+    sharedSecret: process.env.ETSY_SHARED_SECRET || undefined,
     redirectUri: process.env.ETSY_REDIRECT_URI ?? DEFAULT_REDIRECT_URI,
     scope: process.env.ETSY_SCOPES ?? DEFAULT_SCOPES,
     sessionSecret: sessionSecret!,

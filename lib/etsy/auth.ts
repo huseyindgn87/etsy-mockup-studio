@@ -68,7 +68,7 @@ export async function etsyFetch(
 ): Promise<Response> {
   const accessToken = await getAccessToken();
   if (!accessToken) throw new Error("Not connected to Etsy.");
-  const { clientId } = getEtsyConfig();
+  const { clientId, sharedSecret } = getEtsyConfig();
 
   const url = path.startsWith("http")
     ? path
@@ -76,7 +76,12 @@ export async function etsyFetch(
 
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${accessToken}`);
-  headers.set("x-api-key", clientId);
+  // This app's key is rejected as a bare keystring ("Shared secret is required
+  // in x-api-key header"); Etsy wants `keystring:shared_secret` here.
+  headers.set(
+    "x-api-key",
+    sharedSecret ? `${clientId}:${sharedSecret}` : clientId,
+  );
 
   return fetch(url, { ...init, headers, cache: "no-store" });
 }
