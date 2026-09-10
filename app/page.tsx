@@ -67,6 +67,12 @@ export default async function Home({
               >
                 View my listings
               </Link>
+              <Link
+                href="/mockups"
+                className="inline-flex h-10 items-center justify-center rounded-full border border-black/[.08] px-5 text-sm font-medium transition-colors hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-white/[.06]"
+              >
+                Mockup atölyesi
+              </Link>
               <form action="/api/auth/etsy/logout" method="post">
                 <button
                   type="submit"
