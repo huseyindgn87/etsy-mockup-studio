@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { getEtsySession } from "@/lib/etsy/auth";
 
 export const dynamic = "force-dynamic";
@@ -60,6 +61,12 @@ export default async function Home({
                   {new Date(session.expiresAt).toLocaleTimeString()}
                 </span>
               </div>
+              <Link
+                href="/listings"
+                className="inline-flex h-10 items-center justify-center rounded-full bg-[#f56400] px-5 text-sm font-medium text-white transition-colors hover:bg-[#d95700]"
+              >
+                View my listings
+              </Link>
               <form action="/api/auth/etsy/logout" method="post">
                 <button
                   type="submit"
