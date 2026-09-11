@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 const etsyFetch = vi.fn<(path: string) => Promise<Response>>();
 vi.mock("@/lib/etsy/auth", () => ({ etsyFetch: (path: string) => etsyFetch(path) }));
 
-import { fetchShopListings, searchShopListings } from "@/lib/etsy/listings";
+import { fetchAllShopListings, fetchShopListings } from "@/lib/etsy/listings";
 
 const json = (body: unknown, ok = true, status = 200): Response =>
   ({ ok, status, json: async () => body }) as Response;
@@ -18,86 +18,76 @@ const RAW_LISTING = (id: number, title: string, withImage = false) => ({
   ...(withImage ? { images: [{ url_570xN: `https://img/${id}.jpg` }] } : {}),
 });
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 beforeEach(() => {
   etsyFetch.mockReset();
 });
 
-describe("searchShopListings", () => {
-  test("empty keywords falls back to the plain listing feed", async () => {
+describe("fetchAllShopListings", () => {
+  test("a single page (count within the page size) makes one request", async () => {
     etsyFetch.mockImplementation(async (path: string) => {
       if (path.includes("/users/me")) return json({ user_id: 1, shop_id: 42 });
       if (path.includes("/shops/42/listings?")) {
-        return json({ count: 1, results: [RAW_LISTING(1, "Mug", true)] });
-      }
-      throw new Error(`unexpected path: ${path}`);
-    });
-
-    const page = await searchShopListings({ keywords: "   " });
-    expect(page.listings).toHaveLength(1);
-    expect(page.listings[0].title).toBe("Mug");
-    // no search/batch calls were made
-    expect(etsyFetch.mock.calls.some(([p]) => p.includes("/listings/active"))).toBe(false);
-    expect(etsyFetch.mock.calls.some(([p]) => p.includes("/listings/batch"))).toBe(false);
-  });
-
-  test("searches active listings then batches images, preserving relevance order", async () => {
-    const calls: string[] = [];
-    etsyFetch.mockImplementation(async (path: string) => {
-      calls.push(path);
-      if (path.includes("/users/me")) return json({ user_id: 1, shop_id: 42 });
-      if (path.includes("/shops/42/listings/active")) {
-        expect(path).toContain("keywords=tumbler");
-        expect(path).toContain("sort_on=score");
-        // relevance order: 30 is the best match, then 10, then 20
-        return json({ count: 3, results: [{ listing_id: 30 }, { listing_id: 10 }, { listing_id: 20 }] });
-      }
-      if (path.includes("/listings/batch")) {
+        expect(path).toContain("offset=0");
         expect(path).toContain("includes=Images");
-        expect(path).toContain("listing_ids=30");
-        expect(path).toContain("listing_ids=10");
-        expect(path).toContain("listing_ids=20");
-        // batch endpoint returns them in a DIFFERENT order than requested
         return json({
-          count: 3,
-          results: [
-            RAW_LISTING(10, "Steel tumbler", true),
-            RAW_LISTING(20, "Coffee tumbler", true),
-            RAW_LISTING(30, "Travel tumbler", true),
-          ],
+          count: 2,
+          results: [RAW_LISTING(1, "Miami skyline print", true), RAW_LISTING(2, "Chicago mug", true)],
         });
       }
       throw new Error(`unexpected path: ${path}`);
     });
 
-    const page = await searchShopListings({ keywords: "tumbler", limit: 10 });
-    expect(page.shopId).toBe(42);
-    expect(page.count).toBe(3);
-    // re-sorted back to the search's own relevance order (30, 10, 20)
-    expect(page.listings.map((l) => l.listingId)).toEqual([30, 10, 20]);
-    expect(page.listings.map((l) => l.title)).toEqual([
-      "Travel tumbler",
-      "Steel tumbler",
-      "Coffee tumbler",
-    ]);
-    expect(page.listings[0].thumbnailUrl).toBe("https://img/30.jpg");
-    expect(calls.filter((p) => p.includes("/listings/batch"))).toHaveLength(1);
+    const page = await fetchAllShopListings();
+    expect(page.count).toBe(2);
+    expect(page.listings.map((l) => l.title)).toEqual(["Miami skyline print", "Chicago mug"]);
+    expect(etsyFetch.mock.calls.filter(([p]) => p.includes("/shops/42/listings?"))).toHaveLength(1);
   });
 
-  test("no matches short-circuits without a batch call", async () => {
+  test("pages until the reported count is exhausted, reassembled in offset order even if pages resolve out of order", async () => {
+    // 3 pages of 100 = 250 total; make the LATER offsets resolve FIRST to
+    // prove the result isn't just request-completion order.
+    const delays: Record<number, number> = { 0: 30, 100: 10, 200: 0 };
     etsyFetch.mockImplementation(async (path: string) => {
       if (path.includes("/users/me")) return json({ user_id: 1, shop_id: 42 });
-      if (path.includes("/listings/active")) return json({ count: 0, results: [] });
-      throw new Error(`unexpected path: ${path}`);
+      const m = /offset=(\d+)/.exec(path);
+      const offset = m ? Number(m[1]) : 0;
+      await sleep(delays[offset] ?? 0);
+      const count = 250;
+      const pageSize = Math.min(100, count - offset);
+      const results = Array.from({ length: pageSize }, (_, i) =>
+        RAW_LISTING(offset + i, `Listing ${offset + i}`, true),
+      );
+      return json({ count, results });
     });
 
-    const page = await searchShopListings({ keywords: "xyzzy-nonexistent" });
-    expect(page.listings).toEqual([]);
-    expect(page.count).toBe(0);
-    expect(etsyFetch.mock.calls.some(([p]) => p.includes("/listings/batch"))).toBe(false);
+    const page = await fetchAllShopListings();
+    expect(page.count).toBe(250);
+    expect(page.listings).toHaveLength(250);
+    // reassembled in ascending offset order, not resolution order
+    expect(page.listings.map((l) => l.listingId)).toEqual(
+      Array.from({ length: 250 }, (_, i) => i),
+    );
+    const pageCalls = etsyFetch.mock.calls.filter(([p]) => p.includes("/shops/42/listings?"));
+    expect(pageCalls).toHaveLength(3);
+  });
+
+  test("passes the requested state through to every page", async () => {
+    etsyFetch.mockImplementation(async (path: string) => {
+      if (path.includes("/users/me")) return json({ user_id: 1, shop_id: 42 });
+      if (path.includes("/shops/42/listings?")) {
+        expect(path).toContain("state=draft");
+        return json({ count: 1, results: [RAW_LISTING(9, "Draft thing")] });
+      }
+      throw new Error(`unexpected path: ${path}`);
+    });
+    const page = await fetchAllShopListings({ state: "draft" });
+    expect(page.listings).toHaveLength(1);
   });
 });
 
-describe("fetchShopListings (unaffected by the search addition)", () => {
+describe("fetchShopListings (unaffected by fetchAllShopListings)", () => {
   test("still maps a plain listing page", async () => {
     etsyFetch.mockImplementation(async (path: string) => {
       if (path.includes("/users/me")) return json({ user_id: 1, shop_id: 7 });

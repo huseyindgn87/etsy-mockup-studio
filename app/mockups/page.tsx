@@ -97,6 +97,7 @@ export default function MockupsPage() {
   const [error, setError] = useState<string | null>(null);
 
   const [listings, setListings] = useState<ListingOption[]>([]);
+  const [listingsLoading, setListingsLoading] = useState(true);
   const [selectedListing, setSelectedListing] = useState<ListingOption | null>(null);
   const publishId = selectedListing?.listingId ?? null;
   const [publishMode, setPublishMode] = useState<PublishMode>("copy");
@@ -110,7 +111,9 @@ export default function MockupsPage() {
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch("/api/etsy/listings?state=active&limit=100", { signal: controller.signal })
+    // Every active listing, not just a page of them — the picker filters
+    // titles itself (see ListingPicker), so it needs the whole shop up front.
+    fetch("/api/etsy/listings?state=active&all=true", { signal: controller.signal })
       .then((res) => (res.ok ? res.json() : null))
       .then(
         (
@@ -130,7 +133,8 @@ export default function MockupsPage() {
       )
       .catch(() => {
         /* not connected / no shop — the publish control just stays hidden */
-      });
+      })
+      .finally(() => setListingsLoading(false));
     return () => controller.abort();
   }, []);
 
@@ -493,7 +497,7 @@ export default function MockupsPage() {
           </div>
         )}
 
-        {listings.length > 0 && (
+        {(listingsLoading || listings.length > 0) && (
           <div className="mt-4 rounded-xl border border-black/10 bg-white p-4 dark:border-white/15 dark:bg-zinc-950">
             <div className="flex flex-wrap items-center gap-2 text-sm">
               <span className="font-medium text-zinc-700 dark:text-zinc-300">
@@ -526,7 +530,8 @@ export default function MockupsPage() {
                 {publishMode === "existing" ? "Hedef listing" : "Kaynak listing"}
               </label>
               <ListingPicker
-                initialListings={listings}
+                listings={listings}
+                loading={listingsLoading}
                 value={selectedListing}
                 onChange={setSelectedListing}
                 disabled={!!busy}
@@ -907,35 +912,32 @@ function ListingThumb({ url, size }: { url: string | null; size: number }) {
   );
 }
 
-/** Debounce delay before a typed query triggers a server-side title search. */
-const LISTING_SEARCH_DEBOUNCE_MS = 300;
-
 /**
  * Visual listing picker: a closed button showing the current pick, opening a
  * dropdown where each row is a large thumbnail + the first 40 characters of
  * the title (a plain `<select>` can't render images in its options).
  *
- * A shop can have thousands of listings, so the dropdown only ever shows
- * `initialListings` (a small recent-first page) until the user types — then
- * it debounces and asks the server to keyword-search the whole shop
- * (`GET /api/etsy/listings?keywords=...`), so filtering isn't limited to
- * whatever page happened to load first.
+ * `listings` is the WHOLE shop (see the `all=true` fetch in the page
+ * component) — filtering is a plain, literal, case-insensitive title
+ * substring match done right here, not Etsy's own shop search (which ranks
+ * by relevance across title/tags/materials/description and readily returns
+ * listings whose title never contains what you typed).
  */
 function ListingPicker({
-  initialListings,
+  listings,
+  loading,
   value,
   onChange,
   disabled,
 }: {
-  initialListings: ListingOption[];
+  listings: ListingOption[];
+  loading: boolean;
   value: ListingOption | null;
   onChange: (listing: ListingOption) => void;
   disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const [searchResults, setSearchResults] = useState<ListingOption[] | null>(null);
-  const [searching, setSearching] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -947,50 +949,11 @@ function ListingPicker({
     return () => document.removeEventListener("pointerdown", onOutside);
   }, [open]);
 
-  useEffect(() => {
-    const q = query.trim();
-    if (!q) {
-      // Clearing the box should snap straight back to `initialListings`, not
-      // wait out a debounce — an intentional synchronous reset.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setSearchResults(null);
-      setSearching(false);
-      return;
-    }
-    setSearching(true);
-    const controller = new AbortController();
-    const timer = setTimeout(() => {
-      fetch(`/api/etsy/listings?keywords=${encodeURIComponent(q)}&limit=30`, {
-        signal: controller.signal,
-      })
-        .then((res) => (res.ok ? res.json() : null))
-        .then(
-          (
-            body: {
-              listings?: { listingId: number; title: string; thumbnailUrl: string | null }[];
-            } | null,
-          ) => {
-            setSearchResults(
-              (body?.listings ?? []).map((l) => ({
-                listingId: l.listingId,
-                title: l.title,
-                thumbnailUrl: l.thumbnailUrl,
-              })),
-            );
-          },
-        )
-        .catch(() => {
-          if (!controller.signal.aborted) setSearchResults([]);
-        })
-        .finally(() => setSearching(false));
-    }, LISTING_SEARCH_DEBOUNCE_MS);
-    return () => {
-      clearTimeout(timer);
-      controller.abort();
-    };
-  }, [query]);
-
-  const rows = searchResults ?? initialListings;
+  const rows = useMemo(() => {
+    const q = query.trim().toLocaleLowerCase("tr-TR");
+    if (!q) return listings;
+    return listings.filter((l) => l.title.toLocaleLowerCase("tr-TR").includes(q));
+  }, [listings, query]);
 
   return (
     <div ref={rootRef} className="relative">
@@ -1002,7 +965,7 @@ function ListingPicker({
       >
         <ListingThumb url={value?.thumbnailUrl ?? null} size={32} />
         <span className="max-w-[200px] truncate">
-          {value ? shortTitle(value.title) : "Listing seç"}
+          {value ? shortTitle(value.title) : loading ? "Listingler yükleniyor…" : "Listing seç"}
         </span>
         <span className="text-zinc-400">▾</span>
       </button>
@@ -1020,15 +983,17 @@ function ListingPicker({
             />
           </div>
           <ul className="max-h-72 overflow-y-auto py-1">
-            {searching && (
-              <li className="px-2 py-3 text-center text-xs text-zinc-500">Aranıyor…</li>
+            {loading && (
+              <li className="px-2 py-3 text-center text-xs text-zinc-500">
+                Listingler yükleniyor…
+              </li>
             )}
-            {!searching && rows.length === 0 && (
+            {!loading && rows.length === 0 && (
               <li className="px-2 py-3 text-center text-xs text-zinc-500">
                 {query.trim() ? "Eşleşen listing yok." : "Listing yok."}
               </li>
             )}
-            {!searching &&
+            {!loading &&
               rows.map((l) => (
                 <li key={l.listingId}>
                   <button

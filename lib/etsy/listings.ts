@@ -200,61 +200,70 @@ export async function fetchShopListings(
   };
 }
 
-export interface SearchShopListingsOptions {
-  keywords: string;
-  limit?: number;
-  offset?: number;
-}
+/** Etsy's per-request page cap. */
+const MAX_PAGE = 100;
+/** How many pages to fetch in parallel once we know the total count. */
+const FETCH_ALL_CONCURRENCY = 4;
+/** Defensive cap so a runaway shop/count doesn't loop forever. */
+const FETCH_ALL_SAFETY_CAP = 20_000;
 
-interface EtsyListingIdsResponse {
-  count: number;
-  results: { listing_id: number }[];
+export interface FetchAllShopListingsOptions {
+  state?: EtsyListingState;
 }
 
 /**
- * Keyword-search the connected user's ACTIVE listings by title/tags/etc.
- * (`findAllActiveListingsByShop` — the only shop-scoped search Etsy exposes;
- * `getListingsByShop` has no keyword filter). A shop can have thousands of
- * listings, so this is the only viable way to find one without paging
- * through everything client-side.
+ * Fetch every one of the connected user's listings for `state` (default
+ * "active"), paging until Etsy's reported `count` is exhausted.
  *
- * Two calls: the search endpoint returns matching ids but no images (it
- * doesn't support `includes`); a batch lookup then fetches images for just
- * that page of ids. Relevance order from the search is preserved.
+ * Etsy's shop-scoped search (`findAllActiveListingsByShop`) ranks by
+ * relevance across title/tags/materials/description, not a literal title
+ * match — searching "miami" can surface listings that never say "miami"
+ * anywhere in the title. So title search is done ourselves, client-side,
+ * over this full list, rather than trusting Etsy's search endpoint.
  */
-export async function searchShopListings(
-  options: SearchShopListingsOptions,
+export async function fetchAllShopListings(
+  options: FetchAllShopListingsOptions = {},
 ): Promise<ShopListingsPage> {
-  const keywords = options.keywords.trim();
-  const limit = Math.min(Math.max(Math.trunc(options.limit ?? 24), 1), 100);
-  const offset = Math.max(Math.trunc(options.offset ?? 0), 0);
+  const state = options.state ?? "active";
   const shopId = await getShopId();
 
-  if (!keywords) return fetchShopListings({ state: "active", limit, offset });
+  const fetchPage = async (offset: number): Promise<{ count: number; listings: EtsyListing[] }> => {
+    const query = new URLSearchParams({
+      state,
+      limit: String(MAX_PAGE),
+      offset: String(offset),
+      sort_on: "created",
+      sort_order: "desc",
+      includes: "Images",
+    });
+    const data = await etsyGetJson<EtsyListingsResponse>(
+      `/shops/${shopId}/listings?${query.toString()}`,
+    );
+    return { count: data.count ?? 0, listings: (data.results ?? []).map(mapListing) };
+  };
 
-  const searchQuery = new URLSearchParams({
-    keywords,
-    limit: String(limit),
-    offset: String(offset),
-    sort_on: "score",
-  });
-  const found = await etsyGetJson<EtsyListingIdsResponse>(
-    `/shops/${shopId}/listings/active?${searchQuery.toString()}`,
+  const first = await fetchPage(0);
+  const total = Math.min(first.count, FETCH_ALL_SAFETY_CAP);
+  const pages = new Map<number, EtsyListing[]>([[0, first.listings]]);
+
+  const remainingOffsets: number[] = [];
+  for (let offset = MAX_PAGE; offset < total; offset += MAX_PAGE) remainingOffsets.push(offset);
+
+  let cursor = 0;
+  async function worker(): Promise<void> {
+    while (cursor < remainingOffsets.length) {
+      const offset = remainingOffsets[cursor++];
+      pages.set(offset, (await fetchPage(offset)).listings);
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(FETCH_ALL_CONCURRENCY, remainingOffsets.length) }, worker),
   );
-  const ids = (found.results ?? []).map((r) => r.listing_id);
-  if (!ids.length) return { shopId, count: found.count ?? 0, limit, offset, listings: [] };
 
-  const idsQuery = new URLSearchParams({ includes: "Images" });
-  for (const id of ids) idsQuery.append("listing_ids", String(id));
-  const withImages = await etsyGetJson<EtsyListingsResponse>(
-    `/listings/batch?${idsQuery.toString()}`,
-  );
+  // pages resolve out of order under concurrency — reassemble by offset
+  const listings = [...pages.keys()]
+    .sort((a, b) => a - b)
+    .flatMap((offset) => pages.get(offset)!);
 
-  // the batch endpoint doesn't promise to preserve order — resort by relevance
-  const byId = new Map((withImages.results ?? []).map((r) => [r.listing_id, r]));
-  const ordered = ids
-    .map((id) => byId.get(id))
-    .filter((r): r is EtsyRawListing => r !== undefined);
-
-  return { shopId, count: found.count ?? 0, limit, offset, listings: ordered.map(mapListing) };
+  return { shopId, count: first.count, limit: listings.length, offset: 0, listings };
 }

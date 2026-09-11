@@ -2,8 +2,8 @@ import { type NextRequest, NextResponse } from "next/server";
 import {
   ETSY_LISTING_STATES,
   EtsyApiError,
+  fetchAllShopListings,
   fetchShopListings,
-  searchShopListings,
   type EtsyListingState,
 } from "@/lib/etsy/listings";
 
@@ -21,24 +21,20 @@ function parseInt10(value: string | null, fallback: number): number {
 }
 
 /**
- * List (or keyword-search) the connected user's shop listings.
- * `GET /api/etsy/listings?state=active&limit=24&offset=0`
- * `GET /api/etsy/listings?keywords=tumbler&limit=24&offset=0` — searches only
- * ACTIVE listings (Etsy's shop-scoped search has no state filter), ignoring
- * `state`. Good for a shop with thousands of listings, where paging through
- * everything to find one by title isn't practical.
+ * List the connected user's shop listings.
+ * `GET /api/etsy/listings?state=active&limit=24&offset=0` — one page.
+ * `GET /api/etsy/listings?state=active&all=true` — every listing for that
+ * state, paging until Etsy's count is exhausted (`limit`/`offset` ignored).
+ * Used for exact client-side title filtering — see `fetchAllShopListings`
+ * for why Etsy's own shop search isn't used for that.
  */
 export async function GET(request: NextRequest) {
   const params = request.nextUrl.searchParams;
-  const keywords = params.get("keywords")?.trim();
+  const all = params.get("all") === "true" || params.get("all") === "1";
 
   try {
-    const page = keywords
-      ? await searchShopListings({
-          keywords,
-          limit: parseInt10(params.get("limit"), 24),
-          offset: parseInt10(params.get("offset"), 0),
-        })
+    const page = all
+      ? await fetchAllShopListings({ state: parseState(params.get("state")) })
       : await fetchShopListings({
           state: parseState(params.get("state")),
           limit: parseInt10(params.get("limit"), 24),
