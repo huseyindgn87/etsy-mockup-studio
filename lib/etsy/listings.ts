@@ -199,3 +199,62 @@ export async function fetchShopListings(
     listings: (data.results ?? []).map(mapListing),
   };
 }
+
+export interface SearchShopListingsOptions {
+  keywords: string;
+  limit?: number;
+  offset?: number;
+}
+
+interface EtsyListingIdsResponse {
+  count: number;
+  results: { listing_id: number }[];
+}
+
+/**
+ * Keyword-search the connected user's ACTIVE listings by title/tags/etc.
+ * (`findAllActiveListingsByShop` — the only shop-scoped search Etsy exposes;
+ * `getListingsByShop` has no keyword filter). A shop can have thousands of
+ * listings, so this is the only viable way to find one without paging
+ * through everything client-side.
+ *
+ * Two calls: the search endpoint returns matching ids but no images (it
+ * doesn't support `includes`); a batch lookup then fetches images for just
+ * that page of ids. Relevance order from the search is preserved.
+ */
+export async function searchShopListings(
+  options: SearchShopListingsOptions,
+): Promise<ShopListingsPage> {
+  const keywords = options.keywords.trim();
+  const limit = Math.min(Math.max(Math.trunc(options.limit ?? 24), 1), 100);
+  const offset = Math.max(Math.trunc(options.offset ?? 0), 0);
+  const shopId = await getShopId();
+
+  if (!keywords) return fetchShopListings({ state: "active", limit, offset });
+
+  const searchQuery = new URLSearchParams({
+    keywords,
+    limit: String(limit),
+    offset: String(offset),
+    sort_on: "score",
+  });
+  const found = await etsyGetJson<EtsyListingIdsResponse>(
+    `/shops/${shopId}/listings/active?${searchQuery.toString()}`,
+  );
+  const ids = (found.results ?? []).map((r) => r.listing_id);
+  if (!ids.length) return { shopId, count: found.count ?? 0, limit, offset, listings: [] };
+
+  const idsQuery = new URLSearchParams({ includes: "Images" });
+  for (const id of ids) idsQuery.append("listing_ids", String(id));
+  const withImages = await etsyGetJson<EtsyListingsResponse>(
+    `/listings/batch?${idsQuery.toString()}`,
+  );
+
+  // the batch endpoint doesn't promise to preserve order — resort by relevance
+  const byId = new Map((withImages.results ?? []).map((r) => [r.listing_id, r]));
+  const ordered = ids
+    .map((id) => byId.get(id))
+    .filter((r): r is EtsyRawListing => r !== undefined);
+
+  return { shopId, count: found.count ?? 0, limit, offset, listings: ordered.map(mapListing) };
+}

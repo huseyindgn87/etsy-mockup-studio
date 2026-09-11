@@ -97,7 +97,8 @@ export default function MockupsPage() {
   const [error, setError] = useState<string | null>(null);
 
   const [listings, setListings] = useState<ListingOption[]>([]);
-  const [publishId, setPublishId] = useState<number | null>(null);
+  const [selectedListing, setSelectedListing] = useState<ListingOption | null>(null);
+  const publishId = selectedListing?.listingId ?? null;
   const [publishMode, setPublishMode] = useState<PublishMode>("copy");
   const [overwriteExisting, setOverwriteExisting] = useState(false);
   const [newTitle, setNewTitle] = useState("");
@@ -118,14 +119,13 @@ export default function MockupsPage() {
           } | null,
         ) => {
           if (!body?.listings) return;
-          setListings(
-            body.listings.map((l) => ({
-              listingId: l.listingId,
-              title: l.title,
-              thumbnailUrl: l.thumbnailUrl,
-            })),
-          );
-          setPublishId((cur) => cur ?? body.listings?.[0]?.listingId ?? null);
+          const mapped = body.listings.map((l) => ({
+            listingId: l.listingId,
+            title: l.title,
+            thumbnailUrl: l.thumbnailUrl,
+          }));
+          setListings(mapped);
+          setSelectedListing((cur) => cur ?? mapped[0] ?? null);
         },
       )
       .catch(() => {
@@ -526,9 +526,9 @@ export default function MockupsPage() {
                 {publishMode === "existing" ? "Hedef listing" : "Kaynak listing"}
               </label>
               <ListingPicker
-                listings={listings}
-                value={publishId}
-                onChange={setPublishId}
+                initialListings={listings}
+                value={selectedListing}
+                onChange={setSelectedListing}
                 disabled={!!busy}
               />
 
@@ -907,23 +907,35 @@ function ListingThumb({ url, size }: { url: string | null; size: number }) {
   );
 }
 
+/** Debounce delay before a typed query triggers a server-side title search. */
+const LISTING_SEARCH_DEBOUNCE_MS = 300;
+
 /**
  * Visual listing picker: a closed button showing the current pick, opening a
  * dropdown where each row is a large thumbnail + the first 40 characters of
  * the title (a plain `<select>` can't render images in its options).
+ *
+ * A shop can have thousands of listings, so the dropdown only ever shows
+ * `initialListings` (a small recent-first page) until the user types — then
+ * it debounces and asks the server to keyword-search the whole shop
+ * (`GET /api/etsy/listings?keywords=...`), so filtering isn't limited to
+ * whatever page happened to load first.
  */
 function ListingPicker({
-  listings,
+  initialListings,
   value,
   onChange,
   disabled,
 }: {
-  listings: ListingOption[];
-  value: number | null;
-  onChange: (listingId: number) => void;
+  initialListings: ListingOption[];
+  value: ListingOption | null;
+  onChange: (listing: ListingOption) => void;
   disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<ListingOption[] | null>(null);
+  const [searching, setSearching] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -935,7 +947,50 @@ function ListingPicker({
     return () => document.removeEventListener("pointerdown", onOutside);
   }, [open]);
 
-  const selected = listings.find((l) => l.listingId === value) ?? null;
+  useEffect(() => {
+    const q = query.trim();
+    if (!q) {
+      // Clearing the box should snap straight back to `initialListings`, not
+      // wait out a debounce — an intentional synchronous reset.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setSearchResults(null);
+      setSearching(false);
+      return;
+    }
+    setSearching(true);
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      fetch(`/api/etsy/listings?keywords=${encodeURIComponent(q)}&limit=30`, {
+        signal: controller.signal,
+      })
+        .then((res) => (res.ok ? res.json() : null))
+        .then(
+          (
+            body: {
+              listings?: { listingId: number; title: string; thumbnailUrl: string | null }[];
+            } | null,
+          ) => {
+            setSearchResults(
+              (body?.listings ?? []).map((l) => ({
+                listingId: l.listingId,
+                title: l.title,
+                thumbnailUrl: l.thumbnailUrl,
+              })),
+            );
+          },
+        )
+        .catch(() => {
+          if (!controller.signal.aborted) setSearchResults([]);
+        })
+        .finally(() => setSearching(false));
+    }, LISTING_SEARCH_DEBOUNCE_MS);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [query]);
+
+  const rows = searchResults ?? initialListings;
 
   return (
     <div ref={rootRef} className="relative">
@@ -945,33 +1000,55 @@ function ListingPicker({
         onClick={() => setOpen((o) => !o)}
         className="flex h-11 items-center gap-2 rounded-lg border border-black/10 bg-white pr-3 pl-1.5 text-left text-sm disabled:opacity-50 dark:border-white/15 dark:bg-zinc-950"
       >
-        <ListingThumb url={selected?.thumbnailUrl ?? null} size={32} />
+        <ListingThumb url={value?.thumbnailUrl ?? null} size={32} />
         <span className="max-w-[200px] truncate">
-          {selected ? shortTitle(selected.title) : "Listing seç"}
+          {value ? shortTitle(value.title) : "Listing seç"}
         </span>
         <span className="text-zinc-400">▾</span>
       </button>
 
       {open && (
-        <ul className="absolute z-10 mt-1 max-h-80 w-80 overflow-y-auto rounded-lg border border-black/10 bg-white py-1 shadow-lg dark:border-white/15 dark:bg-zinc-950">
-          {listings.map((l) => (
-            <li key={l.listingId}>
-              <button
-                type="button"
-                onClick={() => {
-                  onChange(l.listingId);
-                  setOpen(false);
-                }}
-                className={`flex w-full items-center gap-3 px-2 py-2 text-left text-sm hover:bg-black/[.04] dark:hover:bg-white/[.06] ${
-                  l.listingId === value ? "bg-[#f56400]/10" : ""
-                }`}
-              >
-                <ListingThumb url={l.thumbnailUrl} size={48} />
-                <span className="flex-1 truncate">{shortTitle(l.title)}</span>
-              </button>
-            </li>
-          ))}
-        </ul>
+        <div className="absolute z-10 mt-1 w-80 overflow-hidden rounded-lg border border-black/10 bg-white shadow-lg dark:border-white/15 dark:bg-zinc-950">
+          <div className="border-b border-black/10 p-2 dark:border-white/15">
+            <input
+              type="text"
+              autoFocus
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Başlığa göre ara…"
+              className="h-8 w-full rounded-md border border-black/10 bg-white px-2 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-900"
+            />
+          </div>
+          <ul className="max-h-72 overflow-y-auto py-1">
+            {searching && (
+              <li className="px-2 py-3 text-center text-xs text-zinc-500">Aranıyor…</li>
+            )}
+            {!searching && rows.length === 0 && (
+              <li className="px-2 py-3 text-center text-xs text-zinc-500">
+                {query.trim() ? "Eşleşen listing yok." : "Listing yok."}
+              </li>
+            )}
+            {!searching &&
+              rows.map((l) => (
+                <li key={l.listingId}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onChange(l);
+                      setOpen(false);
+                      setQuery("");
+                    }}
+                    className={`flex w-full items-center gap-3 px-2 py-2 text-left text-sm hover:bg-black/[.04] dark:hover:bg-white/[.06] ${
+                      l.listingId === value?.listingId ? "bg-[#f56400]/10" : ""
+                    }`}
+                  >
+                    <ListingThumb url={l.thumbnailUrl} size={48} />
+                    <span className="flex-1 truncate">{shortTitle(l.title)}</span>
+                  </button>
+                </li>
+              ))}
+          </ul>
+        </div>
       )}
     </div>
   );
