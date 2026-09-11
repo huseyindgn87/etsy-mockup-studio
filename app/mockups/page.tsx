@@ -6,6 +6,7 @@ import { blobToRaster, dataUrlToBlob } from "@/lib/mockup/client";
 import { quadList } from "@/lib/mockup/geometry";
 import type { Calibration, Overlay, Quad, Raster } from "@/lib/mockup/types";
 import { normalizeBlendMode } from "@/lib/mockup/validate";
+import ListingForm, { EMPTY_LISTING_FORM, type ListingFormValue } from "./ListingForm";
 import MockupCanvas from "./MockupCanvas";
 
 /** Longest edge of the browser-side preview rasters (the server renders full-res). */
@@ -102,7 +103,7 @@ export default function MockupsPage() {
   const publishId = selectedListing?.listingId ?? null;
   const [publishMode, setPublishMode] = useState<PublishMode>("copy");
   const [overwriteExisting, setOverwriteExisting] = useState(false);
-  const [newTitle, setNewTitle] = useState("");
+  const [listingForm, setListingForm] = useState<ListingFormValue>(EMPTY_LISTING_FORM);
   const [publishResult, setPublishResult] = useState<PublishResult | null>(null);
   const [cornerMode, setCornerMode] = useState<"free" | "ratio">("free");
 
@@ -401,8 +402,8 @@ export default function MockupsPage() {
 
   const publishToEtsy = useCallback(async () => {
     if (!included.length || !designs.length || publishId == null) return;
-    if (publishMode === "new" && !newTitle.trim()) {
-      setError("Yeni taslak için bir başlık gir.");
+    if (publishMode === "new" && !listingForm.title.trim()) {
+      setError("Yeni taslak için bir başlık gir (Listing bilgileri formu).");
       return;
     }
     setError(null);
@@ -418,7 +419,27 @@ export default function MockupsPage() {
         listingId: publishId,
       };
       if (publishMode === "existing") publishTo.overwrite = overwriteExisting;
-      if (publishMode === "new") publishTo.newListing = { title: newTitle.trim() };
+      if (publishMode === "new") {
+        const price = Number.parseFloat(listingForm.price);
+        const quantity = Number.parseInt(listingForm.quantity, 10);
+        publishTo.newListing = {
+          title: listingForm.title.trim(),
+          description: listingForm.description.trim(),
+          tags: listingForm.tags,
+          taxonomyId: listingForm.taxonomyId ?? undefined,
+          shopSectionId: listingForm.shopSectionId ?? undefined,
+          properties: Object.entries(listingForm.properties).map(([id, p]) => ({
+            propertyId: Number(id),
+            name: p.name,
+            valueIds: p.valueIds,
+            values: p.values,
+            scaleId: p.scaleId ?? undefined,
+          })),
+          price: Number.isFinite(price) && price > 0 ? price : undefined,
+          quantity: Number.isInteger(quantity) && quantity > 0 ? quantity : undefined,
+          sku: listingForm.sku.trim() || undefined,
+        };
+      }
 
       const res = await fetch("/api/mockups/render", {
         method: "POST",
@@ -454,7 +475,7 @@ export default function MockupsPage() {
     publishId,
     publishMode,
     overwriteExisting,
-    newTitle,
+    listingForm,
     publishCount,
     buildBatchForm,
   ]);
@@ -538,14 +559,10 @@ export default function MockupsPage() {
               />
 
               {publishMode === "new" && (
-                <input
-                  type="text"
-                  value={newTitle}
-                  onChange={(e) => setNewTitle(e.target.value)}
-                  placeholder="Yeni taslak başlığı"
-                  disabled={!!busy}
-                  className="h-9 min-w-[200px] flex-1 rounded-lg border border-black/10 bg-white px-2 text-sm dark:border-white/15 dark:bg-zinc-950"
-                />
+                <span className="text-xs text-zinc-500">
+                  Başlık, açıklama ve diğer alanlar aşağıdaki &quot;Listing bilgileri&quot;
+                  formundan gelir.
+                </span>
               )}
 
               {publishMode === "existing" && (
@@ -819,6 +836,10 @@ export default function MockupsPage() {
               <p className="text-sm text-zinc-500">Ayarlar için bir mockup seç.</p>
             )}
           </div>
+        </div>
+
+        <div className="mt-6">
+          <ListingForm value={listingForm} onChange={setListingForm} />
         </div>
 
         <p className="mt-8 text-sm text-zinc-500 dark:text-zinc-400">

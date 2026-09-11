@@ -1,0 +1,135 @@
+import { beforeEach, describe, expect, test, vi } from "vitest";
+
+const etsyFetch = vi.fn<(path: string) => Promise<Response>>();
+vi.mock("@/lib/etsy/auth", () => ({ etsyFetch: (path: string) => etsyFetch(path) }));
+
+import {
+  getSellerTaxonomyTree,
+  getShopSectionsList,
+  getTaxonomyProperties,
+} from "@/lib/etsy/taxonomy";
+
+const json = (body: unknown, ok = true, status = 200): Response =>
+  ({ ok, status, json: async () => body }) as Response;
+
+beforeEach(() => {
+  etsyFetch.mockReset();
+});
+
+describe("getSellerTaxonomyTree", () => {
+  test("maps the nested tree (snake_case -> camelCase) and caches it", async () => {
+    etsyFetch.mockResolvedValue(
+      json({
+        results: [
+          {
+            id: 1,
+            level: 0,
+            name: "Clothing",
+            parent_id: null,
+            children: [{ id: 2, level: 1, name: "Shoes", parent_id: 1, children: [] }],
+          },
+        ],
+      }),
+    );
+
+    const tree = await getSellerTaxonomyTree();
+    expect(tree).toEqual([
+      {
+        id: 1,
+        level: 0,
+        name: "Clothing",
+        parentId: null,
+        children: [{ id: 2, level: 1, name: "Shoes", parentId: 1, children: [] }],
+      },
+    ]);
+
+    await getSellerTaxonomyTree();
+    expect(etsyFetch).toHaveBeenCalledTimes(1); // second call served from cache
+  });
+});
+
+describe("getTaxonomyProperties", () => {
+  test("keeps only attribute properties with selectable values, maps fields, and caches per id", async () => {
+    etsyFetch.mockResolvedValue(
+      json({
+        results: [
+          {
+            property_id: 200,
+            name: "primary_color",
+            display_name: "Primary color",
+            is_required: false,
+            supports_attributes: true,
+            is_multivalued: true,
+            max_values_allowed: 2,
+            possible_values: [
+              { value_id: 1, name: "Black" },
+              { value_id: 2, name: "Red" },
+            ],
+          },
+          // supports_variations only (no supports_attributes) -> excluded
+          {
+            property_id: 300,
+            name: "size",
+            display_name: "Size",
+            supports_attributes: false,
+            supports_variations: true,
+            possible_values: [{ value_id: 9, name: "M" }],
+          },
+          // no possible_values -> excluded (nothing to select)
+          {
+            property_id: 400,
+            name: "custom_message",
+            display_name: "Custom message",
+            supports_attributes: true,
+            possible_values: [],
+          },
+        ],
+      }),
+    );
+
+    const props = await getTaxonomyProperties(1429);
+    expect(props).toEqual([
+      {
+        propertyId: 200,
+        name: "primary_color",
+        displayName: "Primary color",
+        isRequired: false,
+        isMultivalued: true,
+        maxValuesAllowed: 2,
+        possibleValues: [
+          { valueId: 1, name: "Black" },
+          { valueId: 2, name: "Red" },
+        ],
+      },
+    ]);
+
+    await getTaxonomyProperties(1429);
+    expect(etsyFetch).toHaveBeenCalledTimes(1);
+
+    await getTaxonomyProperties(9999);
+    expect(etsyFetch).toHaveBeenCalledTimes(2); // a different category isn't cached together
+  });
+});
+
+describe("getShopSectionsList", () => {
+  test("sorts by rank and maps fields", async () => {
+    etsyFetch.mockImplementation(async (path: string) => {
+      if (path.includes("/users/me")) return json({ user_id: 1, shop_id: 42 });
+      if (path.includes("/shops/42/sections")) {
+        return json({
+          results: [
+            { shop_section_id: 2, title: "B", rank: 2 },
+            { shop_section_id: 1, title: "A", rank: 1 },
+          ],
+        });
+      }
+      throw new Error(`unexpected path: ${path}`);
+    });
+
+    const sections = await getShopSectionsList();
+    expect(sections).toEqual([
+      { shopSectionId: 1, title: "A" },
+      { shopSectionId: 2, title: "B" },
+    ]);
+  });
+});

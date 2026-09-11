@@ -47,6 +47,10 @@ vi.mock("@/lib/etsy/listing-images", () => ({
 }));
 
 const createCalls: unknown[] = [];
+const propertyCalls: unknown[] = [];
+const skuCalls: unknown[] = [];
+let propertyShouldFail = false;
+let skuShouldFail = false;
 vi.mock("@/lib/etsy/listing-create", () => ({
   getListingStructure: vi.fn(async () => ({
     title: "Source tee",
@@ -65,6 +69,14 @@ vi.mock("@/lib/etsy/listing-create", () => ({
   createDraftListing: vi.fn(async (_shop: number, input: unknown) => {
     createCalls.push(input);
     return 999001;
+  }),
+  setListingProperty: vi.fn(async (_shop: number, _listing: number, input: unknown) => {
+    propertyCalls.push(input);
+    if (propertyShouldFail) throw new Error("Etsy rejected the property");
+  }),
+  setListingInventorySku: vi.fn(async (_listing: number, input: unknown) => {
+    skuCalls.push(input);
+    if (skuShouldFail) throw new Error("Etsy rejected the SKU");
   }),
 }));
 
@@ -331,6 +343,116 @@ describe("POST /api/mockups/render", () => {
       tags: [],
       materials: [],
     });
+  }, 30_000);
+
+  test("mode:new sends a chosen category, deduped/capped tags, section and properties, then sets the SKU", async () => {
+    uploadCalls.length = 0;
+    createCalls.length = 0;
+    propertyCalls.length = 0;
+    skuCalls.length = 0;
+    propertyShouldFail = false;
+    skuShouldFail = false;
+    const mock = await png(80, 80, [0, 0, 0]);
+
+    const tooManyTags = Array.from({ length: 20 }, (_, i) => `tag${i}`);
+    tooManyTags[5] = "Duplicate";
+    tooManyTags[6] = "duplicate"; // same tag, different case — should collapse to one
+    tooManyTags[7] = "a".repeat(40); // longer than 20 chars — should be truncated
+
+    const res = await POST(
+      form(
+        {
+          publishTo: {
+            mode: "new",
+            listingId: 500,
+            newListing: {
+              title: "Miami skyline tee",
+              description: "A tee",
+              tags: tooManyTags,
+              taxonomyId: 777,
+              shopSectionId: 88,
+              price: 19.99,
+              quantity: 5,
+              sku: "  MIA-001  ",
+              properties: [
+                { propertyId: 200, name: "Primary color", valueIds: [1], values: ["Black"] },
+                { propertyId: 201, name: "Occasion", valueIds: [2, 3], values: ["Birthday", "Wedding"] },
+                // malformed: mismatched array lengths — must be dropped, not sent
+                { propertyId: 202, name: "Bad", valueIds: [1, 2], values: ["only one"] },
+              ],
+            },
+          },
+          mockups: [{ name: "m", calibration: {} }],
+          designs: [],
+          jobs: [{ mockup: 0 }],
+        },
+        [{ field: "mockup", buf: mock, name: "m.png" }],
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { createdDraft: boolean; failed: unknown[] };
+    expect(body.createdDraft).toBe(true);
+    expect(body.failed).toEqual([]);
+
+    expect(createCalls[0]).toMatchObject({ taxonomyId: 777, shopSectionId: 88 });
+    const sentTags = (createCalls[0] as { tags: string[] }).tags;
+    expect(sentTags).toHaveLength(13); // capped
+    expect(sentTags.filter((t) => t.toLowerCase() === "duplicate")).toHaveLength(1);
+    expect(sentTags.every((t) => t.length <= 20)).toBe(true);
+
+    expect(propertyCalls).toEqual([
+      { propertyId: 200, name: "Primary color", valueIds: [1], values: ["Black"], scaleId: null },
+      {
+        propertyId: 201,
+        name: "Occasion",
+        valueIds: [2, 3],
+        values: ["Birthday", "Wedding"],
+        scaleId: null,
+      },
+    ]); // the mismatched-length entry never reached setListingProperty
+
+    expect(skuCalls).toEqual([{ sku: "MIA-001", price: 19.99, quantity: 5 }]);
+  }, 30_000);
+
+  test("mode:new reports property/SKU failures without failing the whole publish", async () => {
+    uploadCalls.length = 0;
+    propertyShouldFail = true;
+    skuShouldFail = true;
+    const mock = await png(60, 60, [0, 0, 0]);
+
+    const res = await POST(
+      form(
+        {
+          publishTo: {
+            mode: "new",
+            listingId: 500,
+            newListing: {
+              title: "Retry-safe draft",
+              sku: "X-1",
+              properties: [{ propertyId: 1, name: "Primary color", valueIds: [1], values: ["Red"] }],
+            },
+          },
+          mockups: [{ name: "m", calibration: {} }],
+          designs: [],
+          jobs: [{ mockup: 0 }],
+        },
+        [{ field: "mockup", buf: mock, name: "m.png" }],
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      createdDraft: boolean;
+      uploaded: unknown[];
+      failed: { name: string; error: string }[];
+    };
+    expect(body.createdDraft).toBe(true);
+    expect(body.uploaded).toHaveLength(1); // image upload still went through
+    expect(body.failed.map((f) => f.name).sort()).toEqual(["Primary color", "SKU"]);
+
+    propertyShouldFail = false;
+    skuShouldFail = false;
   }, 30_000);
 
   test("publishTo rejects a bad listingId", async () => {

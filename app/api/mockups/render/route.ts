@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
 import { getEtsySession } from "@/lib/etsy/auth";
-import { createDraftListing, getListingStructure } from "@/lib/etsy/listing-create";
+import {
+  createDraftListing,
+  getListingStructure,
+  setListingInventorySku,
+  setListingProperty,
+} from "@/lib/etsy/listing-create";
 import { uploadListingImage } from "@/lib/etsy/listing-images";
 import { EtsyApiError, getShopId } from "@/lib/etsy/listings";
 import { getRenderPool } from "@/lib/mockup/render-pool";
@@ -65,8 +70,18 @@ interface PublishSpec {
   newListing?: {
     title?: string;
     description?: string;
+    tags?: string[];
+    taxonomyId?: number;
+    shopSectionId?: number | null;
+    properties?: {
+      propertyId: number;
+      valueIds: number[];
+      values: string[];
+      scaleId?: number | null;
+    }[];
     price?: number;
     quantity?: number;
+    sku?: string;
   };
 }
 interface RenderPayload {
@@ -95,6 +110,65 @@ function sanitize(s: string): string {
 
 const isIndex = (v: unknown, count: number): v is number =>
   typeof v === "number" && Number.isInteger(v) && v >= 0 && v < count;
+
+/** Etsy's own tag rules: at most 13 tags, each at most 20 characters. */
+function sanitizeTags(tags: unknown): string[] {
+  if (!Array.isArray(tags)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const t of tags) {
+    if (typeof t !== "string") continue;
+    const trimmed = t.trim().slice(0, 20);
+    const key = trimmed.toLowerCase();
+    if (!trimmed || seen.has(key)) continue;
+    seen.add(key);
+    out.push(trimmed);
+    if (out.length >= 13) break;
+  }
+  return out;
+}
+
+interface PropertyEntry {
+  propertyId: number;
+  name: string;
+  valueIds: number[];
+  values: string[];
+  scaleId?: number | null;
+}
+
+/** Drop malformed property entries rather than fail the whole publish. */
+function sanitizeProperties(raw: unknown): PropertyEntry[] {
+  if (!Array.isArray(raw)) return [];
+  const out: PropertyEntry[] = [];
+  for (const p of raw) {
+    if (!p || typeof p !== "object") continue;
+    const propertyId = (p as { propertyId?: unknown }).propertyId;
+    const name = (p as { name?: unknown }).name;
+    const valueIds = (p as { valueIds?: unknown }).valueIds;
+    const values = (p as { values?: unknown }).values;
+    const scaleId = (p as { scaleId?: unknown }).scaleId;
+    if (
+      !Number.isInteger(propertyId) ||
+      (propertyId as number) <= 0 ||
+      !Array.isArray(valueIds) ||
+      !Array.isArray(values) ||
+      valueIds.length === 0 ||
+      valueIds.length !== values.length ||
+      !valueIds.every((v) => Number.isInteger(v) && v > 0) ||
+      !values.every((v) => typeof v === "string")
+    ) {
+      continue;
+    }
+    out.push({
+      propertyId: propertyId as number,
+      name: typeof name === "string" && name ? name : `özellik #${propertyId as number}`,
+      valueIds: valueIds as number[],
+      values: values as string[],
+      scaleId: typeof scaleId === "number" && scaleId > 0 ? scaleId : null,
+    });
+  }
+  return out;
+}
 
 /**
  * Batch-render every job and stream the results back as a ZIP.
@@ -316,34 +390,73 @@ export async function POST(request: Request) {
     let shopId: number;
     let targetListingId = publish.listingId;
     let createdDraft = false;
+    const failed: { name: string; error: string }[] = [];
+
     try {
       shopId = await getShopId();
       if (mode !== "existing") {
         const src = await getListingStructure(publish.listingId);
         const nl = publish.newListing ?? {};
+        const quantity =
+          mode === "new" && Number.isInteger(nl.quantity) && (nl.quantity as number) > 0
+            ? (nl.quantity as number)
+            : src.quantity;
+        const price =
+          mode === "new" && typeof nl.price === "number" && nl.price > 0 ? nl.price : src.price;
+        const taxonomyId =
+          mode === "new" && Number.isInteger(nl.taxonomyId) && (nl.taxonomyId as number) > 0
+            ? (nl.taxonomyId as number)
+            : src.taxonomyId;
+
         targetListingId = await createDraftListing(shopId, {
           title:
             mode === "copy"
               ? publish.copyTitle?.trim() || `${src.title} (kopya)`
               : (nl.title as string).trim(),
           description: mode === "copy" ? src.description : nl.description || (nl.title as string),
-          quantity:
-            mode === "new" && Number.isInteger(nl.quantity) && (nl.quantity as number) > 0
-              ? (nl.quantity as number)
-              : src.quantity,
-          price:
-            mode === "new" && typeof nl.price === "number" && nl.price > 0
-              ? nl.price
-              : src.price,
+          quantity,
+          price,
           whoMade: src.whoMade,
           whenMade: src.whenMade,
-          taxonomyId: src.taxonomyId,
+          taxonomyId,
           shippingProfileId: src.shippingProfileId,
           returnPolicyId: src.returnPolicyId,
-          tags: mode === "copy" ? src.tags : [],
+          shopSectionId:
+            mode === "new" && typeof nl.shopSectionId === "number" && nl.shopSectionId > 0
+              ? nl.shopSectionId
+              : null,
+          tags: mode === "copy" ? src.tags : mode === "new" ? sanitizeTags(nl.tags) : [],
           materials: mode === "copy" ? src.materials : [],
         });
         createdDraft = true;
+
+        // Category-specific properties and SKU aren't part of createDraftListing —
+        // Etsy sets them with separate calls once the listing exists. Failures
+        // here don't block the image upload that follows; they're reported
+        // alongside any upload failures instead.
+        if (mode === "new") {
+          for (const p of sanitizeProperties(nl.properties)) {
+            try {
+              await setListingProperty(shopId, targetListingId, p);
+            } catch (err) {
+              failed.push({
+                name: p.name,
+                error: err instanceof Error ? err.message : "kaydedilemedi",
+              });
+            }
+          }
+          const sku = typeof nl.sku === "string" ? nl.sku.trim() : "";
+          if (sku) {
+            try {
+              await setListingInventorySku(targetListingId, { sku, price, quantity });
+            } catch (err) {
+              failed.push({
+                name: "SKU",
+                error: err instanceof Error ? err.message : "kaydedilemedi",
+              });
+            }
+          }
+        }
       }
     } catch (err) {
       const status = err instanceof EtsyApiError ? err.status : 502;
@@ -363,7 +476,6 @@ export async function POST(request: Request) {
       listingImageId: number;
       url: string | null;
     }[] = [];
-    const failed: { name: string; error: string }[] = [];
 
     for (let i = 0; i < capped.length; i++) {
       const j = capped[i];

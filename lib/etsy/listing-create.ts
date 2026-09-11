@@ -81,6 +81,7 @@ export interface DraftListingInput {
   taxonomyId: number;
   shippingProfileId?: number | null;
   returnPolicyId?: number | null;
+  shopSectionId?: number | null;
   tags?: string[];
   materials?: string[];
 }
@@ -105,6 +106,7 @@ export async function createDraftListing(
     form.set("shipping_profile_id", String(input.shippingProfileId));
   if (input.returnPolicyId)
     form.set("return_policy_id", String(input.returnPolicyId));
+  if (input.shopSectionId) form.set("shop_section_id", String(input.shopSectionId));
   for (const t of input.tags ?? []) if (t) form.append("tags", t);
   for (const m of input.materials ?? []) if (m) form.append("materials", m);
 
@@ -120,4 +122,72 @@ export async function createDraftListing(
     throw new EtsyApiError("Etsy did not return an id for the new draft.", 502, body);
   }
   return body.listing_id;
+}
+
+export interface ListingPropertyInput {
+  propertyId: number;
+  valueIds: number[];
+  values: string[];
+  scaleId?: number | null;
+}
+
+/**
+ * Set one category-specific listing property (colour, occasion, sleeve
+ * length, ...). `PUT /shops/{shop}/listings/{listing}/properties/{property}` —
+ * `value_ids` and `values` are parallel arrays (each selected option's id and
+ * its display name together).
+ */
+export async function setListingProperty(
+  shopId: number,
+  listingId: number,
+  input: ListingPropertyInput,
+): Promise<void> {
+  const form = new URLSearchParams();
+  for (const id of input.valueIds) form.append("value_ids", String(id));
+  for (const v of input.values) form.append("values", v);
+  if (input.scaleId) form.set("scale_id", String(input.scaleId));
+
+  await readJson(
+    await etsyFetch(
+      `/shops/${shopId}/listings/${listingId}/properties/${input.propertyId}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: form.toString(),
+      },
+    ),
+  );
+}
+
+/**
+ * Set the SKU (and price/quantity, which the endpoint requires together) on a
+ * listing with no variations — `PUT /listings/{listing}/inventory` replaces
+ * the whole product list, so this sends the single default product Etsy
+ * already created for a no-variation listing, just with the SKU added.
+ */
+export async function setListingInventorySku(
+  listingId: number,
+  input: { sku: string; price: number; quantity: number },
+): Promise<void> {
+  await readJson(
+    await etsyFetch(`/listings/${listingId}/inventory`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        products: [
+          {
+            sku: input.sku.slice(0, 500),
+            property_values: [],
+            offerings: [
+              {
+                price: input.price > 0 ? input.price : 1,
+                quantity: Math.max(1, Math.trunc(input.quantity)),
+                is_enabled: true,
+              },
+            ],
+          },
+        ],
+      }),
+    }),
+  );
 }
