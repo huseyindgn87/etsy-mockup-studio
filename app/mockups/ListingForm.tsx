@@ -369,37 +369,15 @@ export default function ListingForm({
           )}
 
           {!propertiesLoading && properties.length > 0 && (
-            <div className="mt-3 space-y-3">
-              {properties.map((prop) => {
-                const picked = value.properties[prop.propertyId]?.valueIds ?? [];
-                return (
-                  <div key={prop.propertyId}>
-                    <span className="text-xs text-zinc-500">
-                      {prop.displayName}
-                      {prop.isRequired ? " *" : ""}
-                    </span>
-                    <div className="mt-1 flex flex-wrap gap-1.5">
-                      {prop.possibleValues.map((pv) => {
-                        const selected = pv.valueId != null && picked.includes(pv.valueId);
-                        return (
-                          <button
-                            key={pv.valueId ?? pv.name}
-                            type="button"
-                            onClick={() => togglePropertyValue(prop, pv)}
-                            className={`h-7 rounded-full px-2.5 text-xs font-medium ${
-                              selected
-                                ? "bg-black text-white dark:bg-white dark:text-black"
-                                : "border border-black/10 text-zinc-600 dark:border-white/15 dark:text-zinc-400"
-                            }`}
-                          >
-                            {pv.name}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                );
-              })}
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              {properties.map((prop) => (
+                <PropertyPicker
+                  key={prop.propertyId}
+                  property={prop}
+                  selected={value.properties[prop.propertyId]}
+                  onToggle={togglePropertyValue}
+                />
+              ))}
             </div>
           )}
 
@@ -465,6 +443,91 @@ export default function ListingForm({
           </label>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** Rows beyond this are hidden until the search narrows things down. */
+const MAX_PROPERTY_ROWS = 50;
+
+/**
+ * One category property (materials, primary/secondary colour, size,
+ * sustainability, clothing style, occasion, holiday, ...) — every one of them
+ * renders through this exact component so a 3-option property and a
+ * 500+-option one look identical: fixed-height scrolling list, a search box
+ * above it, checkboxes for the options, a summary line below. Single-select
+ * properties still use a checkbox (not a radio) for visual consistency, but
+ * checking one clears any other selection for that property.
+ */
+function PropertyPicker({
+  property,
+  selected,
+  onToggle,
+}: {
+  property: TaxonomyProperty;
+  selected: ListingFormProperty | undefined;
+  onToggle: (
+    property: TaxonomyProperty,
+    value: { valueId: number | null; name: string },
+  ) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const pickedIds = selected?.valueIds ?? [];
+
+  const rows = useMemo(() => {
+    const q = query.trim().toLocaleLowerCase("tr-TR");
+    const all = property.possibleValues;
+    const filtered = q
+      ? all.filter((pv) => pv.name.toLocaleLowerCase("tr-TR").includes(q))
+      : all;
+    return filtered.slice(0, MAX_PROPERTY_ROWS);
+  }, [property.possibleValues, query]);
+
+  return (
+    <div>
+      <span className="text-xs text-zinc-500">
+        {property.displayName}
+        {property.isRequired ? " *" : ""}
+      </span>
+
+      <div className="mt-1 overflow-hidden rounded-lg border border-black/10 dark:border-white/15">
+        <div className="border-b border-black/10 p-1.5 dark:border-white/15">
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Ara…"
+            className="h-7 w-full rounded-md bg-transparent px-1.5 text-xs outline-none"
+          />
+        </div>
+        <div className="h-36 overflow-y-auto p-1">
+          {rows.length === 0 && (
+            <p className="px-2 py-3 text-center text-xs text-zinc-400">Sonuç yok.</p>
+          )}
+          {rows.map((pv) => {
+            const checked = pv.valueId != null && pickedIds.includes(pv.valueId);
+            return (
+              <label
+                key={pv.valueId ?? pv.name}
+                className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-xs hover:bg-black/[.04] dark:hover:bg-white/[.06]"
+              >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() => onToggle(property, pv)}
+                  className="accent-[#f56400]"
+                />
+                {pv.name}
+              </label>
+            );
+          })}
+        </div>
+      </div>
+
+      <p className="mt-1 truncate text-xs text-zinc-600 dark:text-zinc-400">
+        <span className="font-medium">Seçili:</span>{" "}
+        {selected?.values.length ? selected.values.join(", ") : "—"}
+      </p>
     </div>
   );
 }
