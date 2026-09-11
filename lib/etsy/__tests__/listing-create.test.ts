@@ -9,6 +9,8 @@ import {
   createDraftListing,
   setListingInventorySku,
   setListingProperty,
+  updateListingInventory,
+  updateVariationImages,
 } from "@/lib/etsy/listing-create";
 
 const json = (body: unknown, ok = true, status = 200): Response =>
@@ -137,5 +139,94 @@ describe("setListingInventorySku", () => {
     const [, init] = etsyFetch.mock.calls[0];
     const body = JSON.parse(init?.body as string);
     expect(body.products[0].offerings[0].quantity).toBe(1);
+  });
+});
+
+describe("updateListingInventory", () => {
+  test("PUTs one product per combination with property_values and the on-property arrays", async () => {
+    etsyFetch.mockResolvedValue(json({}));
+    await updateListingInventory(555, {
+      products: [
+        {
+          sku: "TEE-BLK-S",
+          propertyValues: [
+            { propertyId: 200, name: "Color", valueIds: [1], values: ["Black"] },
+            { propertyId: 100, name: "Size", valueIds: [9], values: ["S"] },
+          ],
+          price: 19.99,
+          quantity: 3,
+        },
+        {
+          propertyValues: [
+            { propertyId: 200, name: "Color", valueIds: [2], values: ["Red"] },
+            { propertyId: 100, name: "Size", valueIds: [9], values: ["S"] },
+          ],
+          price: 21.99,
+          quantity: 5,
+        },
+      ],
+      priceOnProperty: [200],
+      quantityOnProperty: [200, 100],
+      skuOnProperty: [200, 100],
+    });
+
+    const [path, init] = etsyFetch.mock.calls[0];
+    expect(path).toBe("/listings/555/inventory");
+    expect(init?.method).toBe("PUT");
+    const body = JSON.parse(init?.body as string);
+    expect(body.products).toHaveLength(2);
+    expect(body.products[0]).toEqual({
+      sku: "TEE-BLK-S",
+      property_values: [
+        { property_id: 200, property_name: "Color", value_ids: [1], values: ["Black"] },
+        { property_id: 100, property_name: "Size", value_ids: [9], values: ["S"] },
+      ],
+      offerings: [{ price: 19.99, quantity: 3, is_enabled: true }],
+    });
+    expect(body.products[1].sku).toBeNull(); // sku omitted for this row
+    expect(body.price_on_property).toEqual([200]);
+    expect(body.quantity_on_property).toEqual([200, 100]);
+    expect(body.sku_on_property).toEqual([200, 100]);
+  });
+
+  test("defaults the on-property arrays to empty when not given", async () => {
+    etsyFetch.mockResolvedValue(json({}));
+    await updateListingInventory(555, {
+      products: [
+        {
+          propertyValues: [{ propertyId: 1, name: "Color", valueIds: [1], values: ["Black"] }],
+          price: 10,
+          quantity: 1,
+        },
+      ],
+    });
+    const [, init] = etsyFetch.mock.calls[0];
+    const body = JSON.parse(init?.body as string);
+    expect(body.price_on_property).toEqual([]);
+    expect(body.quantity_on_property).toEqual([]);
+    expect(body.sku_on_property).toEqual([]);
+  });
+});
+
+describe("updateVariationImages", () => {
+  test("POSTs property/value/image triples to the right path", async () => {
+    etsyFetch.mockResolvedValue(json({}));
+    await updateVariationImages(42, 555, [
+      { propertyId: 200, valueId: 1, imageId: 9001 },
+      { propertyId: 200, valueId: 2, imageId: 9002 },
+    ]);
+    const [path, init] = etsyFetch.mock.calls[0];
+    expect(path).toBe("/shops/42/listings/555/variation-images");
+    expect(init?.method).toBe("POST");
+    const body = JSON.parse(init?.body as string);
+    expect(body.variation_images).toEqual([
+      { property_id: 200, value_id: 1, image_id: 9001 },
+      { property_id: 200, value_id: 2, image_id: 9002 },
+    ]);
+  });
+
+  test("does nothing (no request) for an empty list", async () => {
+    await updateVariationImages(42, 555, []);
+    expect(etsyFetch).not.toHaveBeenCalled();
   });
 });

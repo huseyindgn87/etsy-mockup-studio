@@ -191,3 +191,93 @@ export async function setListingInventorySku(
     }),
   );
 }
+
+export interface InventoryProductInput {
+  sku?: string;
+  /** One entry per variation property this product is a combination of. */
+  propertyValues: { propertyId: number; name: string; valueIds: number[]; values: string[] }[];
+  price: number;
+  quantity: number;
+}
+
+export interface UpdateInventoryInput {
+  products: InventoryProductInput[];
+  /** Property ids where price differs between combinations. */
+  priceOnProperty?: number[];
+  /** Property ids where quantity differs between combinations. */
+  quantityOnProperty?: number[];
+  /** Property ids where SKU differs between combinations. */
+  skuOnProperty?: number[];
+}
+
+/**
+ * Replace a listing's full product/variation list — `PUT /listings/{listing}/inventory`.
+ * One `products` entry per property-value combination (Etsy has no separate
+ * "create variations" call; this endpoint always replaces the whole list, be
+ * it the single default product or a full variation grid).
+ */
+export async function updateListingInventory(
+  listingId: number,
+  input: UpdateInventoryInput,
+): Promise<void> {
+  await readJson(
+    await etsyFetch(`/listings/${listingId}/inventory`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        products: input.products.map((p) => ({
+          sku: p.sku ? p.sku.slice(0, 500) : null,
+          property_values: p.propertyValues.map((pv) => ({
+            property_id: pv.propertyId,
+            property_name: pv.name,
+            value_ids: pv.valueIds,
+            values: pv.values,
+          })),
+          offerings: [
+            {
+              price: p.price > 0 ? p.price : 1,
+              quantity: Math.max(0, Math.trunc(p.quantity)),
+              is_enabled: true,
+            },
+          ],
+        })),
+        price_on_property: input.priceOnProperty ?? [],
+        quantity_on_property: input.quantityOnProperty ?? [],
+        sku_on_property: input.skuOnProperty ?? [],
+      }),
+    }),
+  );
+}
+
+export interface VariationImageInput {
+  propertyId: number;
+  valueId: number;
+  /** An already-uploaded listing image id. */
+  imageId: number;
+}
+
+/**
+ * Associate specific listing images with specific variation property values
+ * (e.g. the "Red" value of a Colour variation shows a particular photo) —
+ * `POST /shops/{shop}/listings/{listing}/variation-images`.
+ */
+export async function updateVariationImages(
+  shopId: number,
+  listingId: number,
+  images: VariationImageInput[],
+): Promise<void> {
+  if (images.length === 0) return;
+  await readJson(
+    await etsyFetch(`/shops/${shopId}/listings/${listingId}/variation-images`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        variation_images: images.map((i) => ({
+          property_id: i.propertyId,
+          value_id: i.valueId,
+          image_id: i.imageId,
+        })),
+      }),
+    }),
+  );
+}

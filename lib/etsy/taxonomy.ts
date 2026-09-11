@@ -77,6 +77,10 @@ export interface TaxonomyProperty {
   isRequired: boolean;
   isMultivalued: boolean;
   maxValuesAllowed: number | null;
+  /** Settable as a plain listing attribute (the "Details" section). */
+  supportsAttributes: boolean;
+  /** Usable as an inventory variation (the "Variations" section). */
+  supportsVariations: boolean;
   possibleValues: TaxonomyPropertyValue[];
 }
 
@@ -86,6 +90,7 @@ interface RawTaxonomyProperty {
   display_name: string;
   is_required?: boolean;
   supports_attributes?: boolean;
+  supports_variations?: boolean;
   is_multivalued?: boolean;
   max_values_allowed?: number | null;
   possible_values?: { value_id: number | null; name: string }[];
@@ -94,10 +99,14 @@ interface RawTaxonomyProperty {
 const propertiesCache = new Map<number, { at: number; properties: TaxonomyProperty[] }>();
 
 /**
- * Category-specific listing properties (e.g. primary/secondary colour,
- * occasion, sleeve length) for one taxonomy node — only the ones settable as
- * plain listing attributes (`supports_attributes`), not the ones that only
- * make sense as inventory variations.
+ * Every category-specific listing property for one taxonomy node that has
+ * selectable values (primary/secondary colour, material, size, occasion,
+ * holiday, sleeve length, ...) — free-text properties with no
+ * `possible_values` are dropped since nothing here can offer them as
+ * options. Each property is flagged for which section(s) of the listing
+ * form it belongs in: `supportsAttributes` (Details) and/or
+ * `supportsVariations` (Variations) — most support only one, some support
+ * both.
  */
 export async function getTaxonomyProperties(taxonomyId: number): Promise<TaxonomyProperty[]> {
   const cached = propertiesCache.get(taxonomyId);
@@ -107,7 +116,7 @@ export async function getTaxonomyProperties(taxonomyId: number): Promise<Taxonom
     `/seller-taxonomy/nodes/${taxonomyId}/properties`,
   );
   const properties = (data.results ?? [])
-    .filter((p) => p.supports_attributes && (p.possible_values ?? []).length > 0)
+    .filter((p) => (p.possible_values ?? []).length > 0)
     .map((p) => ({
       propertyId: p.property_id,
       name: p.name,
@@ -115,6 +124,8 @@ export async function getTaxonomyProperties(taxonomyId: number): Promise<Taxonom
       isRequired: !!p.is_required,
       isMultivalued: !!p.is_multivalued,
       maxValuesAllowed: p.max_values_allowed ?? null,
+      supportsAttributes: !!p.supports_attributes,
+      supportsVariations: !!p.supports_variations,
       possibleValues: (p.possible_values ?? []).map((v) => ({
         valueId: v.value_id,
         name: v.name,

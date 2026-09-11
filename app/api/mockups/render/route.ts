@@ -5,6 +5,8 @@ import {
   getListingStructure,
   setListingInventorySku,
   setListingProperty,
+  updateListingInventory,
+  updateVariationImages,
 } from "@/lib/etsy/listing-create";
 import { uploadListingImage } from "@/lib/etsy/listing-images";
 import { EtsyApiError, getShopId } from "@/lib/etsy/listings";
@@ -82,6 +84,20 @@ interface PublishSpec {
     price?: number;
     quantity?: number;
     sku?: string;
+    /** Present -> use the Inventory API's variation grid instead of the single SKU above. */
+    variations?: {
+      priceOnProperty?: number[];
+      quantityOnProperty?: number[];
+      skuOnProperty?: number[];
+      products: {
+        propertyValues: { propertyId: number; name?: string; valueIds: number[]; values: string[] }[];
+        price?: number;
+        quantity?: number;
+        sku?: string;
+      }[];
+      /** Assign an already-rendered job's uploaded image to a specific property value. */
+      imagesByValue?: { propertyId: number; valueId: number; jobIndex: number }[];
+    };
   };
 }
 interface RenderPayload {
@@ -168,6 +184,112 @@ function sanitizeProperties(raw: unknown): PropertyEntry[] {
     });
   }
   return out;
+}
+
+const MAX_VARIATION_PRODUCTS = 100; // Etsy's own grid is far smaller than this; just a sanity cap
+
+interface CleanVariationProduct {
+  propertyValues: { propertyId: number; name: string; valueIds: number[]; values: string[] }[];
+  price?: number;
+  quantity?: number;
+  sku?: string;
+}
+interface CleanVariations {
+  products: CleanVariationProduct[];
+  priceOnProperty: number[];
+  quantityOnProperty: number[];
+  skuOnProperty: number[];
+  imagesByValue: { propertyId: number; valueId: number; jobIndex: number }[];
+}
+
+const positiveIntArray = (v: unknown): number[] =>
+  Array.isArray(v) ? v.filter((x): x is number => Number.isInteger(x) && x > 0) : [];
+
+/**
+ * Validate a variation grid sent by the client. Malformed products / property
+ * entries are dropped individually rather than failing the whole publish —
+ * the client already built this from its own UI state, so a mismatch here
+ * most likely means one row got out of sync, not that the whole grid is junk.
+ */
+function sanitizeVariations(raw: unknown): CleanVariations | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const rawProducts = Array.isArray(r.products) ? r.products.slice(0, MAX_VARIATION_PRODUCTS) : [];
+
+  const products: CleanVariationProduct[] = [];
+  for (const p of rawProducts) {
+    if (!p || typeof p !== "object") continue;
+    const pvRaw = (p as { propertyValues?: unknown }).propertyValues;
+    if (!Array.isArray(pvRaw) || pvRaw.length === 0) continue;
+
+    const propertyValues: CleanVariationProduct["propertyValues"] = [];
+    let ok = true;
+    for (const pv of pvRaw) {
+      if (!pv || typeof pv !== "object") {
+        ok = false;
+        break;
+      }
+      const propertyId = (pv as { propertyId?: unknown }).propertyId;
+      const name = (pv as { name?: unknown }).name;
+      const valueIds = (pv as { valueIds?: unknown }).valueIds;
+      const values = (pv as { values?: unknown }).values;
+      if (
+        !Number.isInteger(propertyId) ||
+        (propertyId as number) <= 0 ||
+        !Array.isArray(valueIds) ||
+        !Array.isArray(values) ||
+        valueIds.length === 0 ||
+        valueIds.length !== values.length ||
+        !valueIds.every((v) => Number.isInteger(v) && v > 0) ||
+        !values.every((v) => typeof v === "string")
+      ) {
+        ok = false;
+        break;
+      }
+      propertyValues.push({
+        propertyId: propertyId as number,
+        name: typeof name === "string" && name ? name : `özellik #${propertyId as number}`,
+        valueIds: valueIds as number[],
+        values: values as string[],
+      });
+    }
+    if (!ok) continue;
+
+    const price = (p as { price?: unknown }).price;
+    const quantity = (p as { quantity?: unknown }).quantity;
+    const sku = (p as { sku?: unknown }).sku;
+    products.push({
+      propertyValues,
+      price: typeof price === "number" && price > 0 ? price : undefined,
+      quantity: typeof quantity === "number" && quantity >= 0 ? Math.trunc(quantity) : undefined,
+      sku: typeof sku === "string" && sku.trim() ? sku.trim() : undefined,
+    });
+  }
+  if (products.length === 0) return null;
+
+  const imagesRaw = Array.isArray(r.imagesByValue) ? r.imagesByValue : [];
+  const imagesByValue = imagesRaw
+    .filter((i): i is { propertyId: number; valueId: number; jobIndex: number } => {
+      if (!i || typeof i !== "object") return false;
+      const o = i as Record<string, unknown>;
+      return (
+        Number.isInteger(o.propertyId) &&
+        (o.propertyId as number) > 0 &&
+        Number.isInteger(o.valueId) &&
+        (o.valueId as number) > 0 &&
+        Number.isInteger(o.jobIndex) &&
+        (o.jobIndex as number) >= 0
+      );
+    })
+    .map((i) => ({ propertyId: i.propertyId, valueId: i.valueId, jobIndex: i.jobIndex }));
+
+  return {
+    products,
+    priceOnProperty: positiveIntArray(r.priceOnProperty),
+    quantityOnProperty: positiveIntArray(r.quantityOnProperty),
+    skuOnProperty: positiveIntArray(r.skuOnProperty),
+    imagesByValue,
+  };
 }
 
 /**
@@ -391,6 +513,10 @@ export async function POST(request: Request) {
     let targetListingId = publish.listingId;
     let createdDraft = false;
     const failed: { name: string; error: string }[] = [];
+    // Set only in "new" mode when the form sent a variation grid — the single-SKU
+    // path below is skipped in that case, and the upload loop below resolves
+    // `imagesByValue`'s jobIndex against the images actually uploaded.
+    let variations: CleanVariations | null = null;
 
     try {
       shopId = await getShopId();
@@ -445,15 +571,40 @@ export async function POST(request: Request) {
               });
             }
           }
-          const sku = typeof nl.sku === "string" ? nl.sku.trim() : "";
-          if (sku) {
+          variations = sanitizeVariations(nl.variations);
+          if (variations) {
+            // A variation grid replaces the single default product outright —
+            // sending both would just have the second PUT overwrite the first.
             try {
-              await setListingInventorySku(targetListingId, { sku, price, quantity });
+              await updateListingInventory(targetListingId, {
+                products: variations.products.map((p) => ({
+                  sku: p.sku,
+                  propertyValues: p.propertyValues,
+                  price: p.price ?? price,
+                  quantity: p.quantity ?? quantity,
+                })),
+                priceOnProperty: variations.priceOnProperty,
+                quantityOnProperty: variations.quantityOnProperty,
+                skuOnProperty: variations.skuOnProperty,
+              });
             } catch (err) {
               failed.push({
-                name: "SKU",
+                name: "Varyasyonlar",
                 error: err instanceof Error ? err.message : "kaydedilemedi",
               });
+              variations = null; // grid failed to save -> don't try to attach images to it
+            }
+          } else {
+            const sku = typeof nl.sku === "string" ? nl.sku.trim() : "";
+            if (sku) {
+              try {
+                await setListingInventorySku(targetListingId, { sku, price, quantity });
+              } catch (err) {
+                failed.push({
+                  name: "SKU",
+                  error: err instanceof Error ? err.message : "kaydedilemedi",
+                });
+              }
             }
           }
         }
@@ -475,6 +626,7 @@ export async function POST(request: Request) {
       rank: number;
       listingImageId: number;
       url: string | null;
+      jobIndex: number;
     }[] = [];
 
     for (let i = 0; i < capped.length; i++) {
@@ -500,12 +652,39 @@ export async function POST(request: Request) {
           rank: img.rank,
           listingImageId: img.listingImageId,
           url: img.url,
+          jobIndex: i,
         });
       } catch (err) {
         failed.push({
           name: label(j),
           error: err instanceof Error ? err.message : "upload failed",
         });
+      }
+    }
+
+    // Per-value variation images are a separate call from the inventory grid
+    // itself, and need real listing image ids — only resolvable now that the
+    // upload loop above has run. A value whose job failed/wasn't uploaded is
+    // silently dropped here; the underlying failure is already in `failed`.
+    if (variations && variations.imagesByValue.length > 0) {
+      const byJobIndex = new Map(uploaded.map((u) => [u.jobIndex, u.listingImageId]));
+      const resolved = variations.imagesByValue
+        .map((i) => {
+          const listingImageId = byJobIndex.get(i.jobIndex);
+          return listingImageId != null
+            ? { propertyId: i.propertyId, valueId: i.valueId, imageId: listingImageId }
+            : null;
+        })
+        .filter((i): i is { propertyId: number; valueId: number; imageId: number } => i != null);
+      if (resolved.length > 0) {
+        try {
+          await updateVariationImages(shopId, targetListingId, resolved);
+        } catch (err) {
+          failed.push({
+            name: "Varyasyon görselleri",
+            error: err instanceof Error ? err.message : "kaydedilemedi",
+          });
+        }
       }
     }
 

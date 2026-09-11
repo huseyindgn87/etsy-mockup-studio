@@ -6,7 +6,11 @@ import { blobToRaster, dataUrlToBlob } from "@/lib/mockup/client";
 import { quadList } from "@/lib/mockup/geometry";
 import type { Calibration, Overlay, Quad, Raster } from "@/lib/mockup/types";
 import { normalizeBlendMode } from "@/lib/mockup/validate";
-import ListingForm, { EMPTY_LISTING_FORM, type ListingFormValue } from "./ListingForm";
+import ListingForm, {
+  EMPTY_LISTING_FORM,
+  type ListingFormValue,
+  type ListingFormVariationProperty,
+} from "./ListingForm";
 import MockupCanvas from "./MockupCanvas";
 
 /** Longest edge of the browser-side preview rasters (the server renders full-res). */
@@ -58,6 +62,93 @@ interface ListingOption {
 
 /** First 40 characters of a title, as shown per row in the listing picker. */
 const shortTitle = (t: string) => (t.length > 40 ? `${t.slice(0, 40)}…` : t);
+
+const MAX_VARIATION_ROWS = 100; // mirrors the server's sanity cap
+
+/**
+ * Turn the form's variation selection into the wire shape `publishTo.newListing.variations`
+ * expects — the cartesian product of every selected property's chosen values,
+ * each row carrying its own price/quantity/SKU override (falling back to the
+ * base form values server-side when left blank). `imagesByValue` resolves an
+ * "image varies by this property" value's assigned design to a `jobIndex`:
+ * jobs are built as `included` (mockups) × `designs`, mockup-major, so a
+ * design's first (and representative) render always lands at the position
+ * equal to that design's own index.
+ */
+function buildVariationsPayload(
+  form: ListingFormValue,
+  designs: { id: string }[],
+):
+  | {
+      priceOnProperty: number[];
+      quantityOnProperty: number[];
+      skuOnProperty: number[];
+      products: {
+        propertyValues: { propertyId: number; name: string; valueIds: number[]; values: string[] }[];
+        price?: number;
+        quantity?: number;
+        sku?: string;
+      }[];
+      imagesByValue: { propertyId: number; valueId: number; jobIndex: number }[];
+    }
+  | undefined {
+  const dims = form.variationPropertyIds
+    .map((id) => form.variationProperties[id])
+    .filter((p): p is ListingFormVariationProperty => !!p && p.valueIds.length > 0);
+  if (dims.length === 0) return undefined;
+
+  let combos: { valueIds: number[]; values: string[] }[] = [{ valueIds: [], values: [] }];
+  for (const dim of dims) {
+    const next: typeof combos = [];
+    for (const a of combos) {
+      for (let i = 0; i < dim.valueIds.length; i++) {
+        next.push({
+          valueIds: [...a.valueIds, dim.valueIds[i]],
+          values: [...a.values, dim.values[i]],
+        });
+      }
+    }
+    combos = next;
+  }
+  combos = combos.slice(0, MAX_VARIATION_ROWS);
+
+  const products = combos.map((c) => {
+    const row = form.variationRows[c.valueIds.join(":")];
+    const rp = row?.price ? Number.parseFloat(row.price) : NaN;
+    const rq = row?.quantity ? Number.parseInt(row.quantity, 10) : NaN;
+    return {
+      propertyValues: dims.map((d, i) => ({
+        propertyId: d.propertyId,
+        name: d.name,
+        valueIds: [c.valueIds[i]],
+        values: [c.values[i]],
+      })),
+      price: Number.isFinite(rp) && rp > 0 ? rp : undefined,
+      quantity: Number.isFinite(rq) && rq >= 0 ? Math.trunc(rq) : undefined,
+      sku: row?.sku.trim() || undefined,
+    };
+  });
+
+  const imagesByValue: { propertyId: number; valueId: number; jobIndex: number }[] = [];
+  for (const d of dims) {
+    if (!d.imageVaries) continue;
+    for (const valueId of d.valueIds) {
+      const designId = form.variationImages[`${d.propertyId}:${valueId}`];
+      if (!designId) continue;
+      const jobIndex = designs.findIndex((x) => x.id === designId);
+      if (jobIndex < 0) continue;
+      imagesByValue.push({ propertyId: d.propertyId, valueId, jobIndex });
+    }
+  }
+
+  return {
+    priceOnProperty: dims.filter((d) => d.priceVaries).map((d) => d.propertyId),
+    quantityOnProperty: dims.map((d) => d.propertyId),
+    skuOnProperty: dims.map((d) => d.propertyId),
+    products,
+    imagesByValue,
+  };
+}
 
 type PublishMode = "existing" | "copy" | "new";
 
@@ -438,6 +529,7 @@ export default function MockupsPage() {
           price: Number.isFinite(price) && price > 0 ? price : undefined,
           quantity: Number.isInteger(quantity) && quantity > 0 ? quantity : undefined,
           sku: listingForm.sku.trim() || undefined,
+          variations: buildVariationsPayload(listingForm, designs),
         };
       }
 
@@ -839,7 +931,11 @@ export default function MockupsPage() {
         </div>
 
         <div className="mt-6">
-          <ListingForm value={listingForm} onChange={setListingForm} />
+          <ListingForm
+            value={listingForm}
+            onChange={setListingForm}
+            designs={designs.map((d) => ({ id: d.id, name: d.name }))}
+          />
         </div>
 
         <p className="mt-8 text-sm text-zinc-500 dark:text-zinc-400">

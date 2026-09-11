@@ -9,6 +9,23 @@ export interface ListingFormProperty {
   values: string[];
   scaleId?: number | null;
 }
+/** One property chosen as a variation dimension (color, size, ...). */
+export interface ListingFormVariationProperty {
+  propertyId: number;
+  name: string;
+  valueIds: number[];
+  values: string[];
+  /** "fiyat bu özelliğe göre değişsin" */
+  priceVaries: boolean;
+  /** "görsel bu özelliğe göre değişsin" */
+  imageVaries: boolean;
+}
+/** Per-combination overrides in the variation table; blank falls back to the base price/quantity. */
+export interface ListingFormVariationRow {
+  price: string;
+  quantity: string;
+  sku: string;
+}
 export interface ListingFormValue {
   title: string;
   description: string;
@@ -22,6 +39,14 @@ export interface ListingFormValue {
   price: string;
   quantity: string;
   sku: string;
+  /** Up to 3 property ids, in selection order. */
+  variationPropertyIds: number[];
+  /** Keyed by property id. */
+  variationProperties: Record<number, ListingFormVariationProperty>;
+  /** Keyed by `valueIds.join(":")` (one id per selected variation property, in `variationPropertyIds` order). */
+  variationRows: Record<string, ListingFormVariationRow>;
+  /** Keyed by `${propertyId}:${valueId}`, valued with a design item id. */
+  variationImages: Record<string, string>;
 }
 
 export const EMPTY_LISTING_FORM: ListingFormValue = {
@@ -36,11 +61,17 @@ export const EMPTY_LISTING_FORM: ListingFormValue = {
   price: "",
   quantity: "1",
   sku: "",
+  variationPropertyIds: [],
+  variationProperties: {},
+  variationRows: {},
+  variationImages: {},
 };
 
 const MAX_TAGS = 13;
 const MAX_TAG_LENGTH = 20;
 const MAX_TITLE_LENGTH = 140;
+const MAX_VARIATION_PROPERTIES = 3;
+const MAX_VARIATION_ROWS = 100; // mirrors the server's sanity cap
 
 interface TaxonomyNode {
   id: number;
@@ -60,11 +91,20 @@ interface TaxonomyProperty {
   isRequired: boolean;
   isMultivalued: boolean;
   maxValuesAllowed: number | null;
+  /** Settable as a plain listing attribute (the Details section). */
+  supportsAttributes: boolean;
+  /** Usable as an inventory variation (the Variations section). */
+  supportsVariations: boolean;
   possibleValues: { valueId: number | null; name: string }[];
 }
 interface ShopSectionOption {
   shopSectionId: number;
   title: string;
+}
+/** The subset of a design the Variations "image varies" picker needs. */
+export interface DesignOption {
+  id: string;
+  name: string;
 }
 
 function flattenTaxonomy(nodes: TaxonomyNode[], prefix = ""): FlatTaxonomyNode[] {
@@ -79,16 +119,19 @@ function flattenTaxonomy(nodes: TaxonomyNode[], prefix = ""): FlatTaxonomyNode[]
 
 /**
  * Listing-editing form: title, description, tags, category + category
- * properties + section, price, and quantity/SKU — in the same order as
- * Etsy's own listing form. Values feed a draft listing on publish; nothing
- * here is sent to Etsy until then. Variations are not covered yet.
+ * properties + section, variations, price, and quantity/SKU — in the same
+ * order as Etsy's own listing form. Values feed a draft listing on publish;
+ * nothing here is sent to Etsy until then.
  */
 export default function ListingForm({
   value,
   onChange,
+  designs,
 }: {
   value: ListingFormValue;
   onChange: (next: ListingFormValue) => void;
+  /** Rendered designs, for the per-variation-value "image varies" picker. */
+  designs: DesignOption[];
 }) {
   const patch = (partial: Partial<ListingFormValue>) => onChange({ ...value, ...partial });
 
@@ -173,6 +216,17 @@ export default function ListingForm({
     return () => controller.abort();
   }, [value.taxonomyId]);
 
+  // A property can support attributes, variations, or both — split once so
+  // Details and Variations each only see the properties meant for them.
+  const attributeProperties = useMemo(
+    () => properties.filter((p) => p.supportsAttributes),
+    [properties],
+  );
+  const variationProperties = useMemo(
+    () => properties.filter((p) => p.supportsVariations),
+    [properties],
+  );
+
   function togglePropertyValue(
     prop: TaxonomyProperty,
     pv: { valueId: number | null; name: string },
@@ -219,7 +273,6 @@ export default function ListingForm({
       </h2>
       <p className="mt-0.5 text-xs text-zinc-500">
         Bu değerler &quot;Yeni taslak&quot; ile Etsy&apos;ye gönderirken kullanılır.
-        Varyasyonlar henüz yok — sonraki adımda eklenecek.
       </p>
 
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
@@ -346,7 +399,12 @@ export default function ListingForm({
                             patch({
                               taxonomyId: n.id,
                               taxonomyPath: n.path,
-                              properties: {}, // a new category has different properties
+                              // a new category has different properties (and variations)
+                              properties: {},
+                              variationPropertyIds: [],
+                              variationProperties: {},
+                              variationRows: {},
+                              variationImages: {},
                             });
                             setCategoryOpen(false);
                             setCategoryQuery("");
@@ -368,9 +426,9 @@ export default function ListingForm({
             <p className="mt-2 text-xs text-zinc-500">Kategori özellikleri yükleniyor…</p>
           )}
 
-          {!propertiesLoading && properties.length > 0 && (
+          {!propertiesLoading && attributeProperties.length > 0 && (
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
-              {properties.map((prop) => (
+              {attributeProperties.map((prop) => (
                 <PropertyPicker
                   key={prop.propertyId}
                   property={prop}
@@ -402,7 +460,17 @@ export default function ListingForm({
           </label>
         </div>
 
-        {/* ---- 5. price ---- */}
+        {/* ---- 5. variations ---- */}
+        {variationProperties.length > 0 && (
+          <VariationsSection
+            variationProperties={variationProperties}
+            value={value}
+            patch={patch}
+            designs={designs}
+          />
+        )}
+
+        {/* ---- 6. price ---- */}
         <label className="block text-sm">
           <span className="text-xs text-zinc-500">Price</span>
           <input
@@ -417,7 +485,7 @@ export default function ListingForm({
           />
         </label>
 
-        {/* ---- 6. inventory: quantity + sku side by side ---- */}
+        {/* ---- 7. inventory: quantity + sku side by side (no-variation fallback) ---- */}
         <div className="grid grid-cols-2 gap-3 text-sm">
           <label className="block">
             <span className="text-xs text-zinc-500">Quantity</span>
@@ -528,6 +596,377 @@ function PropertyPicker({
         <span className="font-medium">Seçili:</span>{" "}
         {selected?.values.length ? selected.values.join(", ") : "—"}
       </p>
+    </div>
+  );
+}
+
+const EMPTY_VARIATION_ROW: ListingFormVariationRow = { price: "", quantity: "", sku: "" };
+
+/** One property-value combination — one row of the variation table. */
+interface VariationCombo {
+  valueIds: number[];
+  values: string[];
+}
+
+/**
+ * Variations section: pick up to {@link MAX_VARIATION_PROPERTIES} properties
+ * that support variations, pick each one's values with the same
+ * {@link PropertyPicker} (always multi-select here), then edit the resulting
+ * combination grid — bulk-fill at the top, price/quantity/SKU per row, and
+ * per-property "price varies" / "image varies" toggles. Sent on publish via
+ * the Etsy Inventory API (`PUT .../inventory`), not covered by
+ * `createDraftListing`.
+ */
+function VariationsSection({
+  variationProperties,
+  value,
+  patch,
+  designs,
+}: {
+  variationProperties: TaxonomyProperty[];
+  value: ListingFormValue;
+  patch: (partial: Partial<ListingFormValue>) => void;
+  designs: DesignOption[];
+}) {
+  const selectedIds = value.variationPropertyIds;
+
+  function toggleVariationProperty(prop: TaxonomyProperty) {
+    const isSelected = selectedIds.includes(prop.propertyId);
+    if (isSelected) {
+      const nextProps = { ...value.variationProperties };
+      delete nextProps[prop.propertyId];
+      patch({
+        variationPropertyIds: selectedIds.filter((id) => id !== prop.propertyId),
+        variationProperties: nextProps,
+      });
+      return;
+    }
+    if (selectedIds.length >= MAX_VARIATION_PROPERTIES) return;
+    patch({
+      variationPropertyIds: [...selectedIds, prop.propertyId],
+      variationProperties: {
+        ...value.variationProperties,
+        [prop.propertyId]: {
+          propertyId: prop.propertyId,
+          name: prop.displayName,
+          valueIds: [],
+          values: [],
+          priceVaries: false,
+          imageVaries: false,
+        },
+      },
+    });
+  }
+
+  function toggleVariationValue(
+    prop: TaxonomyProperty,
+    pv: { valueId: number | null; name: string },
+  ) {
+    if (pv.valueId == null) return;
+    const current = value.variationProperties[prop.propertyId];
+    if (!current) return;
+    const nextIdSet = new Set(current.valueIds);
+    if (nextIdSet.has(pv.valueId)) nextIdSet.delete(pv.valueId);
+    else nextIdSet.add(pv.valueId);
+    // Keep the source order (matches Etsy's `possible_values` order) rather
+    // than click order, so the table's columns stay stable.
+    const nextIds: number[] = [];
+    const nextValues: string[] = [];
+    for (const cand of prop.possibleValues) {
+      if (cand.valueId != null && nextIdSet.has(cand.valueId)) {
+        nextIds.push(cand.valueId);
+        nextValues.push(cand.name);
+      }
+    }
+    patch({
+      variationProperties: {
+        ...value.variationProperties,
+        [prop.propertyId]: { ...current, valueIds: nextIds, values: nextValues },
+      },
+    });
+  }
+
+  const dims = useMemo(
+    () =>
+      selectedIds
+        .map((id) => value.variationProperties[id])
+        .filter((p): p is ListingFormVariationProperty => !!p && p.valueIds.length > 0),
+    [selectedIds, value.variationProperties],
+  );
+
+  const combos = useMemo<VariationCombo[]>(() => {
+    if (dims.length === 0) return [];
+    let acc: VariationCombo[] = [{ valueIds: [], values: [] }];
+    for (const dim of dims) {
+      const next: VariationCombo[] = [];
+      for (const a of acc) {
+        for (let i = 0; i < dim.valueIds.length; i++) {
+          next.push({
+            valueIds: [...a.valueIds, dim.valueIds[i]],
+            values: [...a.values, dim.values[i]],
+          });
+        }
+      }
+      acc = next;
+    }
+    return acc.slice(0, MAX_VARIATION_ROWS);
+  }, [dims]);
+  const combosTruncated = dims.length > 0 && combos.length >= MAX_VARIATION_ROWS;
+
+  function patchRow(key: string, partial: Partial<ListingFormVariationRow>) {
+    const current = value.variationRows[key] ?? EMPTY_VARIATION_ROW;
+    patch({ variationRows: { ...value.variationRows, [key]: { ...current, ...partial } } });
+  }
+
+  // ---- bulk-fill ----
+  const [bulkPrice, setBulkPrice] = useState("");
+  const [bulkQuantity, setBulkQuantity] = useState("");
+  function applyBulkPrice() {
+    if (!bulkPrice.trim()) return;
+    const nextRows = { ...value.variationRows };
+    for (const c of combos) {
+      const key = c.valueIds.join(":");
+      nextRows[key] = { ...(nextRows[key] ?? EMPTY_VARIATION_ROW), price: bulkPrice };
+    }
+    patch({ variationRows: nextRows });
+  }
+  function applyBulkQuantity() {
+    if (!bulkQuantity.trim()) return;
+    const nextRows = { ...value.variationRows };
+    for (const c of combos) {
+      const key = c.valueIds.join(":");
+      nextRows[key] = { ...(nextRows[key] ?? EMPTY_VARIATION_ROW), quantity: bulkQuantity };
+    }
+    patch({ variationRows: nextRows });
+  }
+
+  const inputCls =
+    "w-full rounded-lg border border-black/10 bg-white px-3 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950";
+
+  return (
+    <div className="lg:col-span-2">
+      <span className="text-xs text-zinc-500">Variations</span>
+
+      <div className="mt-1 flex flex-wrap gap-1.5">
+        {variationProperties.map((prop) => {
+          const active = selectedIds.includes(prop.propertyId);
+          const disabled = !active && selectedIds.length >= MAX_VARIATION_PROPERTIES;
+          return (
+            <button
+              key={prop.propertyId}
+              type="button"
+              disabled={disabled}
+              onClick={() => toggleVariationProperty(prop)}
+              className={`rounded-full border px-3 py-1 text-xs ${
+                active
+                  ? "border-[#f56400] bg-[#f56400]/10 text-[#f56400]"
+                  : disabled
+                    ? "cursor-not-allowed border-black/10 text-zinc-400 dark:border-white/10"
+                    : "border-black/10 hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
+              }`}
+            >
+              {prop.displayName}
+            </button>
+          );
+        })}
+      </div>
+      <p className="mt-1 text-xs text-zinc-500">En fazla {MAX_VARIATION_PROPERTIES} varyasyon seçilebilir.</p>
+
+      {selectedIds.length > 0 && (
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          {selectedIds.map((id) => {
+            const prop = variationProperties.find((p) => p.propertyId === id);
+            const sel = value.variationProperties[id];
+            if (!prop || !sel) return null;
+            return (
+              <div key={id}>
+                <PropertyPicker property={prop} selected={sel} onToggle={toggleVariationValue} />
+                <div className="mt-1.5 flex flex-col gap-1">
+                  <label className="flex items-center gap-1.5 text-xs text-zinc-600 dark:text-zinc-400">
+                    <input
+                      type="checkbox"
+                      checked={sel.priceVaries}
+                      onChange={(e) =>
+                        patch({
+                          variationProperties: {
+                            ...value.variationProperties,
+                            [id]: { ...sel, priceVaries: e.target.checked },
+                          },
+                        })
+                      }
+                      className="accent-[#f56400]"
+                    />
+                    Fiyat bu özelliğe göre değişsin
+                  </label>
+                  <label className="flex items-center gap-1.5 text-xs text-zinc-600 dark:text-zinc-400">
+                    <input
+                      type="checkbox"
+                      checked={sel.imageVaries}
+                      onChange={(e) =>
+                        patch({
+                          variationProperties: {
+                            ...value.variationProperties,
+                            [id]: { ...sel, imageVaries: e.target.checked },
+                          },
+                        })
+                      }
+                      className="accent-[#f56400]"
+                    />
+                    Görsel bu özelliğe göre değişsin
+                  </label>
+
+                  {sel.imageVaries && sel.valueIds.length > 0 && (
+                    <div className="mt-1 space-y-1 rounded-lg border border-black/10 p-1.5 dark:border-white/15">
+                      {sel.values.map((vname, i) => {
+                        const valueId = sel.valueIds[i];
+                        const imgKey = `${id}:${valueId}`;
+                        return (
+                          <div key={valueId} className="flex items-center justify-between gap-2 text-xs">
+                            <span className="truncate">{vname}</span>
+                            <select
+                              value={value.variationImages[imgKey] ?? ""}
+                              onChange={(e) =>
+                                patch({
+                                  variationImages: { ...value.variationImages, [imgKey]: e.target.value },
+                                })
+                              }
+                              className="h-7 rounded-md border border-black/10 bg-white px-1 text-xs outline-none dark:border-white/15 dark:bg-zinc-900"
+                            >
+                              <option value="">Tasarım seç…</option>
+                              {designs.map((d) => (
+                                <option key={d.id} value={d.id}>
+                                  {d.name}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {combos.length > 0 && (
+        <div className="mt-4">
+          <div className="flex flex-wrap items-end gap-2">
+            <label className="text-xs">
+              <span className="block text-zinc-500">Tüm satırlara fiyat uygula</span>
+              <div className="mt-1 flex gap-1">
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={bulkPrice}
+                  onChange={(e) => setBulkPrice(e.target.value)}
+                  placeholder="0.00"
+                  className={`${inputCls} h-8 w-24`}
+                />
+                <button
+                  type="button"
+                  onClick={applyBulkPrice}
+                  className="h-8 rounded-lg border border-black/10 px-2 text-xs hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
+                >
+                  Uygula
+                </button>
+              </div>
+            </label>
+            <label className="text-xs">
+              <span className="block text-zinc-500">Tüm satırlara adet uygula</span>
+              <div className="mt-1 flex gap-1">
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  value={bulkQuantity}
+                  onChange={(e) => setBulkQuantity(e.target.value)}
+                  placeholder="1"
+                  className={`${inputCls} h-8 w-24`}
+                />
+                <button
+                  type="button"
+                  onClick={applyBulkQuantity}
+                  className="h-8 rounded-lg border border-black/10 px-2 text-xs hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
+                >
+                  Uygula
+                </button>
+              </div>
+            </label>
+          </div>
+
+          <div className="mt-2 max-h-80 overflow-auto rounded-lg border border-black/10 dark:border-white/15">
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-zinc-50 dark:bg-zinc-900">
+                <tr>
+                  {dims.map((d) => (
+                    <th key={d.propertyId} className="px-2 py-1.5 text-left font-medium text-zinc-500">
+                      {d.name}
+                    </th>
+                  ))}
+                  <th className="px-2 py-1.5 text-left font-medium text-zinc-500">Fiyat</th>
+                  <th className="px-2 py-1.5 text-left font-medium text-zinc-500">Adet</th>
+                  <th className="px-2 py-1.5 text-left font-medium text-zinc-500">SKU</th>
+                </tr>
+              </thead>
+              <tbody>
+                {combos.map((c) => {
+                  const key = c.valueIds.join(":");
+                  const row = value.variationRows[key] ?? EMPTY_VARIATION_ROW;
+                  return (
+                    <tr key={key} className="border-t border-black/5 dark:border-white/10">
+                      {c.values.map((v, i) => (
+                        <td key={i} className="px-2 py-1">
+                          {v}
+                        </td>
+                      ))}
+                      <td className="px-2 py-1">
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={row.price}
+                          onChange={(e) => patchRow(key, { price: e.target.value })}
+                          placeholder={value.price || "0.00"}
+                          className="h-7 w-20 rounded-md border border-black/10 bg-white px-1.5 outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
+                        />
+                      </td>
+                      <td className="px-2 py-1">
+                        <input
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={row.quantity}
+                          onChange={(e) => patchRow(key, { quantity: e.target.value })}
+                          placeholder={value.quantity || "1"}
+                          className="h-7 w-16 rounded-md border border-black/10 bg-white px-1.5 outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
+                        />
+                      </td>
+                      <td className="px-2 py-1">
+                        <input
+                          type="text"
+                          value={row.sku}
+                          onChange={(e) => patchRow(key, { sku: e.target.value })}
+                          placeholder="isteğe bağlı"
+                          className="h-7 w-28 rounded-md border border-black/10 bg-white px-1.5 outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
+                        />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          {combosTruncated && (
+            <p className="mt-1 text-xs text-amber-600">
+              Kombinasyon sayısı {MAX_VARIATION_ROWS} ile sınırlı — daha az değer seçmeyi düşün.
+            </p>
+          )}
+        </div>
+      )}
     </div>
   );
 }

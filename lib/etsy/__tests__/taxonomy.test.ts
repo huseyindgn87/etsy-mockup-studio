@@ -49,7 +49,7 @@ describe("getSellerTaxonomyTree", () => {
 });
 
 describe("getTaxonomyProperties", () => {
-  test("keeps only attribute properties with selectable values, maps fields, and caches per id", async () => {
+  test("keeps properties with selectable values (attribute and/or variation), flags each, maps fields, and caches per id", async () => {
     etsyFetch.mockResolvedValue(
       json({
         results: [
@@ -59,6 +59,7 @@ describe("getTaxonomyProperties", () => {
             display_name: "Primary color",
             is_required: false,
             supports_attributes: true,
+            supports_variations: true,
             is_multivalued: true,
             max_values_allowed: 2,
             possible_values: [
@@ -66,7 +67,7 @@ describe("getTaxonomyProperties", () => {
               { value_id: 2, name: "Red" },
             ],
           },
-          // supports_variations only (no supports_attributes) -> excluded
+          // variations-only (no supports_attributes) -> still kept, just flagged differently
           {
             property_id: 300,
             name: "size",
@@ -96,10 +97,23 @@ describe("getTaxonomyProperties", () => {
         isRequired: false,
         isMultivalued: true,
         maxValuesAllowed: 2,
+        supportsAttributes: true,
+        supportsVariations: true,
         possibleValues: [
           { valueId: 1, name: "Black" },
           { valueId: 2, name: "Red" },
         ],
+      },
+      {
+        propertyId: 300,
+        name: "size",
+        displayName: "Size",
+        isRequired: false,
+        isMultivalued: false,
+        maxValuesAllowed: null,
+        supportsAttributes: false,
+        supportsVariations: true,
+        possibleValues: [{ valueId: 9, name: "M" }],
       },
     ]);
 

@@ -49,8 +49,11 @@ vi.mock("@/lib/etsy/listing-images", () => ({
 const createCalls: unknown[] = [];
 const propertyCalls: unknown[] = [];
 const skuCalls: unknown[] = [];
+const inventoryCalls: unknown[] = [];
+const variationImageCalls: unknown[] = [];
 let propertyShouldFail = false;
 let skuShouldFail = false;
+let inventoryShouldFail = false;
 vi.mock("@/lib/etsy/listing-create", () => ({
   getListingStructure: vi.fn(async () => ({
     title: "Source tee",
@@ -77,6 +80,13 @@ vi.mock("@/lib/etsy/listing-create", () => ({
   setListingInventorySku: vi.fn(async (_listing: number, input: unknown) => {
     skuCalls.push(input);
     if (skuShouldFail) throw new Error("Etsy rejected the SKU");
+  }),
+  updateListingInventory: vi.fn(async (_listing: number, input: unknown) => {
+    inventoryCalls.push(input);
+    if (inventoryShouldFail) throw new Error("Etsy rejected the inventory grid");
+  }),
+  updateVariationImages: vi.fn(async (_shop: number, _listing: number, images: unknown) => {
+    variationImageCalls.push(images);
   }),
 }));
 
@@ -453,6 +463,205 @@ describe("POST /api/mockups/render", () => {
 
     propertyShouldFail = false;
     skuShouldFail = false;
+  }, 30_000);
+
+  test("mode:new with a variation grid uses the Inventory API instead of the single-SKU path", async () => {
+    uploadCalls.length = 0;
+    skuCalls.length = 0;
+    inventoryCalls.length = 0;
+    variationImageCalls.length = 0;
+    inventoryShouldFail = false;
+    const mock = await png(60, 60, [0, 0, 0]);
+
+    const res = await POST(
+      form(
+        {
+          publishTo: {
+            mode: "new",
+            listingId: 500,
+            newListing: {
+              title: "Tee with variations",
+              price: 19.99,
+              quantity: 5,
+              sku: "SHOULD-NOT-BE-USED",
+              variations: {
+                priceOnProperty: [200],
+                quantityOnProperty: [200],
+                skuOnProperty: [200],
+                products: [
+                  {
+                    propertyValues: [
+                      { propertyId: 200, name: "Color", valueIds: [1], values: ["Black"] },
+                    ],
+                    price: 21.5,
+                    quantity: 3,
+                    sku: "TEE-BLK",
+                  },
+                  {
+                    propertyValues: [
+                      { propertyId: 200, name: "Color", valueIds: [2], values: ["Red"] },
+                    ],
+                    // no price/quantity -> should fall back to the base 19.99 / 5
+                  },
+                ],
+              },
+            },
+          },
+          mockups: [{ name: "m", calibration: {} }],
+          designs: [],
+          jobs: [{ mockup: 0 }],
+        },
+        [{ field: "mockup", buf: mock, name: "m.png" }],
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { createdDraft: boolean; failed: unknown[] };
+    expect(body.createdDraft).toBe(true);
+    expect(body.failed).toEqual([]);
+
+    expect(skuCalls).toEqual([]); // variations replace the single-SKU call entirely
+    expect(inventoryCalls).toEqual([
+      {
+        products: [
+          {
+            sku: "TEE-BLK",
+            propertyValues: [{ propertyId: 200, name: "Color", valueIds: [1], values: ["Black"] }],
+            price: 21.5,
+            quantity: 3,
+          },
+          {
+            sku: undefined,
+            propertyValues: [{ propertyId: 200, name: "Color", valueIds: [2], values: ["Red"] }],
+            price: 19.99, // fell back to the base price
+            quantity: 5, // fell back to the base quantity
+          },
+        ],
+        priceOnProperty: [200],
+        quantityOnProperty: [200],
+        skuOnProperty: [200],
+      },
+    ]);
+  }, 30_000);
+
+  test("mode:new resolves imagesByValue job indices to uploaded listing image ids", async () => {
+    uploadCalls.length = 0;
+    inventoryCalls.length = 0;
+    variationImageCalls.length = 0;
+    inventoryShouldFail = false;
+    const mockA = await png(60, 60, [0, 0, 0]);
+    const designRed = await png(10, 10, [255, 0, 0]);
+    const designBlue = await png(10, 10, [0, 0, 255]);
+
+    const res = await POST(
+      form(
+        {
+          publishTo: {
+            mode: "new",
+            listingId: 500,
+            newListing: {
+              title: "Tee with per-value images",
+              price: 10,
+              quantity: 1,
+              variations: {
+                products: [
+                  {
+                    propertyValues: [
+                      { propertyId: 200, name: "Color", valueIds: [1], values: ["Red"] },
+                    ],
+                  },
+                  {
+                    propertyValues: [
+                      { propertyId: 200, name: "Color", valueIds: [2], values: ["Blue"] },
+                    ],
+                  },
+                ],
+                // jobIndex 0 -> first job (design 0/red), jobIndex 1 -> second job (design 1/blue)
+                imagesByValue: [
+                  { propertyId: 200, valueId: 1, jobIndex: 0 },
+                  { propertyId: 200, valueId: 2, jobIndex: 1 },
+                ],
+              },
+            },
+          },
+          mockups: [{ name: "m", calibration: {} }],
+          designs: [{ name: "red" }, { name: "blue" }],
+          jobs: [
+            { mockup: 0, design: 0 },
+            { mockup: 0, design: 1 },
+          ],
+        },
+        [
+          { field: "mockup", buf: mockA, name: "m.png" },
+          { field: "design", buf: designRed, name: "red.png" },
+          { field: "design", buf: designBlue, name: "blue.png" },
+        ],
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      failed: unknown[];
+      uploaded: { rank: number; listingImageId: number }[];
+    };
+    expect(body.failed).toEqual([]);
+    expect(body.uploaded).toHaveLength(2);
+
+    expect(variationImageCalls).toEqual([
+      [
+        { propertyId: 200, valueId: 1, imageId: body.uploaded[0].listingImageId },
+        { propertyId: 200, valueId: 2, imageId: body.uploaded[1].listingImageId },
+      ],
+    ]);
+  }, 30_000);
+
+  test("mode:new reports an inventory-grid failure without failing the whole publish, and skips the image-assignment call", async () => {
+    uploadCalls.length = 0;
+    inventoryCalls.length = 0;
+    variationImageCalls.length = 0;
+    inventoryShouldFail = true;
+    const mock = await png(60, 60, [0, 0, 0]);
+
+    const res = await POST(
+      form(
+        {
+          publishTo: {
+            mode: "new",
+            listingId: 500,
+            newListing: {
+              title: "Tee, inventory will fail",
+              variations: {
+                products: [
+                  {
+                    propertyValues: [
+                      { propertyId: 200, name: "Color", valueIds: [1], values: ["Black"] },
+                    ],
+                  },
+                ],
+                imagesByValue: [{ propertyId: 200, valueId: 1, jobIndex: 0 }],
+              },
+            },
+          },
+          mockups: [{ name: "m", calibration: {} }],
+          designs: [],
+          jobs: [{ mockup: 0 }],
+        },
+        [{ field: "mockup", buf: mock, name: "m.png" }],
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      createdDraft: boolean;
+      uploaded: unknown[];
+      failed: { name: string; error: string }[];
+    };
+    expect(body.createdDraft).toBe(true);
+    expect(body.uploaded).toHaveLength(1); // image upload still went through
+    expect(body.failed.map((f) => f.name)).toEqual(["Varyasyonlar"]);
+    expect(variationImageCalls).toEqual([]); // grid never saved -> no point attaching images to it
+
+    inventoryShouldFail = false;
   }, 30_000);
 
   test("publishTo rejects a bad listingId", async () => {
