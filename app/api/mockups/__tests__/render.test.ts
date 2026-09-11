@@ -661,7 +661,7 @@ describe("POST /api/mockups/render", () => {
     };
     expect(body.createdDraft).toBe(true);
     expect(body.uploaded).toHaveLength(1); // image upload still went through
-    expect(body.failed.map((f) => f.name)).toEqual(["Varyasyonlar"]);
+    expect(body.failed.map((f) => f.name)).toEqual(["Variations"]);
     expect(variationImageCalls).toEqual([]); // grid never saved -> no point attaching images to it
 
     inventoryShouldFail = false;

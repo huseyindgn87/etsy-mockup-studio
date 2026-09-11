@@ -15,7 +15,7 @@ const CUSTOM_PROPERTY_IDS = [513, 514] as const;
 
 /** One variation dimension (colour, size, or a user-typed custom one). */
 export interface ListingFormVariation {
-  /** A real taxonomy property id, or 513/514 for a custom ("kendim oluşturayım") variation. */
+  /** A real taxonomy property id, or 513/514 for a custom ("Custom") variation. */
   propertyId: number;
   name: string;
   isCustom: boolean;
@@ -122,6 +122,14 @@ interface ShopSectionOption {
   title: string;
 }
 
+/** Etsy's shop-section titles come back HTML-escaped (e.g. "&gt;&gt;HALLOWEEN&lt;&lt;"). */
+function decodeHtmlEntities(s: string): string {
+  if (typeof document === "undefined") return s;
+  const el = document.createElement("textarea");
+  el.innerHTML = s;
+  return el.value;
+}
+
 function flattenTaxonomy(nodes: TaxonomyNode[], prefix = ""): FlatTaxonomyNode[] {
   const out: FlatTaxonomyNode[] = [];
   for (const n of nodes) {
@@ -196,10 +204,10 @@ export default function ListingForm({
   }, [categoryOpen]);
 
   const categoryRows = useMemo(() => {
-    const q = categoryQuery.trim().toLocaleLowerCase("tr-TR");
+    const q = categoryQuery.trim().toLowerCase();
     const list = taxonomy ?? [];
     if (!q) return list.slice(0, 50);
-    return list.filter((n) => n.path.toLocaleLowerCase("tr-TR").includes(q)).slice(0, 50);
+    return list.filter((n) => n.path.toLowerCase().includes(q)).slice(0, 50);
   }, [taxonomy, categoryQuery]);
 
   // ---- category properties (depend on the chosen category) ----
@@ -268,113 +276,128 @@ export default function ListingForm({
 
   // ---- shop sections ----
   const [sections, setSections] = useState<ShopSectionOption[] | null>(null);
+  const [sectionsError, setSectionsError] = useState<string | null>(null);
   useEffect(() => {
     fetch("/api/etsy/sections")
-      .then((res) => (res.ok ? res.json() : null))
-      .then((body: { sections?: ShopSectionOption[] } | null) => setSections(body?.sections ?? []))
-      .catch(() => setSections([]));
+      .then(async (res) => {
+        const body = (await res.json().catch(() => null)) as
+          | { sections?: ShopSectionOption[]; error?: string }
+          | null;
+        if (!res.ok) throw new Error(body?.error || `Request failed (${res.status})`);
+        setSections(body?.sections ?? []);
+      })
+      .catch((err) => {
+        setSections([]);
+        setSectionsError(err instanceof Error ? err.message : "Could not load sections.");
+      });
   }, []);
 
   const inputCls =
     "w-full rounded-lg border border-black/10 bg-white px-3 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950";
+  const sectionHeadingCls = "text-base font-bold text-zinc-900 dark:text-zinc-50";
 
   return (
     <div className="rounded-xl border border-black/10 bg-white p-4 dark:border-white/15 dark:bg-zinc-950">
       <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
-        Listing bilgileri
+        Listing information
       </h2>
       <p className="mt-0.5 text-xs text-zinc-500">
-        Bu değerler &quot;Yeni taslak&quot; ile Etsy&apos;ye gönderirken kullanılır.
+        These values are used when sending to Etsy via &quot;New draft&quot;.
       </p>
 
-      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+      <div className="mt-6 space-y-8">
         {/* ---- 1. title ---- */}
-        <label className="block text-sm lg:col-span-2">
-          <span className="flex justify-between text-xs text-zinc-500">
-            <span>Title</span>
-            <span className="font-mono">
-              {value.title.length}/{MAX_TITLE_LENGTH}
-            </span>
-          </span>
-          <input
-            type="text"
-            value={value.title}
-            maxLength={MAX_TITLE_LENGTH}
-            onChange={(e) => patch({ title: e.target.value })}
-            placeholder="Örn. Miami Skyline Wall Art Print"
-            className={`${inputCls} mt-1 h-10`}
-          />
-        </label>
-
-        {/* ---- 2. description ---- */}
-        <label className="block text-sm lg:col-span-2">
-          <span className="text-xs text-zinc-500">Description</span>
-          <textarea
-            rows={5}
-            value={value.description}
-            onChange={(e) => patch({ description: e.target.value })}
-            placeholder="Ürünü tarif et…"
-            className={`${inputCls} mt-1 resize-y py-2`}
-          />
-        </label>
-
-        {/* ---- 3. tags ---- */}
-        <div className="text-sm lg:col-span-2">
-          <span className="flex justify-between text-xs text-zinc-500">
-            <span>Tags</span>
-            <span className="font-mono">
-              {value.tags.length}/{MAX_TAGS}
-            </span>
-          </span>
-          <div className="mt-1 flex flex-wrap items-center gap-1.5 rounded-lg border border-black/10 p-1.5 dark:border-white/15">
-            {value.tags.map((t) => (
-              <span
-                key={t}
-                className="flex items-center gap-1 rounded-full bg-black/[.06] px-2 py-0.5 text-xs dark:bg-white/10"
-              >
-                {t}
-                <button
-                  type="button"
-                  onClick={() => removeTag(t)}
-                  aria-label={`${t} etiketini kaldır`}
-                  className="text-zinc-500 hover:text-red-600"
-                >
-                  ×
-                </button>
+        <section className="space-y-4">
+          <h3 className={sectionHeadingCls}>Title</h3>
+          <label className="block text-sm">
+            <span className="flex justify-between text-xs text-zinc-500">
+              <span>Title</span>
+              <span className="font-mono">
+                {value.title.length}/{MAX_TITLE_LENGTH}
               </span>
-            ))}
-            {value.tags.length < MAX_TAGS && (
-              <input
-                type="text"
-                value={tagDraft}
-                maxLength={MAX_TAG_LENGTH}
-                onChange={(e) => setTagDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === ",") {
-                    e.preventDefault();
-                    addTag();
-                  }
-                }}
-                onBlur={addTag}
-                placeholder={value.tags.length === 0 ? "etiket yaz, Enter'a bas…" : ""}
-                className="min-w-[100px] flex-1 border-none bg-transparent px-1 py-0.5 text-sm outline-none"
-              />
-            )}
+            </span>
+            <input
+              type="text"
+              value={value.title}
+              maxLength={MAX_TITLE_LENGTH}
+              onChange={(e) => patch({ title: e.target.value })}
+              placeholder="e.g. Miami Skyline Wall Art Print"
+              className={`${inputCls} mt-1 h-10`}
+            />
+          </label>
+
+          <label className="block text-sm">
+            <span className="text-xs text-zinc-500">Description</span>
+            <textarea
+              rows={5}
+              value={value.description}
+              onChange={(e) => patch({ description: e.target.value })}
+              placeholder="Describe the product…"
+              className={`${inputCls} mt-1 resize-y py-2`}
+            />
+          </label>
+        </section>
+
+        {/* ---- 2. tags ---- */}
+        <section className="space-y-2">
+          <h3 className={sectionHeadingCls}>Tags</h3>
+          <div className="text-sm">
+            <span className="flex justify-between text-xs text-zinc-500">
+              <span>Tags</span>
+              <span className="font-mono">
+                {value.tags.length}/{MAX_TAGS}
+              </span>
+            </span>
+            <div className="mt-1 flex flex-wrap items-center gap-1.5 rounded-lg border border-black/10 p-1.5 dark:border-white/15">
+              {value.tags.map((t) => (
+                <span
+                  key={t}
+                  className="flex items-center gap-1 rounded-full bg-black/[.06] px-2 py-0.5 text-xs dark:bg-white/10"
+                >
+                  {t}
+                  <button
+                    type="button"
+                    onClick={() => removeTag(t)}
+                    aria-label={`Remove ${t} tag`}
+                    className="text-zinc-500 hover:text-red-600"
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+              {value.tags.length < MAX_TAGS && (
+                <input
+                  type="text"
+                  value={tagDraft}
+                  maxLength={MAX_TAG_LENGTH}
+                  onChange={(e) => setTagDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === ",") {
+                      e.preventDefault();
+                      addTag();
+                    }
+                  }}
+                  onBlur={addTag}
+                  placeholder={value.tags.length === 0 ? "Type a tag, press Enter…" : ""}
+                  className="min-w-[100px] flex-1 border-none bg-transparent px-1 py-0.5 text-sm outline-none"
+                />
+              )}
+            </div>
           </div>
-        </div>
+        </section>
 
-        {/* ---- 4. details ---- */}
-        <div className="lg:col-span-2">
-          <span className="text-xs text-zinc-500">Details</span>
+        {/* ---- 3. details ---- */}
+        <section className="space-y-3">
+          <h3 className={sectionHeadingCls}>Details</h3>
 
-          <div ref={categoryRootRef} className="relative mt-1">
+          <div ref={categoryRootRef} className="relative">
             <button
               type="button"
               onClick={() => setCategoryOpen((o) => !o)}
               className={`${inputCls} flex h-10 items-center justify-between text-left`}
             >
               <span className={value.taxonomyPath ? "" : "text-zinc-400"}>
-                {value.taxonomyPath || "Kategori seç…"}
+                {value.taxonomyPath || "Select a category…"}
               </span>
               <span className="text-zinc-400">▾</span>
             </button>
@@ -387,19 +410,19 @@ export default function ListingForm({
                     autoFocus
                     value={categoryQuery}
                     onChange={(e) => setCategoryQuery(e.target.value)}
-                    placeholder="Kategori ara… (accessories, jewelry, weddings…)"
+                    placeholder="Search categories… (accessories, jewelry, weddings…)"
                     className="h-8 w-full rounded-md border border-black/10 bg-white px-2 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-900"
                   />
                 </div>
                 <ul className="max-h-72 overflow-y-auto py-1">
                   {taxonomyLoading && (
                     <li className="px-2 py-3 text-center text-xs text-zinc-500">
-                      Kategoriler yükleniyor…
+                      Loading categories…
                     </li>
                   )}
                   {!taxonomyLoading && categoryRows.length === 0 && (
                     <li className="px-2 py-3 text-center text-xs text-zinc-500">
-                      Eşleşen kategori yok.
+                      No matching categories.
                     </li>
                   )}
                   {!taxonomyLoading &&
@@ -434,11 +457,11 @@ export default function ListingForm({
           </div>
 
           {propertiesLoading && (
-            <p className="mt-2 text-xs text-zinc-500">Kategori özellikleri yükleniyor…</p>
+            <p className="text-xs text-zinc-500">Loading category properties…</p>
           )}
 
           {!propertiesLoading && attributeProperties.length > 0 && (
-            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {attributeProperties.map((prop) => (
                 <PropertyPicker
                   key={prop.propertyId}
@@ -450,7 +473,7 @@ export default function ListingForm({
             </div>
           )}
 
-          <label className="mt-3 block text-sm">
+          <label className="block text-sm">
             <span className="text-xs text-zinc-500">Section</span>
             <select
               value={value.shopSectionId ?? ""}
@@ -461,59 +484,66 @@ export default function ListingForm({
               }}
               className={`${inputCls} mt-1 h-9`}
             >
-              <option value="">Section yok</option>
+              <option value="">No section</option>
               {(sections ?? []).map((s) => (
                 <option key={s.shopSectionId} value={s.shopSectionId}>
-                  {s.title}
+                  {decodeHtmlEntities(s.title)}
                 </option>
               ))}
             </select>
+            {sectionsError && <p className="mt-1 text-xs text-red-600">{sectionsError}</p>}
           </label>
-        </div>
+        </section>
+
+        {/* ---- 4. inventory: price + quantity + sku (no-variation fallback) ---- */}
+        <section className="space-y-3">
+          <h3 className={sectionHeadingCls}>Inventory</h3>
+          <div className="grid gap-3 sm:grid-cols-3 text-sm">
+            <label className="block">
+              <span className="text-xs text-zinc-500">Price</span>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                inputMode="decimal"
+                value={value.price}
+                onChange={(e) => patch({ price: e.target.value })}
+                placeholder="0.00"
+                className={`${inputCls} mt-1 h-10`}
+              />
+            </label>
+            <label className="block">
+              <span className="text-xs text-zinc-500">Quantity</span>
+              <input
+                type="number"
+                min="1"
+                step="1"
+                inputMode="numeric"
+                value={value.quantity}
+                onChange={(e) => patch({ quantity: e.target.value })}
+                className={`${inputCls} mt-1 h-10`}
+              />
+            </label>
+            <label className="block">
+              <span className="text-xs text-zinc-500">SKU</span>
+              <input
+                type="text"
+                value={value.sku}
+                onChange={(e) => patch({ sku: e.target.value })}
+                placeholder="optional"
+                className={`${inputCls} mt-1 h-10`}
+              />
+            </label>
+          </div>
+        </section>
 
         {/* ---- 5. variations ---- */}
-        <VariationsSection variationProperties={variationProperties} value={value} patch={patch} />
-
-        {/* ---- 6. price ---- */}
-        <label className="block text-sm">
-          <span className="text-xs text-zinc-500">Price</span>
-          <input
-            type="number"
-            min="0"
-            step="0.01"
-            inputMode="decimal"
-            value={value.price}
-            onChange={(e) => patch({ price: e.target.value })}
-            placeholder="0.00"
-            className={`${inputCls} mt-1 h-10`}
-          />
-        </label>
-
-        {/* ---- 7. inventory: quantity + sku side by side (no-variation fallback) ---- */}
-        <div className="grid grid-cols-2 gap-3 text-sm">
-          <label className="block">
-            <span className="text-xs text-zinc-500">Quantity</span>
-            <input
-              type="number"
-              min="1"
-              step="1"
-              inputMode="numeric"
-              value={value.quantity}
-              onChange={(e) => patch({ quantity: e.target.value })}
-              className={`${inputCls} mt-1 h-10`}
-            />
-          </label>
-          <label className="block">
-            <span className="text-xs text-zinc-500">SKU</span>
-            <input
-              type="text"
-              value={value.sku}
-              onChange={(e) => patch({ sku: e.target.value })}
-              placeholder="isteğe bağlı"
-              className={`${inputCls} mt-1 h-10`}
-            />
-          </label>
-        </div>
+        <VariationsSection
+          variationProperties={variationProperties}
+          value={value}
+          patch={patch}
+          sectionHeadingCls={sectionHeadingCls}
+        />
       </div>
     </div>
   );
@@ -548,10 +578,10 @@ function PropertyPicker({
   const pickedIds = selected?.valueIds ?? [];
 
   const rows = useMemo(() => {
-    const q = query.trim().toLocaleLowerCase("tr-TR");
+    const q = query.trim().toLowerCase();
     const all = property.possibleValues;
     const filtered = q
-      ? all.filter((pv) => pv.name.toLocaleLowerCase("tr-TR").includes(q))
+      ? all.filter((pv) => pv.name.toLowerCase().includes(q))
       : all;
     return filtered.slice(0, MAX_PROPERTY_ROWS);
   }, [property.possibleValues, query]);
@@ -569,13 +599,13 @@ function PropertyPicker({
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Ara…"
+            placeholder="Search…"
             className="h-7 w-full rounded-md bg-transparent px-1.5 text-xs outline-none"
           />
         </div>
         <div className="h-36 overflow-y-auto p-1">
           {rows.length === 0 && (
-            <p className="px-2 py-3 text-center text-xs text-zinc-400">Sonuç yok.</p>
+            <p className="px-2 py-3 text-center text-xs text-zinc-400">No results.</p>
           )}
           {rows.map((pv) => {
             const checked = pv.valueId != null && pickedIds.includes(pv.valueId);
@@ -598,7 +628,7 @@ function PropertyPicker({
       </div>
 
       <p className="mt-1 truncate text-xs text-zinc-600 dark:text-zinc-400">
-        <span className="font-medium">Seçili:</span>{" "}
+        <span className="font-medium">Selected:</span>{" "}
         {selected?.values.length ? selected.values.join(", ") : "—"}
       </p>
     </div>
@@ -610,7 +640,7 @@ function PropertyPicker({
 // screen (no stacked modals): a card list (name, option chips, edit/delete),
 // an inline add/edit panel (Etsy property vs. hand-typed custom), four
 // on/off fields ("varies by" first/second/both), a live combination count,
-// and — on "Uygula" — a table with only the enabled columns, bulk-fillable.
+// and — on "Apply" — a table with only the enabled columns, bulk-fillable.
 // ---------------------------------------------------------------------------
 
 interface VariationCombo {
@@ -619,15 +649,15 @@ interface VariationCombo {
 }
 
 const VARIATION_TOGGLES: { key: VariationToggleKey; label: string }[] = [
-  { key: "price", label: "Fiyatlar değişsin" },
-  { key: "readiness", label: "İşlem profilleri değişsin" },
-  { key: "quantity", label: "Adetler değişsin" },
-  { key: "sku", label: "SKU'lar değişsin" },
+  { key: "price", label: "Vary by price" },
+  { key: "readiness", label: "Vary by processing profile" },
+  { key: "quantity", label: "Vary by quantity" },
+  { key: "sku", label: "Vary by SKU" },
 ];
 const VARIATION_COLUMN_LABEL: Record<VariationToggleKey, string> = {
-  price: "Fiyat",
-  readiness: "İşlem profili",
-  quantity: "Adet",
+  price: "Price",
+  readiness: "Processing profile",
+  quantity: "Quantity",
   sku: "SKU",
 };
 
@@ -653,10 +683,12 @@ function VariationsSection({
   variationProperties,
   value,
   patch,
+  sectionHeadingCls,
 }: {
   variationProperties: TaxonomyProperty[];
   value: ListingFormValue;
   patch: (partial: Partial<ListingFormValue>) => void;
+  sectionHeadingCls: string;
 }) {
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
@@ -760,11 +792,21 @@ function VariationsSection({
   const usedPropertyIds = value.variations.filter((_, i) => i !== editingIndex).map((v) => v.propertyId);
 
   return (
-    <div className="lg:col-span-2">
-      <span className="text-xs text-zinc-500">Variations</span>
+    <section className="space-y-3">
+      <h3 className={sectionHeadingCls}>Variations</h3>
+
+      {!editorOpen && value.variations.length < MAX_VARIATIONS && (
+        <button
+          type="button"
+          onClick={openAdd}
+          className="h-9 rounded-lg border border-dashed border-black/20 px-3 text-sm text-zinc-600 hover:bg-black/[.04] dark:border-white/25 dark:text-zinc-300 dark:hover:bg-white/[.06]"
+        >
+          Manage variations
+        </button>
+      )}
 
       {value.variations.length > 0 && (
-        <div className="mt-1 space-y-2">
+        <div className="space-y-2">
           {value.variations.map((v, i) => (
             <VariationCard key={i} variation={v} onEdit={() => openEdit(i)} onDelete={() => removeVariation(i)} />
           ))}
@@ -780,16 +822,6 @@ function VariationsSection({
           onCancel={closeEditor}
           onCommit={commitEditor}
         />
-      )}
-
-      {!editorOpen && value.variations.length < MAX_VARIATIONS && (
-        <button
-          type="button"
-          onClick={openAdd}
-          className="mt-2 h-9 rounded-lg border border-dashed border-black/20 px-3 text-sm text-zinc-600 hover:bg-black/[.04] dark:border-white/25 dark:text-zinc-300 dark:hover:bg-white/[.06]"
-        >
-          + Varyasyon ekle
-        </button>
       )}
 
       {value.variations.length > 0 && (
@@ -828,13 +860,13 @@ function VariationsSection({
                     <option value="0">{value.variations[0].name}</option>
                     <option value="1">{value.variations[1].name}</option>
                     <option value="both">
-                      {value.variations[0].name} ve {value.variations[1].name}
+                      {value.variations[0].name} and {value.variations[1].name}
                     </option>
                   </select>
                 )}
                 {key === "readiness" && t.enabled && (
                   <span className="text-xs text-zinc-500">
-                    (opsiyonel Etsy işlem profili ID&apos;si — boş bırakılırsa Etsy kendisi atar)
+                    (optional Etsy processing profile ID — left blank, Etsy assigns one itself)
                   </span>
                 )}
               </div>
@@ -842,8 +874,8 @@ function VariationsSection({
           })}
 
           <p className="text-xs text-zinc-500">
-            {combos.length} kombinasyon oluşturulacak
-            {combosTruncated ? ` (${MAX_VARIATION_ROWS} ile sınırlı)` : ""}.
+            {combos.length} combinations will be created
+            {combosTruncated ? ` (capped at ${MAX_VARIATION_ROWS})` : ""}.
           </p>
 
           <button
@@ -851,7 +883,7 @@ function VariationsSection({
             onClick={() => setApplied(true)}
             className="h-8 rounded-lg bg-[#f56400] px-3 text-xs font-medium text-white hover:bg-[#d95700]"
           >
-            Uygula
+            Apply
           </button>
         </div>
       )}
@@ -868,7 +900,7 @@ function VariationsSection({
           baseQuantity={value.quantity}
         />
       )}
-    </div>
+    </section>
   );
 }
 
@@ -887,8 +919,8 @@ function VariationCard({
         <p className="text-sm font-medium">
           {variation.name}{" "}
           <span className="font-normal text-zinc-500">
-            · {variation.values.length} seçenek
-            {variation.isCustom ? " · kendi varyasyonum" : ""}
+            · {variation.values.length} options
+            {variation.isCustom ? " · custom variation" : ""}
           </span>
         </p>
         <div className="mt-1.5 flex flex-wrap gap-1">
@@ -903,7 +935,7 @@ function VariationCard({
         <button
           type="button"
           onClick={onEdit}
-          aria-label={`${variation.name} varyasyonunu düzenle`}
+          aria-label={`Edit ${variation.name} variation`}
           className="rounded p-1.5 text-zinc-500 hover:bg-black/[.04] hover:text-zinc-800 dark:hover:bg-white/[.06] dark:hover:text-zinc-100"
         >
           ✎
@@ -911,7 +943,7 @@ function VariationCard({
         <button
           type="button"
           onClick={onDelete}
-          aria-label={`${variation.name} varyasyonunu sil`}
+          aria-label={`Delete ${variation.name} variation`}
           className="rounded p-1.5 text-zinc-500 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/30"
         >
           🗑
@@ -980,10 +1012,10 @@ function VariationEditorPanel({
     <div className="mt-2 rounded-lg border border-dashed border-black/20 p-3 dark:border-white/25">
       <div className="flex gap-1.5">
         <button type="button" onClick={() => setDraft(() => ({ ...EMPTY_DRAFT, source: "etsy" }))} className={tabCls(draft.source === "etsy")}>
-          Etsy özelliğinden seç
+          Default
         </button>
         <button type="button" onClick={() => setDraft(() => ({ ...EMPTY_DRAFT, source: "custom" }))} className={tabCls(draft.source === "custom")}>
-          Kendim oluşturayım
+          Custom
         </button>
       </div>
 
@@ -991,8 +1023,8 @@ function VariationEditorPanel({
         <div className="mt-3">
           {variationProperties.length === 0 ? (
             <p className="text-xs text-zinc-500">
-              Bu kategori için Etsy varyasyon özelliği yok (ya da henüz kategori seçilmedi) — bunun
-              yerine &quot;Kendim oluşturayım&quot;ı kullan.
+              No Etsy variation property for this category (or no category chosen yet) — use
+              &quot;Custom&quot; instead.
             </p>
           ) : (
             <>
@@ -1005,7 +1037,7 @@ function VariationEditorPanel({
                 }}
                 className="h-9 w-full rounded-lg border border-black/10 bg-white px-2 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
               >
-                <option value="">Özellik seç…</option>
+                <option value="">Select a property…</option>
                 {variationProperties.map((p) => (
                   <option key={p.propertyId} value={p.propertyId}>
                     {p.displayName}
@@ -1031,7 +1063,7 @@ function VariationEditorPanel({
             type="text"
             value={draft.name}
             onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
-            placeholder="Varyasyon adı (örn. Kağıt türü)"
+            placeholder="Variation name (e.g. Paper type)"
             className="h-9 w-full rounded-lg border border-black/10 bg-white px-2 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
           />
           <CustomOptionsInput values={draft.values} onChange={(values) => setDraft((d) => ({ ...d, values }))} />
@@ -1045,14 +1077,14 @@ function VariationEditorPanel({
           onClick={onCommit}
           className="h-8 rounded-lg bg-[#f56400] px-3 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
         >
-          {isEditing ? "Kaydet" : "Ekle"}
+          {isEditing ? "Save" : "Add"}
         </button>
         <button
           type="button"
           onClick={onCancel}
           className="h-8 rounded-lg border border-black/10 px-3 text-xs hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
         >
-          İptal
+          Cancel
         </button>
       </div>
     </div>
@@ -1080,7 +1112,7 @@ function CustomOptionsInput({ values, onChange }: { values: string[]; onChange: 
       {values.map((v) => (
         <span key={v} className="flex items-center gap-1 rounded-full bg-black/[.06] px-2 py-0.5 text-xs dark:bg-white/10">
           {v}
-          <button type="button" onClick={() => remove(v)} aria-label={`${v} seçeneğini kaldır`} className="text-zinc-500 hover:text-red-600">
+          <button type="button" onClick={() => remove(v)} aria-label={`Remove ${v} option`} className="text-zinc-500 hover:text-red-600">
             ×
           </button>
         </span>
@@ -1096,14 +1128,14 @@ function CustomOptionsInput({ values, onChange }: { values: string[]; onChange: 
           }
         }}
         onBlur={add}
-        placeholder={values.length === 0 ? "seçenek yaz, Enter'a bas…" : ""}
+        placeholder={values.length === 0 ? "Type an option, press Enter…" : ""}
         className="min-w-[100px] flex-1 border-none bg-transparent px-1 py-0.5 text-sm outline-none"
       />
     </div>
   );
 }
 
-/** The combination table — only rendered after "Uygula", columns limited to the enabled toggles. */
+/** The combination table — only rendered after "Apply", columns limited to the enabled toggles. */
 function VariationTable({
   combos,
   variations,
@@ -1143,7 +1175,7 @@ function VariationTable({
                 type="text"
                 value={bulk[k]}
                 onChange={(e) => setBulk((b) => ({ ...b, [k]: e.target.value }))}
-                placeholder={`Tüm ${VARIATION_COLUMN_LABEL[k]} alanlarını doldur`}
+                placeholder={`Fill all ${VARIATION_COLUMN_LABEL[k]} fields`}
                 className="h-8 w-44 rounded-lg border border-black/10 bg-white px-2 text-xs outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
               />
               <button
@@ -1151,7 +1183,7 @@ function VariationTable({
                 onClick={() => applyBulkFill(k, bulk[k])}
                 className="h-8 rounded-lg border border-black/10 px-2 text-xs hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
               >
-                Tümüne uygula
+                Apply to all
               </button>
             </div>
           ))}
@@ -1200,7 +1232,7 @@ function VariationTable({
                               : k === "quantity"
                                 ? baseQuantity || "1"
                                 : k === "readiness"
-                                  ? "opsiyonel"
+                                  ? "optional"
                                   : ""
                           }
                           className="h-7 w-24 rounded-md border border-black/10 bg-white px-1.5 outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"

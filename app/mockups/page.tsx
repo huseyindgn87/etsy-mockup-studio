@@ -163,11 +163,11 @@ interface PublishResult {
 }
 
 const SLIDERS = [
-  { key: "shade", label: "Kumaş gölgesi", min: 0, max: 130 },
-  { key: "disp", label: "Kırışıklık", min: 0, max: 40 },
-  { key: "dispR", label: "Kırışıklık yumuşatma", min: 2, max: 48 },
-  { key: "zoom", label: "Baskı boyutu", min: 40, max: 120 },
-  { key: "rot", label: "Döndürme", min: -180, max: 180 },
+  { key: "shade", label: "Fabric shading", min: 0, max: 130 },
+  { key: "disp", label: "Wrinkle", min: 0, max: 40 },
+  { key: "dispR", label: "Wrinkle smoothing", min: 2, max: 48 },
+  { key: "zoom", label: "Print size", min: 40, max: 120 },
+  { key: "rot", label: "Rotation", min: -180, max: 180 },
 ] as const;
 type SliderKey = (typeof SLIDERS)[number]["key"];
 
@@ -176,8 +176,8 @@ const stripExt = (s: string) => s.replace(/\.[^.]+$/, "");
 
 async function errorFrom(res: Response): Promise<string> {
   const body = (await res.json().catch(() => null)) as { error?: string } | null;
-  if (res.status === 401) return "Etsy bağlantısı yok — ana sayfadan tekrar bağlan.";
-  return body?.error || `İstek başarısız (${res.status})`;
+  if (res.status === 401) return "Not connected to Etsy — reconnect from the home page.";
+  return body?.error || `Request failed (${res.status})`;
 }
 
 export default function MockupsPage() {
@@ -257,7 +257,7 @@ export default function MockupsPage() {
     setError(null);
     const added: MockupItem[] = [];
     for (let i = 0; i < psds.length; i++) {
-      setBusy(`PSD okunuyor (${i + 1}/${psds.length})`);
+      setBusy(`Reading PSD (${i + 1}/${psds.length})`);
       const file = psds[i];
       try {
         const fd = new FormData();
@@ -329,7 +329,7 @@ export default function MockupsPage() {
           tone: body.tone?.tone ?? null,
         });
       } catch (err) {
-        setError(`${file.name}: ${err instanceof Error ? err.message : "okunamadı"}`);
+        setError(`${file.name}: ${err instanceof Error ? err.message : "could not be read"}`);
       }
     }
     if (added.length) {
@@ -344,7 +344,7 @@ export default function MockupsPage() {
     if (!imgs.length) return;
     const added: DesignItem[] = [];
     for (let i = 0; i < imgs.length; i++) {
-      setBusy(`Tasarım okunuyor (${i + 1}/${imgs.length})`);
+      setBusy(`Reading design (${i + 1}/${imgs.length})`);
       const file = imgs[i];
       try {
         added.push({
@@ -355,7 +355,7 @@ export default function MockupsPage() {
           url: URL.createObjectURL(file),
         });
       } catch {
-        setError(`${file.name}: görsel okunamadı`);
+        setError(`${file.name}: image could not be read`);
       }
     }
     if (added.length) {
@@ -397,7 +397,7 @@ export default function MockupsPage() {
   const [calibrationNote, setCalibrationNote] = useState<string | null>(null);
   const saveActiveCalibration = useCallback(async () => {
     if (!active) return;
-    setCalibrationNote("Kaydediliyor…");
+    setCalibrationNote("Saving…");
     try {
       const res = await fetch("/api/mockups/calibrations", {
         method: "PUT",
@@ -411,9 +411,9 @@ export default function MockupsPage() {
       setMockups((prev) =>
         prev.map((m) => (m.id === active.id ? { ...m, hasSavedCalibration: true } : m)),
       );
-      setCalibrationNote("Kaydedildi ✓");
+      setCalibrationNote("Saved ✓");
     } catch (err) {
-      setCalibrationNote(err instanceof Error ? err.message : "Kaydedilemedi.");
+      setCalibrationNote(err instanceof Error ? err.message : "Could not be saved.");
     }
   }, [active]);
 
@@ -472,7 +472,7 @@ export default function MockupsPage() {
     setError(null);
     setPublishResult(null);
     try {
-      setBusy(`${jobCount} görsel render ediliyor…`);
+      setBusy(`Rendering ${jobCount} images…`);
       const res = await fetch("/api/mockups/render", {
         method: "POST",
         body: buildBatchForm(),
@@ -486,7 +486,7 @@ export default function MockupsPage() {
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 30_000);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Render başarısız.");
+      setError(err instanceof Error ? err.message : "Render failed.");
     } finally {
       setBusy(null);
     }
@@ -495,7 +495,7 @@ export default function MockupsPage() {
   const publishToEtsy = useCallback(async () => {
     if (!included.length || !designs.length || publishId == null) return;
     if (publishMode === "new" && !listingForm.title.trim()) {
-      setError("Yeni taslak için bir başlık gir (Listing bilgileri formu).");
+      setError("Enter a title for the new draft (Listing information form).");
       return;
     }
     setError(null);
@@ -503,8 +503,8 @@ export default function MockupsPage() {
     try {
       setBusy(
         publishMode === "existing"
-          ? `${publishCount} görsel Etsy'ye ekleniyor…`
-          : "Taslak oluşturuluyor ve görseller yükleniyor…",
+          ? `Adding ${publishCount} images to Etsy…`
+          : "Creating draft and uploading images…",
       );
       const publishTo: Record<string, unknown> = {
         mode: publishMode,
@@ -545,8 +545,8 @@ export default function MockupsPage() {
         throw new Error(
           body?.error ||
             (res.status === 401
-              ? "Etsy bağlantısı yok — ana sayfadan tekrar bağlan."
-              : `Yükleme başarısız (${res.status})`),
+              ? "Not connected to Etsy — reconnect from the home page."
+              : `Upload failed (${res.status})`),
         );
       }
       setPublishResult({
@@ -558,7 +558,7 @@ export default function MockupsPage() {
         skipped: body.skipped ?? 0,
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Etsy yüklemesi başarısız.");
+      setError(err instanceof Error ? err.message : "Etsy upload failed.");
     } finally {
       setBusy(null);
     }
@@ -585,14 +585,14 @@ export default function MockupsPage() {
               href="/"
               className="text-sm text-zinc-500 transition-colors hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
             >
-              ← Geri
+              ← Back
             </Link>
             <h1 className="mt-1 text-2xl font-semibold tracking-tight text-black dark:text-zinc-50">
-              Mockup atölyesi
+              Mockup studio
             </h1>
             <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-              PSD şablonları ve tasarımları yükle, köşeleri ve kaydırıcıları
-              ayarla, toplu üret.
+              Upload PSD templates and designs, adjust corners and sliders,
+              batch-render.
             </p>
           </div>
           <button
@@ -601,7 +601,7 @@ export default function MockupsPage() {
             disabled={!!busy || jobCount === 0}
             className="h-10 rounded-full bg-[#f56400] px-5 text-sm font-medium text-white transition-colors hover:bg-[#d95700] disabled:opacity-40"
           >
-            {busy ?? `Toplu üret ve indir (${jobCount})`}
+            {busy ?? `Batch render & download (${jobCount})`}
           </button>
         </header>
 
@@ -615,13 +615,13 @@ export default function MockupsPage() {
           <div className="mt-4 rounded-xl border border-black/10 bg-white p-4 dark:border-white/15 dark:bg-zinc-950">
             <div className="flex flex-wrap items-center gap-2 text-sm">
               <span className="font-medium text-zinc-700 dark:text-zinc-300">
-                Etsy&apos;ye gönder:
+                Publish to Etsy:
               </span>
               {(
                 [
-                  ["copy", "Kopyala → kopyaya"],
-                  ["new", "Yeni taslak → ona"],
-                  ["existing", "Seçili listing'e ekle"],
+                  ["copy", "Copy → to a copy"],
+                  ["new", "New draft → to it"],
+                  ["existing", "Add to selected listing"],
                 ] as const
               ).map(([m, lbl]) => (
                 <button
@@ -641,7 +641,7 @@ export default function MockupsPage() {
 
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <label className="text-xs text-zinc-500">
-                {publishMode === "existing" ? "Hedef listing" : "Kaynak listing"}
+                {publishMode === "existing" ? "Target listing" : "Source listing"}
               </label>
               <ListingPicker
                 listings={listings}
@@ -653,8 +653,8 @@ export default function MockupsPage() {
 
               {publishMode === "new" && (
                 <span className="text-xs text-zinc-500">
-                  Başlık, açıklama ve diğer alanlar aşağıdaki &quot;Listing bilgileri&quot;
-                  formundan gelir.
+                  Title, description, and other fields come from the &quot;Listing
+                  information&quot; form below.
                 </span>
               )}
 
@@ -666,7 +666,7 @@ export default function MockupsPage() {
                     onChange={(e) => setOverwriteExisting(e.target.checked)}
                     className="accent-[#f56400]"
                   />
-                  mevcut görselleri değiştir (rank sırasıyla)
+                  replace existing images (in rank order)
                 </label>
               )}
 
@@ -677,17 +677,17 @@ export default function MockupsPage() {
                 className="ml-auto h-9 rounded-full border border-[#f56400] px-4 text-sm font-medium text-[#f56400] transition-colors hover:bg-[#f56400]/10 disabled:opacity-40"
               >
                 {publishMode === "existing"
-                  ? `Ekle (${publishCount})`
-                  : `Taslak oluştur ve yükle (${publishCount})`}
+                  ? `Add (${publishCount})`
+                  : `Create draft & upload (${publishCount})`}
               </button>
             </div>
 
             <p className="mt-2 text-xs text-zinc-500">
               {publishMode === "existing"
                 ? overwriteExisting
-                  ? "Seçili listing’in ilk sıralarındaki görseller bu render’larla değiştirilir."
-                  : "Görseller seçili listing’e eklenir (10 sınırını aşanlar atlanır). Hiçbir görsel silinmez."
-                : "Yeni bir taslak listing oluşturulur ve görseller ona yüklenir. Canlı listing’e dokunulmaz."}
+                  ? "The selected listing's first images will be replaced with these renders."
+                  : "Images are added to the selected listing (anything past the 10-image limit is skipped). No images are deleted."
+                : "A new draft listing is created and images are uploaded to it. The live listing is never touched."}
             </p>
           </div>
         )}
@@ -695,11 +695,11 @@ export default function MockupsPage() {
         {publishResult && (
           <div className="mt-4 rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800 dark:border-green-900 dark:bg-green-950/50 dark:text-green-300">
             {publishResult.createdDraft
-              ? `Taslak listing #${publishResult.listingId} oluşturuldu · `
+              ? `Draft listing #${publishResult.listingId} created · `
               : ""}
-            {publishResult.uploaded.length} görsel yüklendi
+            {publishResult.uploaded.length} images uploaded
             {publishResult.skipped > 0 &&
-              ` · ${publishResult.skipped} atlandı (10 görsel sınırı)`}
+              ` · ${publishResult.skipped} skipped (10-image limit)`}
             {publishResult.createdDraft && (
               <>
                 {" · "}
@@ -709,7 +709,7 @@ export default function MockupsPage() {
                   rel="noreferrer"
                   className="underline"
                 >
-                  Etsy&apos;de aç
+                  Open on Etsy
                 </a>
               </>
             )}
@@ -729,7 +729,7 @@ export default function MockupsPage() {
           {/* ---- left: lists ---- */}
           <div className="space-y-6">
             <Dropzone
-              label="Mockup PSD'leri"
+              label="Mockup PSDs"
               accept=".psd"
               inputRef={psdInput}
               onFiles={addPsds}
@@ -778,7 +778,7 @@ export default function MockupsPage() {
             )}
 
             <Dropzone
-              label="Tasarımlar"
+              label="Designs"
               accept="image/*"
               inputRef={designInput}
               onFiles={addDesigns}
@@ -827,7 +827,7 @@ export default function MockupsPage() {
                             : "border border-black/10 dark:border-white/15"
                         }`}
                       >
-                        {active.areaNames[i] || `Alan ${i + 1}`}
+                        {active.areaNames[i] || `Area ${i + 1}`}
                       </button>
                     ))}
                   </div>
@@ -843,12 +843,12 @@ export default function MockupsPage() {
                   onAreaChange={onAreaChange}
                 />
                 <p className="mt-2 text-center text-xs text-zinc-500">
-                  {active.psdW}×{active.psdH}px · köşeleri sürükle, alanın içinden tut taşı
+                  {active.psdW}×{active.psdH}px · drag the corners, grab inside the area to move it
                 </p>
               </>
             ) : (
               <div className="flex h-72 items-center justify-center rounded-lg border border-dashed border-black/15 text-sm text-zinc-500 dark:border-white/20">
-                Bir PSD yükle ve listeden seç.
+                Upload a PSD and pick one from the list.
               </div>
             )}
           </div>
@@ -859,13 +859,13 @@ export default function MockupsPage() {
               <>
                 <div>
                   <span className="mb-1.5 block text-sm text-zinc-600 dark:text-zinc-400">
-                    Köşe
+                    Corners
                   </span>
                   <div className="flex gap-1.5">
                     {(
                       [
-                        ["free", "Serbest"],
-                        ["ratio", "Oranı Koru"],
+                        ["free", "Free"],
+                        ["ratio", "Keep ratio"],
                       ] as const
                     ).map(([m, label]) => (
                       <button
@@ -884,8 +884,8 @@ export default function MockupsPage() {
                   </div>
                   <p className="mt-1 text-xs text-zinc-500">
                     {cornerMode === "ratio"
-                      ? "Bir köşeyi sürüklemek alanı karşı köşeden orantılı büyütür/küçültür."
-                      : "Her köşe bağımsız sürüklenir (perspektif)."}
+                      ? "Dragging one corner scales the area proportionally from the opposite corner."
+                      : "Each corner drags independently (perspective)."}
                   </p>
                 </div>
 
@@ -915,18 +915,18 @@ export default function MockupsPage() {
                     onClick={saveActiveCalibration}
                     className="h-9 w-full rounded-full border border-black/10 text-sm font-medium transition-colors hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
                   >
-                    Kalibrasyonu kaydet
+                    Save calibration
                   </button>
                   <p className="mt-1.5 text-center text-xs text-zinc-500">
                     {calibrationNote ??
                       (active.hasSavedCalibration
-                        ? "Bu şablon için kayıtlı bir kalibrasyon yüklendi."
-                        : "Bu şablon için henüz kayıt yok — köşe/kaydırıcı ayarların sadece bu oturumda kalır.")}
+                        ? "A saved calibration was loaded for this template."
+                        : "No saved calibration yet for this template — your corner/slider settings only persist for this session.")}
                   </p>
                 </div>
               </>
             ) : (
-              <p className="text-sm text-zinc-500">Ayarlar için bir mockup seç.</p>
+              <p className="text-sm text-zinc-500">Select a mockup to adjust its settings.</p>
             )}
           </div>
         </div>
@@ -936,9 +936,9 @@ export default function MockupsPage() {
         </div>
 
         <p className="mt-8 text-sm text-zinc-500 dark:text-zinc-400">
-          {mockups.length} şablon ({included.length} işaretli) × {designs.length}{" "}
-          tasarım = <span className="font-medium">{jobCount}</span> görsel.
-          Önizleme tarayıcıda, toplu üretim sunucuda — aynı çekirdek.
+          {mockups.length} templates ({included.length} checked) × {designs.length}{" "}
+          designs = <span className="font-medium">{jobCount}</span> images.
+          Preview runs in the browser, batch rendering on the server — same core.
         </p>
       </div>
     </div>
@@ -979,7 +979,7 @@ function Dropzone({
         }`}
       >
         <span className="font-medium text-zinc-700 dark:text-zinc-300">{label}</span>
-        <span>tıkla ya da sürükle</span>
+        <span>click or drag</span>
       </button>
       <input
         ref={inputRef}
@@ -1004,7 +1004,7 @@ function ToneBadge({ tone }: { tone: string }) {
         dark ? "bg-zinc-800 text-zinc-100" : "bg-zinc-200 text-zinc-700"
       }`}
     >
-      {dark ? "KOYU" : "AÇIK"}
+      {dark ? "DARK" : "LIGHT"}
     </span>
   );
 }
@@ -1064,9 +1064,9 @@ function ListingPicker({
   }, [open]);
 
   const rows = useMemo(() => {
-    const q = query.trim().toLocaleLowerCase("tr-TR");
+    const q = query.trim().toLowerCase();
     if (!q) return listings;
-    return listings.filter((l) => l.title.toLocaleLowerCase("tr-TR").includes(q));
+    return listings.filter((l) => l.title.toLowerCase().includes(q));
   }, [listings, query]);
 
   return (
@@ -1079,7 +1079,7 @@ function ListingPicker({
       >
         <ListingThumb url={value?.thumbnailUrl ?? null} size={32} />
         <span className="max-w-[200px] truncate">
-          {value ? shortTitle(value.title) : loading ? "Listingler yükleniyor…" : "Listing seç"}
+          {value ? shortTitle(value.title) : loading ? "Loading listings…" : "Select a listing"}
         </span>
         <span className="text-zinc-400">▾</span>
       </button>
@@ -1092,19 +1092,19 @@ function ListingPicker({
               autoFocus
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Başlığa göre ara…"
+              placeholder="Search by title…"
               className="h-8 w-full rounded-md border border-black/10 bg-white px-2 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-900"
             />
           </div>
           <ul className="max-h-72 overflow-y-auto py-1">
             {loading && (
               <li className="px-2 py-3 text-center text-xs text-zinc-500">
-                Listingler yükleniyor…
+                Loading listings…
               </li>
             )}
             {!loading && rows.length === 0 && (
               <li className="px-2 py-3 text-center text-xs text-zinc-500">
-                {query.trim() ? "Eşleşen listing yok." : "Listing yok."}
+                {query.trim() ? "No matching listings." : "No listings."}
               </li>
             )}
             {!loading &&

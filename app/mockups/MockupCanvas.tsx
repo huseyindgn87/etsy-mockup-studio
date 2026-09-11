@@ -135,7 +135,7 @@ export default function MockupCanvas({
         <button
           key={i}
           type="button"
-          aria-label={`Köşe ${i + 1}`}
+          aria-label={`Corner ${i + 1}`}
           onPointerDown={(e) => {
             e.preventDefault();
             e.stopPropagation();

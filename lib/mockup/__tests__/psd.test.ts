@@ -133,7 +133,7 @@ describe("parsePsd composite", () => {
 describe("parsePsd rejects bad files", () => {
   test("non-PSD signature", () => {
     expect(() => parsePsd(bufOf(ascii("NOPE!!")))).toThrow(PsdParseError);
-    expect(() => parsePsd(bufOf(ascii("NOPE!!")))).toThrow("PSD dosyası değil");
+    expect(() => parsePsd(bufOf(ascii("NOPE!!")))).toThrow("Not a PSD file");
   });
 
   test("PSB (version 2)", () => {

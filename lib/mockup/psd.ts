@@ -87,17 +87,17 @@ export function parsePsd(buf: ArrayBuffer): PsdParseResult {
   };
   const sig = () => String.fromCharCode(U8[o++], U8[o++], U8[o++], U8[o++]);
 
-  if (sig() !== "8BPS") throw new PsdParseError("PSD dosyası değil");
+  if (sig() !== "8BPS") throw new PsdParseError("Not a PSD file");
   const ver = u16();
-  if (ver !== 1) throw new PsdParseError("PSB desteklenmiyor — .psd olarak kaydet");
+  if (ver !== 1) throw new PsdParseError("PSB not supported — save as .psd");
   o += 6;
   const channels = u16();
   const height = u32();
   const width = u32();
   const depth = u16();
   const mode = u16();
-  if (depth !== 8) throw new PsdParseError(depth + " bit — 8 bit/kanal olarak kaydet");
-  if (mode !== 3) throw new PsdParseError("RGB modunda kaydet");
+  if (depth !== 8) throw new PsdParseError(depth + "-bit — save as 8 bit/channel");
+  if (mode !== 3) throw new PsdParseError("Save in RGB mode");
 
   {
     const n = u32();
@@ -248,11 +248,11 @@ export function parsePsd(buf: ArrayBuffer): PsdParseResult {
       planes.push(plane);
     }
   } else {
-    throw new PsdParseError('ZIP sıkıştırmalı PSD — "Maximize Compatibility" açık kaydet');
+    throw new PsdParseError('ZIP-compressed PSD — save with "Maximize Compatibility" on');
   }
 
   if (planes.length < 3)
-    throw new PsdParseError('Kompozit görüntü yok — "Maximize Compatibility" açık kaydet');
+    throw new PsdParseError('No composite image — save with "Maximize Compatibility" on');
 
   const composite: Raster = {
     data: new Uint8ClampedArray(npx * 4),

@@ -179,7 +179,7 @@ function sanitizeProperties(raw: unknown): PropertyEntry[] {
     }
     out.push({
       propertyId: propertyId as number,
-      name: typeof name === "string" && name ? name : `özellik #${propertyId as number}`,
+      name: typeof name === "string" && name ? name : `property #${propertyId as number}`,
       valueIds: valueIds as number[],
       values: values as string[],
       scaleId: typeof scaleId === "number" && scaleId > 0 ? scaleId : null,
@@ -252,7 +252,7 @@ function sanitizeVariations(raw: unknown): CleanVariations | null {
       }
       propertyValues.push({
         propertyId: propertyId as number,
-        name: typeof name === "string" && name ? name : `özellik #${propertyId as number}`,
+        name: typeof name === "string" && name ? name : `property #${propertyId as number}`,
         valueIds: valueIds as number[],
         values: values as string[],
       });
@@ -577,7 +577,7 @@ export async function POST(request: Request) {
             } catch (err) {
               failed.push({
                 name: p.name,
-                error: err instanceof Error ? err.message : "kaydedilemedi",
+                error: err instanceof Error ? err.message : "could not be saved",
               });
             }
           }
@@ -601,8 +601,8 @@ export async function POST(request: Request) {
               });
             } catch (err) {
               failed.push({
-                name: "Varyasyonlar",
-                error: err instanceof Error ? err.message : "kaydedilemedi",
+                name: "Variations",
+                error: err instanceof Error ? err.message : "could not be saved",
               });
               variations = null; // grid failed to save -> don't try to attach images to it
             }
@@ -614,7 +614,7 @@ export async function POST(request: Request) {
               } catch (err) {
                 failed.push({
                   name: "SKU",
-                  error: err instanceof Error ? err.message : "kaydedilemedi",
+                  error: err instanceof Error ? err.message : "could not be saved",
                 });
               }
             }
@@ -693,8 +693,8 @@ export async function POST(request: Request) {
           await updateVariationImages(shopId, targetListingId, resolved);
         } catch (err) {
           failed.push({
-            name: "Varyasyon görselleri",
-            error: err instanceof Error ? err.message : "kaydedilemedi",
+            name: "Variation images",
+            error: err instanceof Error ? err.message : "could not be saved",
           });
         }
       }
