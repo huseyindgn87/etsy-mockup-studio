@@ -1,0 +1,35 @@
+// Prisma schema — Neon Postgres.
+//
+// Prisma 7 moved connection URLs out of this file: `prisma.config.ts` gives
+// the CLI (migrate/generate) `DIRECT_URL` (Neon's unpooled connection — the
+// schema engine needs session-level statements PgBouncer's transaction
+// pooling doesn't support), and the runtime `PrismaClient` gets `DATABASE_URL`
+// (Neon's pooled connection) via the `@prisma/adapter-neon` driver adapter
+// (see lib/db/prisma.ts). No `url` here — see the schema-validation error if
+// you add one back.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// One saved mockup calibration (print-area corners + sliders), keyed by a
+/// hash of the source PSD's bytes so the same template maps to the same
+/// calibration regardless of filename. Scoped to the Etsy user who saved it.
+/// `data` is the `Calibration` shape from lib/mockup/types.ts, validated with
+/// `coerceCalibration` before it is ever written.
+model MockupCalibration {
+  id          String   @id @default(cuid())
+  etsyUserId  String
+  contentHash String
+  data        Json
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([etsyUserId, contentHash])
+  @@index([etsyUserId])
+  @@map("mockup_calibrations")
+}

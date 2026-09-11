@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
 import { getEtsySession } from "@/lib/etsy/auth";
+import { getSavedCalibration } from "@/lib/mockup/calibration-store";
 import { parsePsd, PsdParseError, type PsdParseResult } from "@/lib/mockup/psd";
 import { encodeRasterDataUrl } from "@/lib/mockup/server";
 import { measureTone } from "@/lib/mockup/tone";
@@ -61,11 +63,15 @@ function suggestCalibration(quads: Quad[]): Calibration {
  * `POST /api/mockups/psd` — `multipart/form-data`, field `psd`. Returns the PSD's
  * composite as a PNG data URL, every readable print area (normalised quads) with
  * its layer name, the overlay layers above the lowest area (each its own PNG), a
- * garment tone reading, and a ready-to-edit calibration seeded from the areas.
- * The geometry / compositing math stays in `lib/mockup`; this only decodes.
+ * garment tone reading, a ready-to-edit calibration seeded from the areas, and a
+ * content hash (sha256 of the PSD's bytes) plus any calibration already saved
+ * under it — `filename|size` isn't used as a key so renaming a template doesn't
+ * lose its calibration. The geometry / compositing math stays in `lib/mockup`;
+ * this only decodes.
  */
 export async function POST(request: Request) {
-  if (!(await getEtsySession())) {
+  const session = await getEtsySession();
+  if (!session) {
     return NextResponse.json({ error: "Not connected to Etsy." }, { status: 401 });
   }
 
@@ -85,9 +91,12 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: `PSD too large (max ${mb} MB).` }, { status: 413 });
   }
 
+  const buf = await file.arrayBuffer();
+  const contentHash = createHash("sha256").update(new Uint8Array(buf)).digest("hex");
+
   let parsed: PsdParseResult;
   try {
-    parsed = parsePsd(await file.arrayBuffer());
+    parsed = parsePsd(buf);
   } catch (err) {
     if (err instanceof PsdParseError) {
       return NextResponse.json({ error: err.message }, { status: 422 });
@@ -118,9 +127,13 @@ export async function POST(request: Request) {
   ]);
 
   const tone = measureTone(parsed.composite, { isMock: true, name: file.name });
+  const savedCalibration = await getSavedCalibration(session.userId, contentHash).catch(
+    () => null, // a DB hiccup shouldn't block the parse — the UI falls back to suggestedCalibration
+  );
 
   return NextResponse.json({
     psd: { width: parsed.width, height: parsed.height },
+    contentHash,
     composite,
     areas: parsed.quads,
     areaNames: parsed.areaNames,
@@ -129,5 +142,6 @@ export async function POST(request: Request) {
     overlays,
     tone,
     suggestedCalibration: suggestCalibration(parsed.quads),
+    savedCalibration,
   });
 }

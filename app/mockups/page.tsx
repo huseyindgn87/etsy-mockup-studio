@@ -28,11 +28,15 @@ interface MockupItem {
   file: File; // composite PNG, native res, for the batch upload
   psdW: number;
   psdH: number;
+  /** sha256 of the source PSD's bytes — the calibration DB key. */
+  contentHash: string;
   previewScale: number;
   mockRaster: Raster; // scaled by previewScale
   overlays: OverlayMeta[];
   areaNames: string[];
   calibration: Calibration;
+  /** Whether `calibration` came back from a saved DB row (vs. freshly suggested). */
+  hasSavedCalibration: boolean;
   include: boolean;
   tone: string | null;
 }
@@ -150,6 +154,7 @@ export default function MockupsPage() {
         if (!res.ok) throw new Error(await errorFrom(res));
         const body = (await res.json()) as {
           psd: { width: number; height: number };
+          contentHash: string;
           composite: string;
           areaNames: string[];
           overlays: {
@@ -163,6 +168,7 @@ export default function MockupsPage() {
           }[];
           tone: { tone: string | null };
           suggestedCalibration: Calibration;
+          savedCalibration: Calibration | null;
         };
 
         const scale = Math.min(
@@ -200,11 +206,13 @@ export default function MockupsPage() {
           file: compositeFile,
           psdW: body.psd.width,
           psdH: body.psd.height,
+          contentHash: body.contentHash,
           previewScale: scale,
           mockRaster,
           overlays,
           areaNames: body.areaNames ?? [],
-          calibration: body.suggestedCalibration,
+          calibration: body.savedCalibration ?? body.suggestedCalibration,
+          hasSavedCalibration: !!body.savedCalibration,
           include: true,
           tone: body.tone?.tone ?? null,
         });
@@ -273,6 +281,29 @@ export default function MockupsPage() {
     },
     [activeId, patchCalibration],
   );
+
+  const [calibrationNote, setCalibrationNote] = useState<string | null>(null);
+  const saveActiveCalibration = useCallback(async () => {
+    if (!active) return;
+    setCalibrationNote("Kaydediliyor…");
+    try {
+      const res = await fetch("/api/mockups/calibrations", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contentHash: active.contentHash,
+          calibration: active.calibration,
+        }),
+      });
+      if (!res.ok) throw new Error(await errorFrom(res));
+      setMockups((prev) =>
+        prev.map((m) => (m.id === active.id ? { ...m, hasSavedCalibration: true } : m)),
+      );
+      setCalibrationNote("Kaydedildi ✓");
+    } catch (err) {
+      setCalibrationNote(err instanceof Error ? err.message : "Kaydedilemedi.");
+    }
+  }, [active]);
 
   const included = useMemo(() => mockups.filter((m) => m.include), [mockups]);
   const jobCount = included.length * designs.length;
@@ -609,6 +640,7 @@ export default function MockupsPage() {
                         onClick={() => {
                           setActiveId(m.id);
                           setActiveArea(0);
+                          setCalibrationNote(null);
                         }}
                         className="flex-1 truncate text-left"
                       >
@@ -699,25 +731,43 @@ export default function MockupsPage() {
           {/* ---- right: controls ---- */}
           <div className="space-y-4">
             {active ? (
-              SLIDERS.map((s) => {
-                const value = Number(active.calibration[s.key] ?? s.min);
-                return (
-                  <label key={s.key} className="block text-sm">
-                    <span className="flex justify-between text-zinc-600 dark:text-zinc-400">
-                      <span>{s.label}</span>
-                      <span className="font-mono">{Math.round(value)}</span>
-                    </span>
-                    <input
-                      type="range"
-                      min={s.min}
-                      max={s.max}
-                      value={value}
-                      onChange={(e) => onSlider(s.key, Number(e.target.value))}
-                      className="mt-1 w-full accent-[#f56400]"
-                    />
-                  </label>
-                );
-              })
+              <>
+                {SLIDERS.map((s) => {
+                  const value = Number(active.calibration[s.key] ?? s.min);
+                  return (
+                    <label key={s.key} className="block text-sm">
+                      <span className="flex justify-between text-zinc-600 dark:text-zinc-400">
+                        <span>{s.label}</span>
+                        <span className="font-mono">{Math.round(value)}</span>
+                      </span>
+                      <input
+                        type="range"
+                        min={s.min}
+                        max={s.max}
+                        value={value}
+                        onChange={(e) => onSlider(s.key, Number(e.target.value))}
+                        className="mt-1 w-full accent-[#f56400]"
+                      />
+                    </label>
+                  );
+                })}
+
+                <div className="border-t border-black/10 pt-4 dark:border-white/15">
+                  <button
+                    type="button"
+                    onClick={saveActiveCalibration}
+                    className="h-9 w-full rounded-full border border-black/10 text-sm font-medium transition-colors hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
+                  >
+                    Kalibrasyonu kaydet
+                  </button>
+                  <p className="mt-1.5 text-center text-xs text-zinc-500">
+                    {calibrationNote ??
+                      (active.hasSavedCalibration
+                        ? "Bu şablon için kayıtlı bir kalibrasyon yüklendi."
+                        : "Bu şablon için henüz kayıt yok — köşe/kaydırıcı ayarların sadece bu oturumda kalır.")}
+                  </p>
+                </div>
+              </>
             ) : (
               <p className="text-sm text-zinc-500">Ayarlar için bir mockup seç.</p>
             )}
