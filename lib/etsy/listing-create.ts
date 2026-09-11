@@ -31,6 +31,8 @@ export interface ListingStructure {
   taxonomyId: number;
   shippingProfileId: number | null;
   returnPolicyId: number | null;
+  /** The processing profile Etsy requires on every physical listing. */
+  readinessStateId: number | null;
   tags: string[];
   materials: string[];
 }
@@ -45,6 +47,7 @@ interface RawListing {
   taxonomy_id?: number;
   shipping_profile_id?: number | null;
   return_policy_id?: number | null;
+  readiness_state_id?: number | null;
   tags?: string[];
   materials?: string[];
 }
@@ -66,6 +69,7 @@ export async function getListingStructure(
     taxonomyId: l.taxonomy_id ?? 0,
     shippingProfileId: l.shipping_profile_id ?? null,
     returnPolicyId: l.return_policy_id ?? null,
+    readinessStateId: l.readiness_state_id ?? null,
     tags: Array.isArray(l.tags) ? l.tags : [],
     materials: Array.isArray(l.materials) ? l.materials : [],
   };
@@ -81,6 +85,8 @@ export interface DraftListingInput {
   taxonomyId: number;
   shippingProfileId?: number | null;
   returnPolicyId?: number | null;
+  /** Required by Etsy for every physical listing. */
+  readinessStateId?: number | null;
   shopSectionId?: number | null;
   tags?: string[];
   materials?: string[];
@@ -106,6 +112,8 @@ export async function createDraftListing(
     form.set("shipping_profile_id", String(input.shippingProfileId));
   if (input.returnPolicyId)
     form.set("return_policy_id", String(input.returnPolicyId));
+  if (input.readinessStateId)
+    form.set("readiness_state_id", String(input.readinessStateId));
   if (input.shopSectionId) form.set("shop_section_id", String(input.shopSectionId));
   for (const t of input.tags ?? []) if (t) form.append("tags", t);
   for (const m of input.materials ?? []) if (m) form.append("materials", m);

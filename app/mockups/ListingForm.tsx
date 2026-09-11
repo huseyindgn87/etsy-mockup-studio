@@ -25,6 +25,17 @@ export interface ListingFormVariation {
 
 export type VariationToggleKey = "price" | "readiness" | "quantity" | "sku";
 
+/** One tab of the left-nav listing editor that this form's fields live in. */
+export type ListingFormTab =
+  | "title"
+  | "description"
+  | "tags"
+  | "details"
+  | "price"
+  | "inventory"
+  | "variations"
+  | "shipping";
+
 export interface VariationToggleState {
   enabled: boolean;
   /** Indices into `variations` this field varies by (0, 1, or both). */
@@ -57,6 +68,8 @@ export interface ListingFormValue {
   price: string;
   quantity: string;
   sku: string;
+  /** Etsy's processing-profile id — required on every physical listing. */
+  readinessStateId: number | null;
   /** Up to 2, in display order (first/second). */
   variations: ListingFormVariation[];
   variationToggles: Record<VariationToggleKey, VariationToggleState>;
@@ -81,6 +94,7 @@ export const EMPTY_LISTING_FORM: ListingFormValue = {
   price: "",
   quantity: "1",
   sku: "",
+  readinessStateId: null,
   variations: [],
   variationToggles: EMPTY_VARIATION_TOGGLES,
   variationRows: EMPTY_VARIATION_ROWS,
@@ -121,6 +135,13 @@ interface ShopSectionOption {
   shopSectionId: number;
   title: string;
 }
+interface ProcessingProfileOption {
+  readinessStateId: number;
+  readinessState: "ready_to_ship" | "made_to_order";
+  minProcessingDays: number;
+  maxProcessingDays: number;
+  displayLabel: string;
+}
 
 /** Etsy's shop-section titles come back HTML-escaped (e.g. "&gt;&gt;HALLOWEEN&lt;&lt;"). */
 function decodeHtmlEntities(s: string): string {
@@ -141,17 +162,23 @@ function flattenTaxonomy(nodes: TaxonomyNode[], prefix = ""): FlatTaxonomyNode[]
 }
 
 /**
- * Listing-editing form: title, description, tags, category + category
- * properties + section, variations, price, and quantity/SKU — in the same
- * order as Etsy's own listing form. Values feed a draft listing on publish;
- * nothing here is sent to Etsy until then.
+ * Listing-editing form fields: title, description, tags, category + category
+ * properties + section, price, quantity/SKU, and variations — one left-nav
+ * tab's worth of fields rendered at a time (`activeTab`, or nothing when
+ * `null`, e.g. while a non-form tab like Photos is active). All fields'
+ * fetch effects and local state stay mounted regardless of which tab is
+ * showing, so switching tabs never drops in-flight data or re-fetches
+ * taxonomy/sections. Values feed a draft listing on publish; nothing here is
+ * sent to Etsy until then.
  */
 export default function ListingForm({
   value,
   onChange,
+  activeTab,
 }: {
   value: ListingFormValue;
   onChange: (next: ListingFormValue) => void;
+  activeTab: ListingFormTab | null;
 }) {
   const patch = (partial: Partial<ListingFormValue>) => onChange({ ...value, ...partial });
 
@@ -292,21 +319,35 @@ export default function ListingForm({
       });
   }, []);
 
+  // ---- processing profiles (readiness states) ----
+  const [processingProfiles, setProcessingProfiles] = useState<ProcessingProfileOption[] | null>(null);
+  const [processingProfilesError, setProcessingProfilesError] = useState<string | null>(null);
+  useEffect(() => {
+    fetch("/api/etsy/processing-profiles")
+      .then(async (res) => {
+        const body = (await res.json().catch(() => null)) as
+          | { profiles?: ProcessingProfileOption[]; error?: string }
+          | null;
+        if (!res.ok) throw new Error(body?.error || `Request failed (${res.status})`);
+        setProcessingProfiles(body?.profiles ?? []);
+      })
+      .catch((err) => {
+        setProcessingProfiles([]);
+        setProcessingProfilesError(
+          err instanceof Error ? err.message : "Could not load processing profiles.",
+        );
+      });
+  }, []);
+
   const inputCls =
     "w-full rounded-lg border border-black/10 bg-white px-3 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950";
   const sectionHeadingCls = "text-base font-bold text-zinc-900 dark:text-zinc-50";
 
-  return (
-    <div className="rounded-xl border border-black/10 bg-white p-4 dark:border-white/15 dark:bg-zinc-950">
-      <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
-        Listing information
-      </h2>
-      <p className="mt-0.5 text-xs text-zinc-500">
-        These values are used when sending to Etsy via &quot;New draft&quot;.
-      </p>
+  if (activeTab === null) return null;
 
-      <div className="mt-6 space-y-8">
-        {/* ---- 1. title ---- */}
+  return (
+    <>
+      {activeTab === "title" && (
         <section className="space-y-4">
           <h3 className={sectionHeadingCls}>Title</h3>
           <label className="block text-sm">
@@ -325,11 +366,16 @@ export default function ListingForm({
               className={`${inputCls} mt-1 h-10`}
             />
           </label>
+        </section>
+      )}
 
+      {activeTab === "description" && (
+        <section className="space-y-4">
+          <h3 className={sectionHeadingCls}>Description</h3>
           <label className="block text-sm">
             <span className="text-xs text-zinc-500">Description</span>
             <textarea
-              rows={5}
+              rows={8}
               value={value.description}
               onChange={(e) => patch({ description: e.target.value })}
               placeholder="Describe the product…"
@@ -337,8 +383,9 @@ export default function ListingForm({
             />
           </label>
         </section>
+      )}
 
-        {/* ---- 2. tags ---- */}
+      {activeTab === "tags" && (
         <section className="space-y-2">
           <h3 className={sectionHeadingCls}>Tags</h3>
           <div className="text-sm">
@@ -385,8 +432,9 @@ export default function ListingForm({
             </div>
           </div>
         </section>
+      )}
 
-        {/* ---- 3. details ---- */}
+      {activeTab === "details" && (
         <section className="space-y-3">
           <h3 className={sectionHeadingCls}>Details</h3>
 
@@ -494,24 +542,31 @@ export default function ListingForm({
             {sectionsError && <p className="mt-1 text-xs text-red-600">{sectionsError}</p>}
           </label>
         </section>
+      )}
 
-        {/* ---- 4. inventory: price + quantity + sku (no-variation fallback) ---- */}
-        <section className="space-y-3">
+      {activeTab === "price" && (
+        <section className="max-w-xs space-y-3">
+          <h3 className={sectionHeadingCls}>Price</h3>
+          <label className="block text-sm">
+            <span className="text-xs text-zinc-500">Price</span>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              inputMode="decimal"
+              value={value.price}
+              onChange={(e) => patch({ price: e.target.value })}
+              placeholder="0.00"
+              className={`${inputCls} mt-1 h-10`}
+            />
+          </label>
+        </section>
+      )}
+
+      {activeTab === "inventory" && (
+        <section className="max-w-md space-y-3">
           <h3 className={sectionHeadingCls}>Inventory</h3>
-          <div className="grid gap-3 sm:grid-cols-3 text-sm">
-            <label className="block">
-              <span className="text-xs text-zinc-500">Price</span>
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                inputMode="decimal"
-                value={value.price}
-                onChange={(e) => patch({ price: e.target.value })}
-                placeholder="0.00"
-                className={`${inputCls} mt-1 h-10`}
-              />
-            </label>
+          <div className="grid grid-cols-2 gap-3 text-sm">
             <label className="block">
               <span className="text-xs text-zinc-500">Quantity</span>
               <input
@@ -536,16 +591,63 @@ export default function ListingForm({
             </label>
           </div>
         </section>
+      )}
 
-        {/* ---- 5. variations ---- */}
+      {activeTab === "variations" && (
         <VariationsSection
           variationProperties={variationProperties}
           value={value}
           patch={patch}
           sectionHeadingCls={sectionHeadingCls}
         />
-      </div>
-    </div>
+      )}
+
+      {activeTab === "shipping" && (
+        <section className="max-w-md space-y-3">
+          <h3 className={sectionHeadingCls}>Shipping</h3>
+
+          {processingProfiles && processingProfiles.length === 0 && !processingProfilesError ? (
+            <p className="text-xs text-zinc-500">
+              This shop has no processing profile yet — Etsy requires one for every
+              physical listing.{" "}
+              <a
+                href="https://www.etsy.com/your/shops/me/tools/shipping-profiles"
+                target="_blank"
+                rel="noreferrer"
+                className="underline"
+              >
+                Create one on Etsy
+              </a>
+              , then reload this page.
+            </p>
+          ) : (
+            <label className="block text-sm">
+              <span className="text-xs text-zinc-500">Processing profile</span>
+              <select
+                value={value.readinessStateId ?? ""}
+                onChange={(e) => {
+                  const id = e.target.value ? Number(e.target.value) : null;
+                  patch({ readinessStateId: id });
+                }}
+                className={`${inputCls} mt-1 h-9`}
+              >
+                <option value="">Select a processing profile…</option>
+                {(processingProfiles ?? []).map((p) => (
+                  <option key={p.readinessStateId} value={p.readinessStateId}>
+                    {p.displayLabel || `${p.minProcessingDays}-${p.maxProcessingDays} days`}
+                    {" · "}
+                    {p.readinessState === "made_to_order" ? "Made to order" : "Ready to ship"}
+                  </option>
+                ))}
+              </select>
+              {processingProfilesError && (
+                <p className="mt-1 text-xs text-red-600">{processingProfilesError}</p>
+              )}
+            </label>
+          )}
+        </section>
+      )}
+    </>
   );
 }
 

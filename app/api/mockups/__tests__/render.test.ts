@@ -66,6 +66,7 @@ vi.mock("@/lib/etsy/listing-create", () => ({
     taxonomyId: 1234,
     shippingProfileId: 55,
     returnPolicyId: 66,
+    readinessStateId: 321,
     tags: ["a", "b"],
     materials: ["cotton"],
   })),
@@ -303,9 +304,10 @@ describe("POST /api/mockups/render", () => {
     expect(body.createdDraft).toBe(true);
     expect(createCalls).toHaveLength(1);
     expect(createCalls[0]).toMatchObject({
-      title: "Source tee (kopya)",
+      title: "Source tee (copy)",
       taxonomyId: 1234,
       shippingProfileId: 55,
+      readinessStateId: 321,
       tags: ["a", "b"],
     });
     // uploaded to the NEW draft, not the source
@@ -350,9 +352,34 @@ describe("POST /api/mockups/render", () => {
       title: "Blank draft",
       quantity: 7,
       taxonomyId: 1234,
+      readinessStateId: 321, // falls back to the source listing's since none was chosen
       tags: [],
       materials: [],
     });
+  }, 30_000);
+
+  test("mode:new uses the form's chosen readiness state instead of the source's", async () => {
+    createCalls.length = 0;
+    const mock = await png(80, 80, [0, 0, 0]);
+
+    const res = await POST(
+      form(
+        {
+          publishTo: {
+            mode: "new",
+            listingId: 500,
+            newListing: { title: "Ready to ship tee", readinessStateId: 654 },
+          },
+          mockups: [{ name: "m", calibration: {} }],
+          designs: [],
+          jobs: [{ mockup: 0 }],
+        },
+        [{ field: "mockup", buf: mock, name: "m.png" }],
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    expect(createCalls[0]).toMatchObject({ readinessStateId: 654 });
   }, 30_000);
 
   test("mode:new sends a chosen category, deduped/capped tags, section and properties, then sets the SKU", async () => {

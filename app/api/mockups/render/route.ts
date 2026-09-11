@@ -75,6 +75,8 @@ interface PublishSpec {
     tags?: string[];
     taxonomyId?: number;
     shopSectionId?: number | null;
+    /** Required by Etsy for every physical listing; falls back to the source listing's when omitted. */
+    readinessStateId?: number;
     properties?: {
       propertyId: number;
       valueIds: number[];
@@ -543,11 +545,15 @@ export async function POST(request: Request) {
           mode === "new" && Number.isInteger(nl.taxonomyId) && (nl.taxonomyId as number) > 0
             ? (nl.taxonomyId as number)
             : src.taxonomyId;
+        const readinessStateId =
+          mode === "new" && Number.isInteger(nl.readinessStateId) && (nl.readinessStateId as number) > 0
+            ? (nl.readinessStateId as number)
+            : src.readinessStateId;
 
         targetListingId = await createDraftListing(shopId, {
           title:
             mode === "copy"
-              ? publish.copyTitle?.trim() || `${src.title} (kopya)`
+              ? publish.copyTitle?.trim() || `${src.title} (copy)`
               : (nl.title as string).trim(),
           description: mode === "copy" ? src.description : nl.description || (nl.title as string),
           quantity,
@@ -557,6 +563,7 @@ export async function POST(request: Request) {
           taxonomyId,
           shippingProfileId: src.shippingProfileId,
           returnPolicyId: src.returnPolicyId,
+          readinessStateId,
           shopSectionId:
             mode === "new" && typeof nl.shopSectionId === "number" && nl.shopSectionId > 0
               ? nl.shopSectionId

@@ -7,6 +7,7 @@ vi.mock("@/lib/etsy/auth", () => ({
 
 import {
   createDraftListing,
+  getListingStructure,
   setListingInventorySku,
   setListingProperty,
   updateListingInventory,
@@ -62,6 +63,35 @@ describe("createDraftListing", () => {
     expect(body.has("shop_section_id")).toBe(false);
   });
 
+  test("sends readiness_state_id when given, omits it otherwise", async () => {
+    etsyFetch.mockResolvedValue(json({ listing_id: 1 }));
+    await createDraftListing(42, {
+      title: "T",
+      description: "D",
+      quantity: 1,
+      price: 1,
+      whoMade: "i_did",
+      whenMade: "made_to_order",
+      taxonomyId: 1,
+      readinessStateId: 654,
+    });
+    const [, withId] = etsyFetch.mock.calls[0];
+    expect(new URLSearchParams(withId?.body as string).get("readiness_state_id")).toBe("654");
+
+    etsyFetch.mockResolvedValue(json({ listing_id: 2 }));
+    await createDraftListing(42, {
+      title: "T",
+      description: "D",
+      quantity: 1,
+      price: 1,
+      whoMade: "i_did",
+      whenMade: "made_to_order",
+      taxonomyId: 1,
+    });
+    const [, withoutId] = etsyFetch.mock.calls[1];
+    expect(new URLSearchParams(withoutId?.body as string).has("readiness_state_id")).toBe(false);
+  });
+
   test("throws when Etsy doesn't return a listing id", async () => {
     etsyFetch.mockResolvedValue(json({}));
     await expect(
@@ -75,6 +105,35 @@ describe("createDraftListing", () => {
         taxonomyId: 1,
       }),
     ).rejects.toThrow();
+  });
+});
+
+describe("getListingStructure", () => {
+  test("extracts readiness_state_id alongside the other structural fields", async () => {
+    etsyFetch.mockResolvedValue(
+      json({
+        title: "Tee",
+        description: "A shirt",
+        quantity: 3,
+        price: { amount: 1999, divisor: 100, currency_code: "USD" },
+        who_made: "i_did",
+        when_made: "made_to_order",
+        taxonomy_id: 1234,
+        shipping_profile_id: 55,
+        return_policy_id: 66,
+        readiness_state_id: 321,
+        tags: ["a"],
+        materials: ["cotton"],
+      }),
+    );
+    const structure = await getListingStructure(555);
+    expect(structure.readinessStateId).toBe(321);
+  });
+
+  test("defaults readinessStateId to null when Etsy omits it", async () => {
+    etsyFetch.mockResolvedValue(json({ title: "Tee" }));
+    const structure = await getListingStructure(555);
+    expect(structure.readinessStateId).toBeNull();
   });
 });
 

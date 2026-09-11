@@ -121,6 +121,18 @@ export async function getShopId(): Promise<number> {
   return me.shop_id;
 }
 
+interface EtsyShopResponse {
+  shop_id: number;
+  shop_name: string;
+}
+
+/** The connected user's shop name, for display (e.g. the listing editor header). */
+export async function getShopName(): Promise<string> {
+  const shopId = await getShopId();
+  const shop = await etsyGetJson<EtsyShopResponse>(`/shops/${shopId}`);
+  return shop.shop_name;
+}
+
 function formatPrice(price?: EtsyPrice): string | null {
   if (!price || typeof price.amount !== "number" || !price.divisor) return null;
   const value = price.amount / price.divisor;
