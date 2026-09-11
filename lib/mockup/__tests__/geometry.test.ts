@@ -1,12 +1,16 @@
 import { expect, test } from "vitest";
 import {
+  clampCorner,
   containFit,
   homography,
+  moveCornerFree,
   pointInQuad,
   quadList,
   quadMetrics,
   quadToPx,
   rotateQuad,
+  scaleQuadFromCorner,
+  translateQuad,
 } from "../geometry";
 import type { Quad } from "../types";
 
@@ -102,4 +106,64 @@ test("pointInQuad", () => {
   const qPx = quadToPx(FULL, 100, 100);
   expect(pointInQuad([50, 50], qPx)).toBe(true);
   expect(pointInQuad([150, 50], qPx)).toBe(false);
+});
+
+test("clampCorner bounds to a generous but finite range", () => {
+  expect(clampCorner(0.5)).toBe(0.5);
+  expect(clampCorner(-10)).toBe(-0.5);
+  expect(clampCorner(10)).toBe(1.5);
+});
+
+test("moveCornerFree moves only the dragged corner", () => {
+  const r = moveCornerFree(FULL, 1, [0.9, 0.4]);
+  expect(r[1]).toEqual([0.9, 0.4]);
+  expect(r[0]).toEqual(FULL[0]);
+  expect(r[2]).toEqual(FULL[2]);
+  expect(r[3]).toEqual(FULL[3]);
+});
+
+test("moveCornerFree clamps the dragged corner into range", () => {
+  const r = moveCornerFree(FULL, 0, [-5, 5]);
+  expect(r[0]).toEqual([-0.5, 1.5]);
+});
+
+test("scaleQuadFromCorner grows the quad uniformly from the opposite corner", () => {
+  // drag corner 2 (bottom-right, at [1,1]) out to [1.4,1.4]; anchor is corner 0
+  // (top-left, at [0,0]) — a square scales by 1.4x, stays square.
+  const r = scaleQuadFromCorner(FULL, 2, [1.4, 1.4]);
+  expect(r[0]).toEqual([0, 0]); // anchor unmoved
+  expect(r[2][0]).toBeCloseTo(1.4, 6);
+  expect(r[2][1]).toBeCloseTo(1.4, 6);
+  expect(r[1][0]).toBeCloseTo(1.4, 6);
+  expect(r[1][1]).toBeCloseTo(0, 6);
+  expect(r[3][0]).toBeCloseTo(0, 6);
+  expect(r[3][1]).toBeCloseTo(1.4, 6);
+  // shape preserved: still a square (equal sides, right angles)
+  const side = (a: [number, number], b: [number, number]) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+  expect(side(r[0], r[1])).toBeCloseTo(side(r[1], r[2]), 6);
+});
+
+test("scaleQuadFromCorner shrinking toward the anchor halves the quad", () => {
+  const r = scaleQuadFromCorner(FULL, 2, [0.5, 0.5]);
+  expect(r[2]).toEqual([0.5, 0.5]);
+  expect(r[1]).toEqual([0.5, 0]);
+  expect(r[3]).toEqual([0, 0.5]);
+});
+
+test("translateQuad shifts every corner by the same delta", () => {
+  const r = translateQuad(FULL, 0.1, -0.2);
+  expect(r).toEqual([
+    [0.1, -0.2],
+    [1.1, -0.2],
+    [1.1, 0.8],
+    [0.1, 0.8],
+  ]);
+});
+
+test("translateQuad clamps corners that would leave the finite range", () => {
+  const r = translateQuad(FULL, -10, 10);
+  for (const [x, y] of r) {
+    expect(x).toBe(-0.5);
+    expect(y).toBe(1.5);
+  }
 });

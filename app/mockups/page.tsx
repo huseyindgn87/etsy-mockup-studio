@@ -52,7 +52,11 @@ interface DesignItem {
 interface ListingOption {
   listingId: number;
   title: string;
+  thumbnailUrl: string | null;
 }
+
+/** First 40 characters of a title, as shown per row in the listing picker. */
+const shortTitle = (t: string) => (t.length > 40 ? `${t.slice(0, 40)}…` : t);
 
 type PublishMode = "existing" | "copy" | "new";
 
@@ -98,6 +102,7 @@ export default function MockupsPage() {
   const [overwriteExisting, setOverwriteExisting] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [publishResult, setPublishResult] = useState<PublishResult | null>(null);
+  const [cornerMode, setCornerMode] = useState<"free" | "ratio">("free");
 
   const psdInput = useRef<HTMLInputElement>(null);
   const designInput = useRef<HTMLInputElement>(null);
@@ -106,13 +111,23 @@ export default function MockupsPage() {
     const controller = new AbortController();
     fetch("/api/etsy/listings?state=active&limit=100", { signal: controller.signal })
       .then((res) => (res.ok ? res.json() : null))
-      .then((body: { listings?: { listingId: number; title: string }[] } | null) => {
-        if (!body?.listings) return;
-        setListings(
-          body.listings.map((l) => ({ listingId: l.listingId, title: l.title })),
-        );
-        setPublishId((cur) => cur ?? body.listings?.[0]?.listingId ?? null);
-      })
+      .then(
+        (
+          body: {
+            listings?: { listingId: number; title: string; thumbnailUrl: string | null }[];
+          } | null,
+        ) => {
+          if (!body?.listings) return;
+          setListings(
+            body.listings.map((l) => ({
+              listingId: l.listingId,
+              title: l.title,
+              thumbnailUrl: l.thumbnailUrl,
+            })),
+          );
+          setPublishId((cur) => cur ?? body.listings?.[0]?.listingId ?? null);
+        },
+      )
       .catch(() => {
         /* not connected / no shop — the publish control just stays hidden */
       });
@@ -262,12 +277,12 @@ export default function MockupsPage() {
     [],
   );
 
-  const onCorner = useCallback(
-    (area: number, corner: number, pt: [number, number]) => {
+  const onAreaChange = useCallback(
+    (area: number, quad: Quad) => {
       if (!activeId) return;
       patchCalibration(activeId, (c) => {
         const qs = quadList(c).map((q) => q.map((p) => [...p]) as Quad);
-        qs[area][corner] = pt;
+        qs[area] = quad;
         return { ...c, qs, q: qs[0] };
       });
     },
@@ -510,18 +525,12 @@ export default function MockupsPage() {
               <label className="text-xs text-zinc-500">
                 {publishMode === "existing" ? "Hedef listing" : "Kaynak listing"}
               </label>
-              <select
-                value={publishId ?? ""}
-                onChange={(e) => setPublishId(Number(e.target.value))}
+              <ListingPicker
+                listings={listings}
+                value={publishId}
+                onChange={setPublishId}
                 disabled={!!busy}
-                className="h-9 max-w-[280px] truncate rounded-lg border border-black/10 bg-white px-2 text-sm dark:border-white/15 dark:bg-zinc-950"
-              >
-                {listings.map((l) => (
-                  <option key={l.listingId} value={l.listingId}>
-                    {l.title}
-                  </option>
-                ))}
-              </select>
+              />
 
               {publishMode === "new" && (
                 <input
@@ -715,10 +724,11 @@ export default function MockupsPage() {
                   design={previewDesign?.raster ?? null}
                   calibration={active.calibration}
                   activeArea={areaIndex}
-                  onCorner={onCorner}
+                  cornerMode={cornerMode}
+                  onAreaChange={onAreaChange}
                 />
                 <p className="mt-2 text-center text-xs text-zinc-500">
-                  {active.psdW}×{active.psdH}px · turuncu köşeleri sürükle
+                  {active.psdW}×{active.psdH}px · köşeleri sürükle, alanın içinden tut taşı
                 </p>
               </>
             ) : (
@@ -732,6 +742,38 @@ export default function MockupsPage() {
           <div className="space-y-4">
             {active ? (
               <>
+                <div>
+                  <span className="mb-1.5 block text-sm text-zinc-600 dark:text-zinc-400">
+                    Köşe
+                  </span>
+                  <div className="flex gap-1.5">
+                    {(
+                      [
+                        ["free", "Serbest"],
+                        ["ratio", "Oranı Koru"],
+                      ] as const
+                    ).map(([m, label]) => (
+                      <button
+                        key={m}
+                        type="button"
+                        onClick={() => setCornerMode(m)}
+                        className={`h-8 flex-1 rounded-full text-xs font-medium transition-colors ${
+                          cornerMode === m
+                            ? "bg-black text-white dark:bg-white dark:text-black"
+                            : "border border-black/10 text-zinc-600 dark:border-white/15 dark:text-zinc-400"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="mt-1 text-xs text-zinc-500">
+                    {cornerMode === "ratio"
+                      ? "Bir köşeyi sürüklemek alanı karşı köşeden orantılı büyütür/küçültür."
+                      : "Her köşe bağımsız sürüklenir (perspektif)."}
+                  </p>
+                </div>
+
                 {SLIDERS.map((s) => {
                   const value = Number(active.calibration[s.key] ?? s.min);
                   return (
@@ -845,5 +887,92 @@ function ToneBadge({ tone }: { tone: string }) {
     >
       {dark ? "KOYU" : "AÇIK"}
     </span>
+  );
+}
+
+/** Small square thumbnail with a placeholder for listings with no image yet. */
+function ListingThumb({ url, size }: { url: string | null; size: number }) {
+  return (
+    <span
+      className="flex shrink-0 items-center justify-center overflow-hidden rounded bg-zinc-100 dark:bg-zinc-800"
+      style={{ width: size, height: size }}
+    >
+      {url ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={url} alt="" className="h-full w-full object-cover" />
+      ) : (
+        <span className="text-[10px] text-zinc-400">—</span>
+      )}
+    </span>
+  );
+}
+
+/**
+ * Visual listing picker: a closed button showing the current pick, opening a
+ * dropdown where each row is a large thumbnail + the first 40 characters of
+ * the title (a plain `<select>` can't render images in its options).
+ */
+function ListingPicker({
+  listings,
+  value,
+  onChange,
+  disabled,
+}: {
+  listings: ListingOption[];
+  value: number | null;
+  onChange: (listingId: number) => void;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onOutside(e: PointerEvent) {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener("pointerdown", onOutside);
+    return () => document.removeEventListener("pointerdown", onOutside);
+  }, [open]);
+
+  const selected = listings.find((l) => l.listingId === value) ?? null;
+
+  return (
+    <div ref={rootRef} className="relative">
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => setOpen((o) => !o)}
+        className="flex h-11 items-center gap-2 rounded-lg border border-black/10 bg-white pr-3 pl-1.5 text-left text-sm disabled:opacity-50 dark:border-white/15 dark:bg-zinc-950"
+      >
+        <ListingThumb url={selected?.thumbnailUrl ?? null} size={32} />
+        <span className="max-w-[200px] truncate">
+          {selected ? shortTitle(selected.title) : "Listing seç"}
+        </span>
+        <span className="text-zinc-400">▾</span>
+      </button>
+
+      {open && (
+        <ul className="absolute z-10 mt-1 max-h-80 w-80 overflow-y-auto rounded-lg border border-black/10 bg-white py-1 shadow-lg dark:border-white/15 dark:bg-zinc-950">
+          {listings.map((l) => (
+            <li key={l.listingId}>
+              <button
+                type="button"
+                onClick={() => {
+                  onChange(l.listingId);
+                  setOpen(false);
+                }}
+                className={`flex w-full items-center gap-3 px-2 py-2 text-left text-sm hover:bg-black/[.04] dark:hover:bg-white/[.06] ${
+                  l.listingId === value ? "bg-[#f56400]/10" : ""
+                }`}
+              >
+                <ListingThumb url={l.thumbnailUrl} size={48} />
+                <span className="flex-1 truncate">{shortTitle(l.title)}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }

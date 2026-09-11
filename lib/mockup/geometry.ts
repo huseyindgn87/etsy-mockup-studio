@@ -83,6 +83,49 @@ export function rotateQuad(q: Quad, deg: number, W: number, H: number): Quad {
   }) as Quad;
 }
 
+/*
+ * Corner-editing helpers for the browser calibration UI (`MockupCanvas`). Quad
+ * points may go slightly outside [0, 1] (bleed / seam prints extending past
+ * the visible canvas); {@link clampCorner} bounds them to a generous but
+ * finite range instead of leaving them unconstrained.
+ */
+
+/** Bound a single corner coordinate to a sane, finite range. */
+export function clampCorner(v: number): number {
+  return Math.min(1.5, Math.max(-0.5, v));
+}
+
+const cloneQuad = (q: Quad): Quad => q.map((p) => [...p]) as Quad;
+const dist = (a: Pt, b: Pt): number => Math.hypot(a[0] - b[0], a[1] - b[1]);
+
+/** Free corner drag: only the dragged corner moves (full keystone/perspective). */
+export function moveCornerFree(startQuad: Quad, corner: number, pointer: Pt): Quad {
+  const q = cloneQuad(startQuad);
+  q[corner] = [clampCorner(pointer[0]), clampCorner(pointer[1])];
+  return q;
+}
+
+/**
+ * Ratio-preserving corner drag: scale the whole quad uniformly about the
+ * diagonally opposite corner, so the shape (and its aspect ratio) never
+ * distorts — only its size changes.
+ */
+export function scaleQuadFromCorner(startQuad: Quad, corner: number, pointer: Pt): Quad {
+  const anchor = startQuad[(corner + 2) % 4];
+  const from = dist(anchor, startQuad[corner]);
+  const to = dist(anchor, pointer);
+  const scale = from > 1e-6 ? Math.min(8, Math.max(0.05, to / from)) : 1;
+  return startQuad.map((p) => [
+    clampCorner(anchor[0] + (p[0] - anchor[0]) * scale),
+    clampCorner(anchor[1] + (p[1] - anchor[1]) * scale),
+  ]) as Quad;
+}
+
+/** Move the whole print area: translate every corner by the same delta. */
+export function translateQuad(startQuad: Quad, dx: number, dy: number): Quad {
+  return startQuad.map((p) => [clampCorner(p[0] + dx), clampCorner(p[1] + dy)]) as Quad;
+}
+
 /**
  * Contain-fit a design of aspect `dw/dh` inside a quad of aspect `quadAr`,
  * scaled by `zoom` (1 = fill). Returns the design's footprint in the quad's
