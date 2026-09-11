@@ -1,4 +1,5 @@
 import { etsyFetch } from "@/lib/etsy/auth";
+import { TtlCache } from "@/lib/etsy/cache";
 
 /**
  * Read helpers for the connected user's Etsy shop listings (API v3).
@@ -6,6 +7,8 @@ import { etsyFetch } from "@/lib/etsy/auth";
  * All calls go through {@link etsyFetch}, so they are only usable where the
  * session cookie is writable (Route Handlers / Server Actions).
  */
+
+const SHOP_CACHE_MS = 10 * 60 * 1000; // 10min
 
 export type EtsyListingState =
   | "active"
@@ -126,11 +129,15 @@ interface EtsyShopResponse {
   shop_name: string;
 }
 
+const shopNameCache = new TtlCache<number, string>(SHOP_CACHE_MS);
+
 /** The connected user's shop name, for display (e.g. the listing editor header). */
 export async function getShopName(): Promise<string> {
   const shopId = await getShopId();
-  const shop = await etsyGetJson<EtsyShopResponse>(`/shops/${shopId}`);
-  return shop.shop_name;
+  return shopNameCache.get(shopId, async () => {
+    const shop = await etsyGetJson<EtsyShopResponse>(`/shops/${shopId}`);
+    return shop.shop_name;
+  });
 }
 
 function formatPrice(price?: EtsyPrice): string | null {

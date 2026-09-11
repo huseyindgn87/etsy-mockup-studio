@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 const etsyFetch = vi.fn<(path: string) => Promise<Response>>();
 vi.mock("@/lib/etsy/auth", () => ({ etsyFetch: (path: string) => etsyFetch(path) }));
 
-import { fetchAllShopListings, fetchShopListings } from "@/lib/etsy/listings";
+import { fetchAllShopListings, fetchShopListings, getShopName } from "@/lib/etsy/listings";
 
 const json = (body: unknown, ok = true, status = 200): Response =>
   ({ ok, status, json: async () => body }) as Response;
@@ -84,6 +84,24 @@ describe("fetchAllShopListings", () => {
     });
     const page = await fetchAllShopListings({ state: "draft" });
     expect(page.listings).toHaveLength(1);
+  });
+});
+
+describe("getShopName", () => {
+  test("maps shop_name and caches per shop", async () => {
+    let shopCalls = 0;
+    etsyFetch.mockImplementation(async (path: string) => {
+      if (path.includes("/users/me")) return json({ user_id: 1, shop_id: 99 });
+      if (path === "/shops/99") {
+        shopCalls++;
+        return json({ shop_id: 99, shop_name: "Cool Shop" });
+      }
+      throw new Error(`unexpected path: ${path}`);
+    });
+
+    expect(await getShopName()).toBe("Cool Shop");
+    expect(await getShopName()).toBe("Cool Shop");
+    expect(shopCalls).toBe(1); // second call served from cache
   });
 });
 

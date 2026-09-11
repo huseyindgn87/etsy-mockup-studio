@@ -1,4 +1,5 @@
 import { etsyFetch } from "@/lib/etsy/auth";
+import { TtlCache } from "@/lib/etsy/cache";
 import { EtsyApiError, getShopId } from "@/lib/etsy/listings";
 
 /**
@@ -8,6 +9,9 @@ import { EtsyApiError, getShopId } from "@/lib/etsy/listings";
  * `GET /shops/{shop_id}/readiness-state-definitions`). Etsy now requires
  * every physical listing to carry one; `createDraftListing` fails without it.
  */
+
+const SHOP_CACHE_MS = 10 * 60 * 1000; // 10min
+const profilesCache = new TtlCache<number, ProcessingProfileOption[]>(SHOP_CACHE_MS);
 
 async function etsyGetJson<T>(path: string): Promise<T> {
   const res = await etsyFetch(path);
@@ -46,14 +50,16 @@ interface RawProcessingProfile {
 /** The connected shop's processing profiles, for the listing form's Shipping tab. */
 export async function getShopProcessingProfiles(): Promise<ProcessingProfileOption[]> {
   const shopId = await getShopId();
-  const data = await etsyGetJson<{ count: number; results: RawProcessingProfile[] }>(
-    `/shops/${shopId}/readiness-state-definitions`,
-  );
-  return (data.results ?? []).map((p) => ({
-    readinessStateId: p.readiness_state_id,
-    readinessState: p.readiness_state,
-    minProcessingDays: p.min_processing_days,
-    maxProcessingDays: p.max_processing_days,
-    displayLabel: p.processing_days_display_label,
-  }));
+  return profilesCache.get(shopId, async () => {
+    const data = await etsyGetJson<{ count: number; results: RawProcessingProfile[] }>(
+      `/shops/${shopId}/readiness-state-definitions`,
+    );
+    return (data.results ?? []).map((p) => ({
+      readinessStateId: p.readiness_state_id,
+      readinessState: p.readiness_state,
+      minProcessingDays: p.min_processing_days,
+      maxProcessingDays: p.max_processing_days,
+      displayLabel: p.processing_days_display_label,
+    }));
+  });
 }

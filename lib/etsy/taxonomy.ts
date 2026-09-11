@@ -1,4 +1,5 @@
 import { etsyFetch } from "@/lib/etsy/auth";
+import { TtlCache } from "@/lib/etsy/cache";
 import { EtsyApiError, getShopId } from "@/lib/etsy/listings";
 
 /**
@@ -7,7 +8,9 @@ import { EtsyApiError, getShopId } from "@/lib/etsy/listings";
  *
  * `seller-taxonomy/nodes` and `.../properties` are public (no OAuth scope,
  * just the app api-key) and identical for every caller, so the tree and each
- * category's properties are cached in memory per server process.
+ * category's properties are cached in memory per server process. Shop
+ * sections are per-shop but still slow-changing, so they get the same
+ * treatment (shorter TTL, keyed by shop id).
  */
 
 async function etsyGetJson<T>(path: string): Promise<T> {
@@ -49,20 +52,17 @@ function mapNode(raw: RawTaxonomyNode): TaxonomyNode {
   };
 }
 
-const TAXONOMY_CACHE_MS = 60 * 60 * 1000; // 1h — Etsy's category tree barely ever changes
-let taxonomyCache: { at: number; tree: TaxonomyNode[] } | null = null;
+const TAXONOMY_CACHE_MS = 24 * 60 * 60 * 1000; // 24h — Etsy's category tree barely ever changes
+const taxonomyTreeCache = new TtlCache<"tree", TaxonomyNode[]>(TAXONOMY_CACHE_MS);
 
 /** The full seller category tree, root nodes with nested `children`. */
 export async function getSellerTaxonomyTree(): Promise<TaxonomyNode[]> {
-  if (taxonomyCache && Date.now() - taxonomyCache.at < TAXONOMY_CACHE_MS) {
-    return taxonomyCache.tree;
-  }
-  const data = await etsyGetJson<{ results: RawTaxonomyNode[] }>(
-    "/seller-taxonomy/nodes",
-  );
-  const tree = (data.results ?? []).map(mapNode);
-  taxonomyCache = { at: Date.now(), tree };
-  return tree;
+  return taxonomyTreeCache.get("tree", async () => {
+    const data = await etsyGetJson<{ results: RawTaxonomyNode[] }>(
+      "/seller-taxonomy/nodes",
+    );
+    return (data.results ?? []).map(mapNode);
+  });
 }
 
 export interface TaxonomyPropertyValue {
@@ -96,7 +96,7 @@ interface RawTaxonomyProperty {
   possible_values?: { value_id: number | null; name: string }[];
 }
 
-const propertiesCache = new Map<number, { at: number; properties: TaxonomyProperty[] }>();
+const propertiesCache = new TtlCache<number, TaxonomyProperty[]>(TAXONOMY_CACHE_MS);
 
 /**
  * Every category-specific listing property for one taxonomy node that has
@@ -109,30 +109,27 @@ const propertiesCache = new Map<number, { at: number; properties: TaxonomyProper
  * both.
  */
 export async function getTaxonomyProperties(taxonomyId: number): Promise<TaxonomyProperty[]> {
-  const cached = propertiesCache.get(taxonomyId);
-  if (cached && Date.now() - cached.at < TAXONOMY_CACHE_MS) return cached.properties;
-
-  const data = await etsyGetJson<{ results: RawTaxonomyProperty[] }>(
-    `/seller-taxonomy/nodes/${taxonomyId}/properties`,
-  );
-  const properties = (data.results ?? [])
-    .filter((p) => (p.possible_values ?? []).length > 0)
-    .map((p) => ({
-      propertyId: p.property_id,
-      name: p.name,
-      displayName: p.display_name || p.name,
-      isRequired: !!p.is_required,
-      isMultivalued: !!p.is_multivalued,
-      maxValuesAllowed: p.max_values_allowed ?? null,
-      supportsAttributes: !!p.supports_attributes,
-      supportsVariations: !!p.supports_variations,
-      possibleValues: (p.possible_values ?? []).map((v) => ({
-        valueId: v.value_id,
-        name: v.name,
-      })),
-    }));
-  propertiesCache.set(taxonomyId, { at: Date.now(), properties });
-  return properties;
+  return propertiesCache.get(taxonomyId, async () => {
+    const data = await etsyGetJson<{ results: RawTaxonomyProperty[] }>(
+      `/seller-taxonomy/nodes/${taxonomyId}/properties`,
+    );
+    return (data.results ?? [])
+      .filter((p) => (p.possible_values ?? []).length > 0)
+      .map((p) => ({
+        propertyId: p.property_id,
+        name: p.name,
+        displayName: p.display_name || p.name,
+        isRequired: !!p.is_required,
+        isMultivalued: !!p.is_multivalued,
+        maxValuesAllowed: p.max_values_allowed ?? null,
+        supportsAttributes: !!p.supports_attributes,
+        supportsVariations: !!p.supports_variations,
+        possibleValues: (p.possible_values ?? []).map((v) => ({
+          valueId: v.value_id,
+          name: v.name,
+        })),
+      }));
+  });
 }
 
 export interface ShopSectionOption {
@@ -146,13 +143,18 @@ interface RawShopSection {
   rank: number;
 }
 
+const SHOP_CACHE_MS = 10 * 60 * 1000; // 10min
+const sectionsCache = new TtlCache<number, ShopSectionOption[]>(SHOP_CACHE_MS);
+
 /** The connected user's shop sections, in their display order. */
 export async function getShopSectionsList(): Promise<ShopSectionOption[]> {
   const shopId = await getShopId();
-  const data = await etsyGetJson<{ results: RawShopSection[] }>(
-    `/shops/${shopId}/sections`,
-  );
-  return (data.results ?? [])
-    .sort((a, b) => a.rank - b.rank)
-    .map((s) => ({ shopSectionId: s.shop_section_id, title: s.title }));
+  return sectionsCache.get(shopId, async () => {
+    const data = await etsyGetJson<{ results: RawShopSection[] }>(
+      `/shops/${shopId}/sections`,
+    );
+    return (data.results ?? [])
+      .sort((a, b) => a.rank - b.rank)
+      .map((s) => ({ shopSectionId: s.shop_section_id, title: s.title }));
+  });
 }

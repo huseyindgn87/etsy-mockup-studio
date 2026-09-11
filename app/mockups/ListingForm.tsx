@@ -143,6 +143,9 @@ interface ProcessingProfileOption {
   displayLabel: string;
 }
 
+/** Shown for both pickers below instead of Etsy's raw 429 body, which isn't user-facing text. */
+const RATE_LIMIT_MESSAGE = "Etsy rate limit reached, try again shortly.";
+
 /** Etsy's shop-section titles come back HTML-escaped (e.g. "&gt;&gt;HALLOWEEN&lt;&lt;"). */
 function decodeHtmlEntities(s: string): string {
   if (typeof document === "undefined") return s;
@@ -310,7 +313,9 @@ export default function ListingForm({
         const body = (await res.json().catch(() => null)) as
           | { sections?: ShopSectionOption[]; error?: string }
           | null;
-        if (!res.ok) throw new Error(body?.error || `Request failed (${res.status})`);
+        if (!res.ok) {
+          throw new Error(res.status === 429 ? RATE_LIMIT_MESSAGE : body?.error || `Request failed (${res.status})`);
+        }
         setSections(body?.sections ?? []);
       })
       .catch((err) => {
@@ -328,7 +333,9 @@ export default function ListingForm({
         const body = (await res.json().catch(() => null)) as
           | { profiles?: ProcessingProfileOption[]; error?: string }
           | null;
-        if (!res.ok) throw new Error(body?.error || `Request failed (${res.status})`);
+        if (!res.ok) {
+          throw new Error(res.status === 429 ? RATE_LIMIT_MESSAGE : body?.error || `Request failed (${res.status})`);
+        }
         setProcessingProfiles(body?.profiles ?? []);
       })
       .catch((err) => {

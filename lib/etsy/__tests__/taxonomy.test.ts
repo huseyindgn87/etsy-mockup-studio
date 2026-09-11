@@ -126,10 +126,16 @@ describe("getTaxonomyProperties", () => {
 });
 
 describe("getShopSectionsList", () => {
-  test("sorts by rank and maps fields", async () => {
+  test("sorts by rank, maps fields, and caches per shop (but not the shop id lookup)", async () => {
+    let sectionCalls = 0;
+    let meCalls = 0;
     etsyFetch.mockImplementation(async (path: string) => {
-      if (path.includes("/users/me")) return json({ user_id: 1, shop_id: 42 });
+      if (path.includes("/users/me")) {
+        meCalls++;
+        return json({ user_id: 1, shop_id: 42 });
+      }
       if (path.includes("/shops/42/sections")) {
+        sectionCalls++;
         return json({
           results: [
             { shop_section_id: 2, title: "B", rank: 2 },
@@ -145,5 +151,9 @@ describe("getShopSectionsList", () => {
       { shopSectionId: 1, title: "A" },
       { shopSectionId: 2, title: "B" },
     ]);
+
+    await getShopSectionsList();
+    expect(sectionCalls).toBe(1); // second call served from cache
+    expect(meCalls).toBe(2); // shop id itself isn't cached
   });
 });
