@@ -205,6 +205,27 @@ describe("updateListingInventory", () => {
     expect(body.price_on_property).toEqual([]);
     expect(body.quantity_on_property).toEqual([]);
     expect(body.sku_on_property).toEqual([]);
+    expect(body.readiness_state_on_property).toEqual([]);
+    expect(body.products[0].offerings[0]).not.toHaveProperty("readiness_state_id");
+  });
+
+  test("includes readiness_state_id on the offering and readiness_state_on_property when given", async () => {
+    etsyFetch.mockResolvedValue(json({}));
+    await updateListingInventory(555, {
+      products: [
+        {
+          propertyValues: [{ propertyId: 1, name: "Color", valueIds: [1], values: ["Black"] }],
+          price: 10,
+          quantity: 1,
+          readinessStateId: 18201076875,
+        },
+      ],
+      readinessStateOnProperty: [1],
+    });
+    const [, init] = etsyFetch.mock.calls[0];
+    const body = JSON.parse(init?.body as string);
+    expect(body.products[0].offerings[0].readiness_state_id).toBe(18201076875);
+    expect(body.readiness_state_on_property).toEqual([1]);
   });
 });
 

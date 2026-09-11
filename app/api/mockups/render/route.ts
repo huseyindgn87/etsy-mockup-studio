@@ -89,11 +89,13 @@ interface PublishSpec {
       priceOnProperty?: number[];
       quantityOnProperty?: number[];
       skuOnProperty?: number[];
+      readinessStateOnProperty?: number[];
       products: {
         propertyValues: { propertyId: number; name?: string; valueIds: number[]; values: string[] }[];
         price?: number;
         quantity?: number;
         sku?: string;
+        readinessStateId?: number;
       }[];
       /** Assign an already-rendered job's uploaded image to a specific property value. */
       imagesByValue?: { propertyId: number; valueId: number; jobIndex: number }[];
@@ -193,12 +195,14 @@ interface CleanVariationProduct {
   price?: number;
   quantity?: number;
   sku?: string;
+  readinessStateId?: number;
 }
 interface CleanVariations {
   products: CleanVariationProduct[];
   priceOnProperty: number[];
   quantityOnProperty: number[];
   skuOnProperty: number[];
+  readinessStateOnProperty: number[];
   imagesByValue: { propertyId: number; valueId: number; jobIndex: number }[];
 }
 
@@ -258,11 +262,16 @@ function sanitizeVariations(raw: unknown): CleanVariations | null {
     const price = (p as { price?: unknown }).price;
     const quantity = (p as { quantity?: unknown }).quantity;
     const sku = (p as { sku?: unknown }).sku;
+    const readinessStateId = (p as { readinessStateId?: unknown }).readinessStateId;
     products.push({
       propertyValues,
       price: typeof price === "number" && price > 0 ? price : undefined,
       quantity: typeof quantity === "number" && quantity >= 0 ? Math.trunc(quantity) : undefined,
       sku: typeof sku === "string" && sku.trim() ? sku.trim() : undefined,
+      readinessStateId:
+        Number.isInteger(readinessStateId) && (readinessStateId as number) > 0
+          ? (readinessStateId as number)
+          : undefined,
     });
   }
   if (products.length === 0) return null;
@@ -288,6 +297,7 @@ function sanitizeVariations(raw: unknown): CleanVariations | null {
     priceOnProperty: positiveIntArray(r.priceOnProperty),
     quantityOnProperty: positiveIntArray(r.quantityOnProperty),
     skuOnProperty: positiveIntArray(r.skuOnProperty),
+    readinessStateOnProperty: positiveIntArray(r.readinessStateOnProperty),
     imagesByValue,
   };
 }
@@ -582,10 +592,12 @@ export async function POST(request: Request) {
                   propertyValues: p.propertyValues,
                   price: p.price ?? price,
                   quantity: p.quantity ?? quantity,
+                  readinessStateId: p.readinessStateId,
                 })),
                 priceOnProperty: variations.priceOnProperty,
                 quantityOnProperty: variations.quantityOnProperty,
                 skuOnProperty: variations.skuOnProperty,
+                readinessStateOnProperty: variations.readinessStateOnProperty,
               });
             } catch (err) {
               failed.push({

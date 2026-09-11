@@ -9,23 +9,41 @@ export interface ListingFormProperty {
   values: string[];
   scaleId?: number | null;
 }
-/** One property chosen as a variation dimension (color, size, ...). */
-export interface ListingFormVariationProperty {
+
+/** Etsy's two reserved "Custom Variation" property slots — no taxonomy entry, user-named. */
+const CUSTOM_PROPERTY_IDS = [513, 514] as const;
+
+/** One variation dimension (colour, size, or a user-typed custom one). */
+export interface ListingFormVariation {
+  /** A real taxonomy property id, or 513/514 for a custom ("kendim oluşturayım") variation. */
   propertyId: number;
   name: string;
+  isCustom: boolean;
   valueIds: number[];
   values: string[];
-  /** "fiyat bu özelliğe göre değişsin" */
-  priceVaries: boolean;
-  /** "görsel bu özelliğe göre değişsin" */
-  imageVaries: boolean;
 }
-/** Per-combination overrides in the variation table; blank falls back to the base price/quantity. */
-export interface ListingFormVariationRow {
-  price: string;
-  quantity: string;
-  sku: string;
+
+export type VariationToggleKey = "price" | "readiness" | "quantity" | "sku";
+
+export interface VariationToggleState {
+  enabled: boolean;
+  /** Indices into `variations` this field varies by (0, 1, or both). */
+  appliesTo: number[];
 }
+
+const EMPTY_VARIATION_TOGGLES: Record<VariationToggleKey, VariationToggleState> = {
+  price: { enabled: false, appliesTo: [] },
+  readiness: { enabled: false, appliesTo: [] },
+  quantity: { enabled: false, appliesTo: [] },
+  sku: { enabled: false, appliesTo: [] },
+};
+const EMPTY_VARIATION_ROWS: Record<VariationToggleKey, Record<string, string>> = {
+  price: {},
+  readiness: {},
+  quantity: {},
+  sku: {},
+};
+
 export interface ListingFormValue {
   title: string;
   description: string;
@@ -39,14 +57,16 @@ export interface ListingFormValue {
   price: string;
   quantity: string;
   sku: string;
-  /** Up to 3 property ids, in selection order. */
-  variationPropertyIds: number[];
-  /** Keyed by property id. */
-  variationProperties: Record<number, ListingFormVariationProperty>;
-  /** Keyed by `valueIds.join(":")` (one id per selected variation property, in `variationPropertyIds` order). */
-  variationRows: Record<string, ListingFormVariationRow>;
-  /** Keyed by `${propertyId}:${valueId}`, valued with a design item id. */
-  variationImages: Record<string, string>;
+  /** Up to 2, in display order (first/second). */
+  variations: ListingFormVariation[];
+  variationToggles: Record<VariationToggleKey, VariationToggleState>;
+  /**
+   * Per field, keyed by the joined `valueIds` of that field's `appliesTo`-scoped
+   * subset of a combination — e.g. if price only varies by the first variation,
+   * every row sharing that value reads/writes the same key, which is what
+   * collapses the "price" column to one cell per value instead of one per row.
+   */
+  variationRows: Record<VariationToggleKey, Record<string, string>>;
 }
 
 export const EMPTY_LISTING_FORM: ListingFormValue = {
@@ -61,16 +81,16 @@ export const EMPTY_LISTING_FORM: ListingFormValue = {
   price: "",
   quantity: "1",
   sku: "",
-  variationPropertyIds: [],
-  variationProperties: {},
-  variationRows: {},
-  variationImages: {},
+  variations: [],
+  variationToggles: EMPTY_VARIATION_TOGGLES,
+  variationRows: EMPTY_VARIATION_ROWS,
 };
 
 const MAX_TAGS = 13;
 const MAX_TAG_LENGTH = 20;
 const MAX_TITLE_LENGTH = 140;
-const MAX_VARIATION_PROPERTIES = 3;
+/** Etsy itself caps a listing at 2 variations. */
+const MAX_VARIATIONS = 2;
 const MAX_VARIATION_ROWS = 100; // mirrors the server's sanity cap
 
 interface TaxonomyNode {
@@ -101,11 +121,6 @@ interface ShopSectionOption {
   shopSectionId: number;
   title: string;
 }
-/** The subset of a design the Variations "image varies" picker needs. */
-export interface DesignOption {
-  id: string;
-  name: string;
-}
 
 function flattenTaxonomy(nodes: TaxonomyNode[], prefix = ""): FlatTaxonomyNode[] {
   const out: FlatTaxonomyNode[] = [];
@@ -126,12 +141,9 @@ function flattenTaxonomy(nodes: TaxonomyNode[], prefix = ""): FlatTaxonomyNode[]
 export default function ListingForm({
   value,
   onChange,
-  designs,
 }: {
   value: ListingFormValue;
   onChange: (next: ListingFormValue) => void;
-  /** Rendered designs, for the per-variation-value "image varies" picker. */
-  designs: DesignOption[];
 }) {
   const patch = (partial: Partial<ListingFormValue>) => onChange({ ...value, ...partial });
 
@@ -401,10 +413,9 @@ export default function ListingForm({
                               taxonomyPath: n.path,
                               // a new category has different properties (and variations)
                               properties: {},
-                              variationPropertyIds: [],
-                              variationProperties: {},
-                              variationRows: {},
-                              variationImages: {},
+                              variations: [],
+                              variationToggles: EMPTY_VARIATION_TOGGLES,
+                              variationRows: EMPTY_VARIATION_ROWS,
                             });
                             setCategoryOpen(false);
                             setCategoryQuery("");
@@ -461,14 +472,7 @@ export default function ListingForm({
         </div>
 
         {/* ---- 5. variations ---- */}
-        {variationProperties.length > 0 && (
-          <VariationsSection
-            variationProperties={variationProperties}
-            value={value}
-            patch={patch}
-            designs={designs}
-          />
-        )}
+        <VariationsSection variationProperties={variationProperties} value={value} patch={patch} />
 
         {/* ---- 6. price ---- */}
         <label className="block text-sm">
@@ -525,7 +529,8 @@ const MAX_PROPERTY_ROWS = 50;
  * 500+-option one look identical: fixed-height scrolling list, a search box
  * above it, checkboxes for the options, a summary line below. Single-select
  * properties still use a checkbox (not a radio) for visual consistency, but
- * checking one clears any other selection for that property.
+ * checking one clears any other selection for that property. Also reused
+ * (always in multi-select form) by the Variations editor below.
  */
 function PropertyPicker({
   property,
@@ -600,373 +605,615 @@ function PropertyPicker({
   );
 }
 
-const EMPTY_VARIATION_ROW: ListingFormVariationRow = { price: "", quantity: "", sku: "" };
+// ---------------------------------------------------------------------------
+// Variations — modelled on Etsy's own "Manage variations" screen, but on one
+// screen (no stacked modals): a card list (name, option chips, edit/delete),
+// an inline add/edit panel (Etsy property vs. hand-typed custom), four
+// on/off fields ("varies by" first/second/both), a live combination count,
+// and — on "Uygula" — a table with only the enabled columns, bulk-fillable.
+// ---------------------------------------------------------------------------
 
-/** One property-value combination — one row of the variation table. */
 interface VariationCombo {
   valueIds: number[];
   values: string[];
 }
 
-/**
- * Variations section: pick up to {@link MAX_VARIATION_PROPERTIES} properties
- * that support variations, pick each one's values with the same
- * {@link PropertyPicker} (always multi-select here), then edit the resulting
- * combination grid — bulk-fill at the top, price/quantity/SKU per row, and
- * per-property "price varies" / "image varies" toggles. Sent on publish via
- * the Etsy Inventory API (`PUT .../inventory`), not covered by
- * `createDraftListing`.
- */
+const VARIATION_TOGGLES: { key: VariationToggleKey; label: string }[] = [
+  { key: "price", label: "Fiyatlar değişsin" },
+  { key: "readiness", label: "İşlem profilleri değişsin" },
+  { key: "quantity", label: "Adetler değişsin" },
+  { key: "sku", label: "SKU'lar değişsin" },
+];
+const VARIATION_COLUMN_LABEL: Record<VariationToggleKey, string> = {
+  price: "Fiyat",
+  readiness: "İşlem profili",
+  quantity: "Adet",
+  sku: "SKU",
+};
+
+/** The joined value ids a field's `appliesTo`-scoped subset of one combination — its table-cell/state key. */
+function comboKeyFor(appliesTo: number[], combo: VariationCombo): string {
+  return appliesTo.map((i) => combo.valueIds[i]).join(":");
+}
+
+/** 513 for the first custom variation added, 514 for the second. */
+function nextCustomPropertyId(variations: ListingFormVariation[], editingIndex: number | null): number {
+  const used = new Set(
+    variations.filter((_, i) => i !== editingIndex).filter((v) => v.isCustom).map((v) => v.propertyId),
+  );
+  return CUSTOM_PROPERTY_IDS.find((id) => !used.has(id)) ?? CUSTOM_PROPERTY_IDS[0];
+}
+
+/** Drop an `appliesTo` reference to a removed variation index and shift what's left down. */
+function reindexAppliesTo(appliesTo: number[], removedIndex: number): number[] {
+  return appliesTo.filter((i) => i !== removedIndex).map((i) => (i > removedIndex ? i - 1 : i));
+}
+
 function VariationsSection({
   variationProperties,
   value,
   patch,
-  designs,
 }: {
   variationProperties: TaxonomyProperty[];
   value: ListingFormValue;
   patch: (partial: Partial<ListingFormValue>) => void;
-  designs: DesignOption[];
 }) {
-  const selectedIds = value.variationPropertyIds;
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [draft, setDraft] = useState<VariationDraft>(EMPTY_DRAFT);
+  const [applied, setApplied] = useState(false);
 
-  function toggleVariationProperty(prop: TaxonomyProperty) {
-    const isSelected = selectedIds.includes(prop.propertyId);
-    if (isSelected) {
-      const nextProps = { ...value.variationProperties };
-      delete nextProps[prop.propertyId];
-      patch({
-        variationPropertyIds: selectedIds.filter((id) => id !== prop.propertyId),
-        variationProperties: nextProps,
-      });
-      return;
-    }
-    if (selectedIds.length >= MAX_VARIATION_PROPERTIES) return;
-    patch({
-      variationPropertyIds: [...selectedIds, prop.propertyId],
-      variationProperties: {
-        ...value.variationProperties,
-        [prop.propertyId]: {
-          propertyId: prop.propertyId,
-          name: prop.displayName,
-          valueIds: [],
-          values: [],
-          priceVaries: false,
-          imageVaries: false,
-        },
-      },
+  function openAdd() {
+    setEditingIndex(null);
+    setDraft(EMPTY_DRAFT);
+    setEditorOpen(true);
+  }
+  function openEdit(i: number) {
+    const v = value.variations[i];
+    setEditingIndex(i);
+    setDraft({
+      source: v.isCustom ? "custom" : "etsy",
+      propertyId: v.isCustom ? null : v.propertyId,
+      name: v.name,
+      valueIds: v.valueIds,
+      values: v.values,
     });
+    setEditorOpen(true);
+  }
+  function closeEditor() {
+    setEditorOpen(false);
+    setEditingIndex(null);
   }
 
-  function toggleVariationValue(
-    prop: TaxonomyProperty,
-    pv: { valueId: number | null; name: string },
-  ) {
-    if (pv.valueId == null) return;
-    const current = value.variationProperties[prop.propertyId];
-    if (!current) return;
-    const nextIdSet = new Set(current.valueIds);
-    if (nextIdSet.has(pv.valueId)) nextIdSet.delete(pv.valueId);
-    else nextIdSet.add(pv.valueId);
-    // Keep the source order (matches Etsy's `possible_values` order) rather
-    // than click order, so the table's columns stay stable.
-    const nextIds: number[] = [];
-    const nextValues: string[] = [];
-    for (const cand of prop.possibleValues) {
-      if (cand.valueId != null && nextIdSet.has(cand.valueId)) {
-        nextIds.push(cand.valueId);
-        nextValues.push(cand.name);
-      }
-    }
-    patch({
-      variationProperties: {
-        ...value.variationProperties,
-        [prop.propertyId]: { ...current, valueIds: nextIds, values: nextValues },
-      },
-    });
+  function commitEditor() {
+    const variation: ListingFormVariation =
+      draft.source === "etsy"
+        ? {
+            propertyId: draft.propertyId as number,
+            name: draft.name,
+            isCustom: false,
+            valueIds: draft.valueIds,
+            values: draft.values,
+          }
+        : {
+            propertyId: nextCustomPropertyId(value.variations, editingIndex),
+            name: draft.name.trim(),
+            isCustom: true,
+            valueIds: draft.values.map((_, i) => i + 1),
+            values: draft.values,
+          };
+    const nextVariations = [...value.variations];
+    if (editingIndex != null) nextVariations[editingIndex] = variation;
+    else nextVariations.push(variation);
+    patch({ variations: nextVariations });
+    setApplied(false);
+    closeEditor();
   }
 
-  const dims = useMemo(
-    () =>
-      selectedIds
-        .map((id) => value.variationProperties[id])
-        .filter((p): p is ListingFormVariationProperty => !!p && p.valueIds.length > 0),
-    [selectedIds, value.variationProperties],
-  );
+  function removeVariation(i: number) {
+    const nextVariations = value.variations.filter((_, idx) => idx !== i);
+    const nextToggles = { ...value.variationToggles };
+    for (const key of Object.keys(nextToggles) as VariationToggleKey[]) {
+      const t = nextToggles[key];
+      const appliesTo = reindexAppliesTo(t.appliesTo, i);
+      nextToggles[key] = { enabled: t.enabled && appliesTo.length > 0, appliesTo };
+    }
+    patch({ variations: nextVariations, variationToggles: nextToggles });
+    if (editingIndex === i) closeEditor();
+    setApplied(false);
+  }
 
   const combos = useMemo<VariationCombo[]>(() => {
-    if (dims.length === 0) return [];
+    if (value.variations.length === 0) return [];
     let acc: VariationCombo[] = [{ valueIds: [], values: [] }];
-    for (const dim of dims) {
+    for (const v of value.variations) {
       const next: VariationCombo[] = [];
       for (const a of acc) {
-        for (let i = 0; i < dim.valueIds.length; i++) {
-          next.push({
-            valueIds: [...a.valueIds, dim.valueIds[i]],
-            values: [...a.values, dim.values[i]],
-          });
+        for (let i = 0; i < v.valueIds.length; i++) {
+          next.push({ valueIds: [...a.valueIds, v.valueIds[i]], values: [...a.values, v.values[i]] });
         }
       }
       acc = next;
     }
     return acc.slice(0, MAX_VARIATION_ROWS);
-  }, [dims]);
-  const combosTruncated = dims.length > 0 && combos.length >= MAX_VARIATION_ROWS;
+  }, [value.variations]);
+  const combosTruncated = value.variations.length > 0 && combos.length >= MAX_VARIATION_ROWS;
 
-  function patchRow(key: string, partial: Partial<ListingFormVariationRow>) {
-    const current = value.variationRows[key] ?? EMPTY_VARIATION_ROW;
-    patch({ variationRows: { ...value.variationRows, [key]: { ...current, ...partial } } });
+  function setToggle(key: VariationToggleKey, partial: Partial<VariationToggleState>) {
+    patch({
+      variationToggles: { ...value.variationToggles, [key]: { ...value.variationToggles[key], ...partial } },
+    });
+  }
+  function patchCell(key: VariationToggleKey, cellKey: string, val: string) {
+    patch({
+      variationRows: { ...value.variationRows, [key]: { ...value.variationRows[key], [cellKey]: val } },
+    });
+  }
+  function applyBulkFill(key: VariationToggleKey, val: string) {
+    if (!val.trim()) return;
+    const keys = new Set(combos.map((c) => comboKeyFor(value.variationToggles[key].appliesTo, c)));
+    const nextCol = { ...value.variationRows[key] };
+    for (const k of keys) nextCol[k] = val;
+    patch({ variationRows: { ...value.variationRows, [key]: nextCol } });
   }
 
-  // ---- bulk-fill ----
-  const [bulkPrice, setBulkPrice] = useState("");
-  const [bulkQuantity, setBulkQuantity] = useState("");
-  function applyBulkPrice() {
-    if (!bulkPrice.trim()) return;
-    const nextRows = { ...value.variationRows };
-    for (const c of combos) {
-      const key = c.valueIds.join(":");
-      nextRows[key] = { ...(nextRows[key] ?? EMPTY_VARIATION_ROW), price: bulkPrice };
-    }
-    patch({ variationRows: nextRows });
-  }
-  function applyBulkQuantity() {
-    if (!bulkQuantity.trim()) return;
-    const nextRows = { ...value.variationRows };
-    for (const c of combos) {
-      const key = c.valueIds.join(":");
-      nextRows[key] = { ...(nextRows[key] ?? EMPTY_VARIATION_ROW), quantity: bulkQuantity };
-    }
-    patch({ variationRows: nextRows });
-  }
-
-  const inputCls =
-    "w-full rounded-lg border border-black/10 bg-white px-3 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950";
+  const usedPropertyIds = value.variations.filter((_, i) => i !== editingIndex).map((v) => v.propertyId);
 
   return (
     <div className="lg:col-span-2">
       <span className="text-xs text-zinc-500">Variations</span>
 
-      <div className="mt-1 flex flex-wrap gap-1.5">
-        {variationProperties.map((prop) => {
-          const active = selectedIds.includes(prop.propertyId);
-          const disabled = !active && selectedIds.length >= MAX_VARIATION_PROPERTIES;
-          return (
-            <button
-              key={prop.propertyId}
-              type="button"
-              disabled={disabled}
-              onClick={() => toggleVariationProperty(prop)}
-              className={`rounded-full border px-3 py-1 text-xs ${
-                active
-                  ? "border-[#f56400] bg-[#f56400]/10 text-[#f56400]"
-                  : disabled
-                    ? "cursor-not-allowed border-black/10 text-zinc-400 dark:border-white/10"
-                    : "border-black/10 hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
-              }`}
-            >
-              {prop.displayName}
-            </button>
-          );
-        })}
-      </div>
-      <p className="mt-1 text-xs text-zinc-500">En fazla {MAX_VARIATION_PROPERTIES} varyasyon seçilebilir.</p>
+      {value.variations.length > 0 && (
+        <div className="mt-1 space-y-2">
+          {value.variations.map((v, i) => (
+            <VariationCard key={i} variation={v} onEdit={() => openEdit(i)} onDelete={() => removeVariation(i)} />
+          ))}
+        </div>
+      )}
 
-      {selectedIds.length > 0 && (
-        <div className="mt-3 grid gap-3 sm:grid-cols-2">
-          {selectedIds.map((id) => {
-            const prop = variationProperties.find((p) => p.propertyId === id);
-            const sel = value.variationProperties[id];
-            if (!prop || !sel) return null;
+      {editorOpen && (
+        <VariationEditorPanel
+          draft={draft}
+          setDraft={setDraft}
+          isEditing={editingIndex != null}
+          variationProperties={variationProperties.filter((p) => !usedPropertyIds.includes(p.propertyId))}
+          onCancel={closeEditor}
+          onCommit={commitEditor}
+        />
+      )}
+
+      {!editorOpen && value.variations.length < MAX_VARIATIONS && (
+        <button
+          type="button"
+          onClick={openAdd}
+          className="mt-2 h-9 rounded-lg border border-dashed border-black/20 px-3 text-sm text-zinc-600 hover:bg-black/[.04] dark:border-white/25 dark:text-zinc-300 dark:hover:bg-white/[.06]"
+        >
+          + Varyasyon ekle
+        </button>
+      )}
+
+      {value.variations.length > 0 && (
+        <div className="mt-4 space-y-2 rounded-lg border border-black/10 p-3 dark:border-white/15">
+          {VARIATION_TOGGLES.map(({ key, label }) => {
+            const t = value.variationToggles[key];
             return (
-              <div key={id}>
-                <PropertyPicker property={prop} selected={sel} onToggle={toggleVariationValue} />
-                <div className="mt-1.5 flex flex-col gap-1">
-                  <label className="flex items-center gap-1.5 text-xs text-zinc-600 dark:text-zinc-400">
-                    <input
-                      type="checkbox"
-                      checked={sel.priceVaries}
-                      onChange={(e) =>
-                        patch({
-                          variationProperties: {
-                            ...value.variationProperties,
-                            [id]: { ...sel, priceVaries: e.target.checked },
-                          },
-                        })
-                      }
-                      className="accent-[#f56400]"
-                    />
-                    Fiyat bu özelliğe göre değişsin
-                  </label>
-                  <label className="flex items-center gap-1.5 text-xs text-zinc-600 dark:text-zinc-400">
-                    <input
-                      type="checkbox"
-                      checked={sel.imageVaries}
-                      onChange={(e) =>
-                        patch({
-                          variationProperties: {
-                            ...value.variationProperties,
-                            [id]: { ...sel, imageVaries: e.target.checked },
-                          },
-                        })
-                      }
-                      className="accent-[#f56400]"
-                    />
-                    Görsel bu özelliğe göre değişsin
-                  </label>
-
-                  {sel.imageVaries && sel.valueIds.length > 0 && (
-                    <div className="mt-1 space-y-1 rounded-lg border border-black/10 p-1.5 dark:border-white/15">
-                      {sel.values.map((vname, i) => {
-                        const valueId = sel.valueIds[i];
-                        const imgKey = `${id}:${valueId}`;
-                        return (
-                          <div key={valueId} className="flex items-center justify-between gap-2 text-xs">
-                            <span className="truncate">{vname}</span>
-                            <select
-                              value={value.variationImages[imgKey] ?? ""}
-                              onChange={(e) =>
-                                patch({
-                                  variationImages: { ...value.variationImages, [imgKey]: e.target.value },
-                                })
-                              }
-                              className="h-7 rounded-md border border-black/10 bg-white px-1 text-xs outline-none dark:border-white/15 dark:bg-zinc-900"
-                            >
-                              <option value="">Tasarım seç…</option>
-                              {designs.map((d) => (
-                                <option key={d.id} value={d.id}>
-                                  {d.name}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
+              <div key={key} className="flex flex-wrap items-center gap-2">
+                <label className="flex items-center gap-1.5 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={t.enabled}
+                    onChange={(e) => {
+                      const enabled = e.target.checked;
+                      setToggle(key, {
+                        enabled,
+                        appliesTo:
+                          enabled && t.appliesTo.length === 0
+                            ? value.variations.map((_, i) => i)
+                            : t.appliesTo,
+                      });
+                    }}
+                    className="accent-[#f56400]"
+                  />
+                  {label}
+                </label>
+                {t.enabled && value.variations.length > 1 && (
+                  <select
+                    value={t.appliesTo.length === 2 ? "both" : String(t.appliesTo[0] ?? 0)}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setToggle(key, { appliesTo: v === "both" ? [0, 1] : [Number(v)] });
+                    }}
+                    className="h-7 rounded-md border border-black/10 bg-white px-1.5 text-xs outline-none dark:border-white/15 dark:bg-zinc-900"
+                  >
+                    <option value="0">{value.variations[0].name}</option>
+                    <option value="1">{value.variations[1].name}</option>
+                    <option value="both">
+                      {value.variations[0].name} ve {value.variations[1].name}
+                    </option>
+                  </select>
+                )}
+                {key === "readiness" && t.enabled && (
+                  <span className="text-xs text-zinc-500">
+                    (opsiyonel Etsy işlem profili ID&apos;si — boş bırakılırsa Etsy kendisi atar)
+                  </span>
+                )}
               </div>
             );
           })}
+
+          <p className="text-xs text-zinc-500">
+            {combos.length} kombinasyon oluşturulacak
+            {combosTruncated ? ` (${MAX_VARIATION_ROWS} ile sınırlı)` : ""}.
+          </p>
+
+          <button
+            type="button"
+            onClick={() => setApplied(true)}
+            className="h-8 rounded-lg bg-[#f56400] px-3 text-xs font-medium text-white hover:bg-[#d95700]"
+          >
+            Uygula
+          </button>
         </div>
       )}
 
-      {combos.length > 0 && (
-        <div className="mt-4">
-          <div className="flex flex-wrap items-end gap-2">
-            <label className="text-xs">
-              <span className="block text-zinc-500">Tüm satırlara fiyat uygula</span>
-              <div className="mt-1 flex gap-1">
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  value={bulkPrice}
-                  onChange={(e) => setBulkPrice(e.target.value)}
-                  placeholder="0.00"
-                  className={`${inputCls} h-8 w-24`}
-                />
-                <button
-                  type="button"
-                  onClick={applyBulkPrice}
-                  className="h-8 rounded-lg border border-black/10 px-2 text-xs hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
-                >
-                  Uygula
-                </button>
-              </div>
-            </label>
-            <label className="text-xs">
-              <span className="block text-zinc-500">Tüm satırlara adet uygula</span>
-              <div className="mt-1 flex gap-1">
-                <input
-                  type="number"
-                  min="0"
-                  step="1"
-                  value={bulkQuantity}
-                  onChange={(e) => setBulkQuantity(e.target.value)}
-                  placeholder="1"
-                  className={`${inputCls} h-8 w-24`}
-                />
-                <button
-                  type="button"
-                  onClick={applyBulkQuantity}
-                  className="h-8 rounded-lg border border-black/10 px-2 text-xs hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
-                >
-                  Uygula
-                </button>
-              </div>
-            </label>
-          </div>
+      {applied && combos.length > 0 && (
+        <VariationTable
+          combos={combos}
+          variations={value.variations}
+          toggles={value.variationToggles}
+          rows={value.variationRows}
+          patchCell={patchCell}
+          applyBulkFill={applyBulkFill}
+          basePrice={value.price}
+          baseQuantity={value.quantity}
+        />
+      )}
+    </div>
+  );
+}
 
-          <div className="mt-2 max-h-80 overflow-auto rounded-lg border border-black/10 dark:border-white/15">
-            <table className="w-full text-xs">
-              <thead className="sticky top-0 bg-zinc-50 dark:bg-zinc-900">
-                <tr>
-                  {dims.map((d) => (
-                    <th key={d.propertyId} className="px-2 py-1.5 text-left font-medium text-zinc-500">
-                      {d.name}
-                    </th>
-                  ))}
-                  <th className="px-2 py-1.5 text-left font-medium text-zinc-500">Fiyat</th>
-                  <th className="px-2 py-1.5 text-left font-medium text-zinc-500">Adet</th>
-                  <th className="px-2 py-1.5 text-left font-medium text-zinc-500">SKU</th>
-                </tr>
-              </thead>
-              <tbody>
-                {combos.map((c) => {
-                  const key = c.valueIds.join(":");
-                  const row = value.variationRows[key] ?? EMPTY_VARIATION_ROW;
-                  return (
-                    <tr key={key} className="border-t border-black/5 dark:border-white/10">
-                      {c.values.map((v, i) => (
-                        <td key={i} className="px-2 py-1">
-                          {v}
-                        </td>
-                      ))}
-                      <td className="px-2 py-1">
-                        <input
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          value={row.price}
-                          onChange={(e) => patchRow(key, { price: e.target.value })}
-                          placeholder={value.price || "0.00"}
-                          className="h-7 w-20 rounded-md border border-black/10 bg-white px-1.5 outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
-                        />
-                      </td>
-                      <td className="px-2 py-1">
-                        <input
-                          type="number"
-                          min="0"
-                          step="1"
-                          value={row.quantity}
-                          onChange={(e) => patchRow(key, { quantity: e.target.value })}
-                          placeholder={value.quantity || "1"}
-                          className="h-7 w-16 rounded-md border border-black/10 bg-white px-1.5 outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
-                        />
-                      </td>
-                      <td className="px-2 py-1">
-                        <input
-                          type="text"
-                          value={row.sku}
-                          onChange={(e) => patchRow(key, { sku: e.target.value })}
-                          placeholder="isteğe bağlı"
-                          className="h-7 w-28 rounded-md border border-black/10 bg-white px-1.5 outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
-                        />
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-          {combosTruncated && (
-            <p className="mt-1 text-xs text-amber-600">
-              Kombinasyon sayısı {MAX_VARIATION_ROWS} ile sınırlı — daha az değer seçmeyi düşün.
+function VariationCard({
+  variation,
+  onEdit,
+  onDelete,
+}: {
+  variation: ListingFormVariation;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div className="flex items-start justify-between gap-3 rounded-lg border border-black/10 p-3 dark:border-white/15">
+      <div className="min-w-0">
+        <p className="text-sm font-medium">
+          {variation.name}{" "}
+          <span className="font-normal text-zinc-500">
+            · {variation.values.length} seçenek
+            {variation.isCustom ? " · kendi varyasyonum" : ""}
+          </span>
+        </p>
+        <div className="mt-1.5 flex flex-wrap gap-1">
+          {variation.values.map((v, i) => (
+            <span key={i} className="rounded-full bg-black/[.06] px-2 py-0.5 text-xs dark:bg-white/10">
+              {v}
+            </span>
+          ))}
+        </div>
+      </div>
+      <div className="flex shrink-0 gap-1">
+        <button
+          type="button"
+          onClick={onEdit}
+          aria-label={`${variation.name} varyasyonunu düzenle`}
+          className="rounded p-1.5 text-zinc-500 hover:bg-black/[.04] hover:text-zinc-800 dark:hover:bg-white/[.06] dark:hover:text-zinc-100"
+        >
+          ✎
+        </button>
+        <button
+          type="button"
+          onClick={onDelete}
+          aria-label={`${variation.name} varyasyonunu sil`}
+          className="rounded p-1.5 text-zinc-500 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/30"
+        >
+          🗑
+        </button>
+      </div>
+    </div>
+  );
+}
+
+interface VariationDraft {
+  source: "etsy" | "custom";
+  /** Etsy source only. */
+  propertyId: number | null;
+  name: string;
+  valueIds: number[];
+  values: string[];
+}
+const EMPTY_DRAFT: VariationDraft = { source: "etsy", propertyId: null, name: "", valueIds: [], values: [] };
+
+/** Inline (not a modal) add/edit panel — Etsy source picks values from {@link PropertyPicker}; custom is hand-typed. */
+function VariationEditorPanel({
+  draft,
+  setDraft,
+  isEditing,
+  variationProperties,
+  onCancel,
+  onCommit,
+}: {
+  draft: VariationDraft;
+  setDraft: (updater: (d: VariationDraft) => VariationDraft) => void;
+  isEditing: boolean;
+  variationProperties: TaxonomyProperty[];
+  onCancel: () => void;
+  onCommit: () => void;
+}) {
+  const selectedProp = variationProperties.find((p) => p.propertyId === draft.propertyId) ?? null;
+  const canCommit =
+    draft.source === "etsy"
+      ? draft.propertyId != null && draft.valueIds.length > 0
+      : draft.name.trim() !== "" && draft.values.length > 0;
+
+  function toggleDraftValue(pv: { valueId: number | null; name: string }) {
+    if (pv.valueId == null || !selectedProp) return;
+    const nextIdSet = new Set(draft.valueIds);
+    if (nextIdSet.has(pv.valueId)) nextIdSet.delete(pv.valueId);
+    else nextIdSet.add(pv.valueId);
+    const nextIds: number[] = [];
+    const nextValues: string[] = [];
+    for (const cand of selectedProp.possibleValues) {
+      if (cand.valueId != null && nextIdSet.has(cand.valueId)) {
+        nextIds.push(cand.valueId);
+        nextValues.push(cand.name);
+      }
+    }
+    setDraft((d) => ({ ...d, valueIds: nextIds, values: nextValues }));
+  }
+
+  const tabCls = (active: boolean) =>
+    `rounded-full px-3 py-1 text-xs ${
+      active
+        ? "bg-[#f56400] text-white"
+        : "border border-black/10 hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
+    }`;
+
+  return (
+    <div className="mt-2 rounded-lg border border-dashed border-black/20 p-3 dark:border-white/25">
+      <div className="flex gap-1.5">
+        <button type="button" onClick={() => setDraft(() => ({ ...EMPTY_DRAFT, source: "etsy" }))} className={tabCls(draft.source === "etsy")}>
+          Etsy özelliğinden seç
+        </button>
+        <button type="button" onClick={() => setDraft(() => ({ ...EMPTY_DRAFT, source: "custom" }))} className={tabCls(draft.source === "custom")}>
+          Kendim oluşturayım
+        </button>
+      </div>
+
+      {draft.source === "etsy" ? (
+        <div className="mt-3">
+          {variationProperties.length === 0 ? (
+            <p className="text-xs text-zinc-500">
+              Bu kategori için Etsy varyasyon özelliği yok (ya da henüz kategori seçilmedi) — bunun
+              yerine &quot;Kendim oluşturayım&quot;ı kullan.
             </p>
+          ) : (
+            <>
+              <select
+                value={draft.propertyId ?? ""}
+                onChange={(e) => {
+                  const id = e.target.value ? Number(e.target.value) : null;
+                  const p = variationProperties.find((x) => x.propertyId === id);
+                  setDraft(() => ({ source: "etsy", propertyId: id, name: p?.displayName ?? "", valueIds: [], values: [] }));
+                }}
+                className="h-9 w-full rounded-lg border border-black/10 bg-white px-2 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
+              >
+                <option value="">Özellik seç…</option>
+                {variationProperties.map((p) => (
+                  <option key={p.propertyId} value={p.propertyId}>
+                    {p.displayName}
+                  </option>
+                ))}
+              </select>
+
+              {selectedProp && (
+                <div className="mt-2">
+                  <PropertyPicker
+                    property={selectedProp}
+                    selected={{ name: selectedProp.displayName, valueIds: draft.valueIds, values: draft.values }}
+                    onToggle={(_, pv) => toggleDraftValue(pv)}
+                  />
+                </div>
+              )}
+            </>
           )}
         </div>
+      ) : (
+        <div className="mt-3 space-y-2">
+          <input
+            type="text"
+            value={draft.name}
+            onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
+            placeholder="Varyasyon adı (örn. Kağıt türü)"
+            className="h-9 w-full rounded-lg border border-black/10 bg-white px-2 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
+          />
+          <CustomOptionsInput values={draft.values} onChange={(values) => setDraft((d) => ({ ...d, values }))} />
+        </div>
       )}
+
+      <div className="mt-3 flex gap-2">
+        <button
+          type="button"
+          disabled={!canCommit}
+          onClick={onCommit}
+          className="h-8 rounded-lg bg-[#f56400] px-3 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {isEditing ? "Kaydet" : "Ekle"}
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="h-8 rounded-lg border border-black/10 px-3 text-xs hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
+        >
+          İptal
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Chip input for hand-typed custom variation options — same interaction as the Tags field above. */
+function CustomOptionsInput({ values, onChange }: { values: string[]; onChange: (values: string[]) => void }) {
+  const [draft, setDraft] = useState("");
+  function add() {
+    const t = draft.trim();
+    if (!t) return;
+    if (values.some((v) => v.toLowerCase() === t.toLowerCase())) {
+      setDraft("");
+      return;
+    }
+    onChange([...values, t]);
+    setDraft("");
+  }
+  function remove(t: string) {
+    onChange(values.filter((v) => v !== t));
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-black/10 p-1.5 dark:border-white/15">
+      {values.map((v) => (
+        <span key={v} className="flex items-center gap-1 rounded-full bg-black/[.06] px-2 py-0.5 text-xs dark:bg-white/10">
+          {v}
+          <button type="button" onClick={() => remove(v)} aria-label={`${v} seçeneğini kaldır`} className="text-zinc-500 hover:text-red-600">
+            ×
+          </button>
+        </span>
+      ))}
+      <input
+        type="text"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === ",") {
+            e.preventDefault();
+            add();
+          }
+        }}
+        onBlur={add}
+        placeholder={values.length === 0 ? "seçenek yaz, Enter'a bas…" : ""}
+        className="min-w-[100px] flex-1 border-none bg-transparent px-1 py-0.5 text-sm outline-none"
+      />
+    </div>
+  );
+}
+
+/** The combination table — only rendered after "Uygula", columns limited to the enabled toggles. */
+function VariationTable({
+  combos,
+  variations,
+  toggles,
+  rows,
+  patchCell,
+  applyBulkFill,
+  basePrice,
+  baseQuantity,
+}: {
+  combos: VariationCombo[];
+  variations: ListingFormVariation[];
+  toggles: Record<VariationToggleKey, VariationToggleState>;
+  rows: Record<VariationToggleKey, Record<string, string>>;
+  patchCell: (key: VariationToggleKey, cellKey: string, value: string) => void;
+  applyBulkFill: (key: VariationToggleKey, value: string) => void;
+  basePrice: string;
+  baseQuantity: string;
+}) {
+  const activeCols = (["price", "readiness", "quantity", "sku"] as VariationToggleKey[]).filter(
+    (k) => toggles[k].enabled,
+  );
+  const [bulk, setBulk] = useState<Record<VariationToggleKey, string>>({
+    price: "",
+    readiness: "",
+    quantity: "",
+    sku: "",
+  });
+
+  return (
+    <div className="mt-3">
+      {activeCols.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {activeCols.map((k) => (
+            <div key={k} className="flex items-center gap-1">
+              <input
+                type="text"
+                value={bulk[k]}
+                onChange={(e) => setBulk((b) => ({ ...b, [k]: e.target.value }))}
+                placeholder={`Tüm ${VARIATION_COLUMN_LABEL[k]} alanlarını doldur`}
+                className="h-8 w-44 rounded-lg border border-black/10 bg-white px-2 text-xs outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
+              />
+              <button
+                type="button"
+                onClick={() => applyBulkFill(k, bulk[k])}
+                className="h-8 rounded-lg border border-black/10 px-2 text-xs hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
+              >
+                Tümüne uygula
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="mt-2 max-h-80 overflow-auto rounded-lg border border-black/10 dark:border-white/15">
+        <table className="w-full text-xs">
+          <thead className="sticky top-0 bg-zinc-50 dark:bg-zinc-900">
+            <tr>
+              {variations.map((v) => (
+                <th key={v.propertyId} className="px-2 py-1.5 text-left font-medium text-zinc-500">
+                  {v.name}
+                </th>
+              ))}
+              {activeCols.map((k) => (
+                <th key={k} className="px-2 py-1.5 text-left font-medium text-zinc-500">
+                  {VARIATION_COLUMN_LABEL[k]}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {combos.map((c) => {
+              const rowKey = c.valueIds.join(":");
+              return (
+                <tr key={rowKey} className="border-t border-black/5 dark:border-white/10">
+                  {c.values.map((v, i) => (
+                    <td key={i} className="px-2 py-1">
+                      {v}
+                    </td>
+                  ))}
+                  {activeCols.map((k) => {
+                    const cellKey = comboKeyFor(toggles[k].appliesTo, c);
+                    return (
+                      <td key={k} className="px-2 py-1">
+                        <input
+                          type={k === "sku" ? "text" : "number"}
+                          min={k === "sku" ? undefined : "0"}
+                          step={k === "price" ? "0.01" : k === "sku" ? undefined : "1"}
+                          value={rows[k][cellKey] ?? ""}
+                          onChange={(e) => patchCell(k, cellKey, e.target.value)}
+                          placeholder={
+                            k === "price"
+                              ? basePrice || "0.00"
+                              : k === "quantity"
+                                ? baseQuantity || "1"
+                                : k === "readiness"
+                                  ? "opsiyonel"
+                                  : ""
+                          }
+                          className="h-7 w-24 rounded-md border border-black/10 bg-white px-1.5 outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
+                        />
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

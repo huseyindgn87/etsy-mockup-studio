@@ -198,6 +198,8 @@ export interface InventoryProductInput {
   propertyValues: { propertyId: number; name: string; valueIds: number[]; values: string[] }[];
   price: number;
   quantity: number;
+  /** Etsy auto-assigns one when omitted. */
+  readinessStateId?: number;
 }
 
 export interface UpdateInventoryInput {
@@ -208,6 +210,8 @@ export interface UpdateInventoryInput {
   quantityOnProperty?: number[];
   /** Property ids where SKU differs between combinations. */
   skuOnProperty?: number[];
+  /** Property ids where the processing/readiness profile differs between combinations. */
+  readinessStateOnProperty?: number[];
 }
 
 /**
@@ -238,12 +242,14 @@ export async function updateListingInventory(
               price: p.price > 0 ? p.price : 1,
               quantity: Math.max(0, Math.trunc(p.quantity)),
               is_enabled: true,
+              ...(p.readinessStateId ? { readiness_state_id: p.readinessStateId } : {}),
             },
           ],
         })),
         price_on_property: input.priceOnProperty ?? [],
         quantity_on_property: input.quantityOnProperty ?? [],
         sku_on_property: input.skuOnProperty ?? [],
+        readiness_state_on_property: input.readinessStateOnProperty ?? [],
       }),
     }),
   );

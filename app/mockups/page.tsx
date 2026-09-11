@@ -9,7 +9,7 @@ import { normalizeBlendMode } from "@/lib/mockup/validate";
 import ListingForm, {
   EMPTY_LISTING_FORM,
   type ListingFormValue,
-  type ListingFormVariationProperty,
+  type VariationToggleKey,
 } from "./ListingForm";
 import MockupCanvas from "./MockupCanvas";
 
@@ -65,36 +65,36 @@ const shortTitle = (t: string) => (t.length > 40 ? `${t.slice(0, 40)}…` : t);
 
 const MAX_VARIATION_ROWS = 100; // mirrors the server's sanity cap
 
+/** The joined value ids a field's `appliesTo`-scoped subset of one combination — matches `ListingForm`'s own key. */
+function comboKeyFor(appliesTo: number[], valueIds: number[]): string {
+  return appliesTo.map((i) => valueIds[i]).join(":");
+}
+
 /**
- * Turn the form's variation selection into the wire shape `publishTo.newListing.variations`
- * expects — the cartesian product of every selected property's chosen values,
- * each row carrying its own price/quantity/SKU override (falling back to the
- * base form values server-side when left blank). `imagesByValue` resolves an
- * "image varies by this property" value's assigned design to a `jobIndex`:
- * jobs are built as `included` (mockups) × `designs`, mockup-major, so a
- * design's first (and representative) render always lands at the position
- * equal to that design's own index.
+ * Turn the form's variation cards + toggles into the wire shape
+ * `publishTo.newListing.variations` expects — the cartesian product of every
+ * variation's values, with each row's price/quantity/SKU/processing-profile
+ * read from whichever cell the form stored it under (a field left off, or a
+ * blank cell, falls back to the base form price/quantity server-side).
  */
 function buildVariationsPayload(
   form: ListingFormValue,
-  designs: { id: string }[],
 ):
   | {
       priceOnProperty: number[];
       quantityOnProperty: number[];
       skuOnProperty: number[];
+      readinessStateOnProperty: number[];
       products: {
         propertyValues: { propertyId: number; name: string; valueIds: number[]; values: string[] }[];
         price?: number;
         quantity?: number;
         sku?: string;
+        readinessStateId?: number;
       }[];
-      imagesByValue: { propertyId: number; valueId: number; jobIndex: number }[];
     }
   | undefined {
-  const dims = form.variationPropertyIds
-    .map((id) => form.variationProperties[id])
-    .filter((p): p is ListingFormVariationProperty => !!p && p.valueIds.length > 0);
+  const dims = form.variations;
   if (dims.length === 0) return undefined;
 
   let combos: { valueIds: number[]; values: string[] }[] = [{ valueIds: [], values: [] }];
@@ -112,10 +112,17 @@ function buildVariationsPayload(
   }
   combos = combos.slice(0, MAX_VARIATION_ROWS);
 
+  const read = (key: VariationToggleKey, valueIds: number[]): string | undefined => {
+    const toggle = form.variationToggles[key];
+    if (!toggle.enabled) return undefined;
+    return form.variationRows[key][comboKeyFor(toggle.appliesTo, valueIds)];
+  };
+
   const products = combos.map((c) => {
-    const row = form.variationRows[c.valueIds.join(":")];
-    const rp = row?.price ? Number.parseFloat(row.price) : NaN;
-    const rq = row?.quantity ? Number.parseInt(row.quantity, 10) : NaN;
+    const rp = Number.parseFloat(read("price", c.valueIds) ?? "");
+    const rq = Number.parseInt(read("quantity", c.valueIds) ?? "", 10);
+    const rSku = read("sku", c.valueIds);
+    const rReadiness = Number.parseInt(read("readiness", c.valueIds) ?? "", 10);
     return {
       propertyValues: dims.map((d, i) => ({
         propertyId: d.propertyId,
@@ -124,29 +131,23 @@ function buildVariationsPayload(
         values: [c.values[i]],
       })),
       price: Number.isFinite(rp) && rp > 0 ? rp : undefined,
-      quantity: Number.isFinite(rq) && rq >= 0 ? Math.trunc(rq) : undefined,
-      sku: row?.sku.trim() || undefined,
+      quantity: Number.isFinite(rq) && rq >= 0 ? rq : undefined,
+      sku: rSku?.trim() || undefined,
+      readinessStateId: Number.isFinite(rReadiness) && rReadiness > 0 ? rReadiness : undefined,
     };
   });
 
-  const imagesByValue: { propertyId: number; valueId: number; jobIndex: number }[] = [];
-  for (const d of dims) {
-    if (!d.imageVaries) continue;
-    for (const valueId of d.valueIds) {
-      const designId = form.variationImages[`${d.propertyId}:${valueId}`];
-      if (!designId) continue;
-      const jobIndex = designs.findIndex((x) => x.id === designId);
-      if (jobIndex < 0) continue;
-      imagesByValue.push({ propertyId: d.propertyId, valueId, jobIndex });
-    }
-  }
+  const onProperty = (key: VariationToggleKey): number[] =>
+    form.variationToggles[key].enabled
+      ? form.variationToggles[key].appliesTo.map((i) => dims[i].propertyId)
+      : [];
 
   return {
-    priceOnProperty: dims.filter((d) => d.priceVaries).map((d) => d.propertyId),
-    quantityOnProperty: dims.map((d) => d.propertyId),
-    skuOnProperty: dims.map((d) => d.propertyId),
+    priceOnProperty: onProperty("price"),
+    quantityOnProperty: onProperty("quantity"),
+    skuOnProperty: onProperty("sku"),
+    readinessStateOnProperty: onProperty("readiness"),
     products,
-    imagesByValue,
   };
 }
 
@@ -529,7 +530,7 @@ export default function MockupsPage() {
           price: Number.isFinite(price) && price > 0 ? price : undefined,
           quantity: Number.isInteger(quantity) && quantity > 0 ? quantity : undefined,
           sku: listingForm.sku.trim() || undefined,
-          variations: buildVariationsPayload(listingForm, designs),
+          variations: buildVariationsPayload(listingForm),
         };
       }
 
@@ -931,11 +932,7 @@ export default function MockupsPage() {
         </div>
 
         <div className="mt-6">
-          <ListingForm
-            value={listingForm}
-            onChange={setListingForm}
-            designs={designs.map((d) => ({ id: d.id, name: d.name }))}
-          />
+          <ListingForm value={listingForm} onChange={setListingForm} />
         </div>
 
         <p className="mt-8 text-sm text-zinc-500 dark:text-zinc-400">

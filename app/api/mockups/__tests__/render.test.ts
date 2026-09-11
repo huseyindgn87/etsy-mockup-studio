@@ -529,17 +529,20 @@ describe("POST /api/mockups/render", () => {
             propertyValues: [{ propertyId: 200, name: "Color", valueIds: [1], values: ["Black"] }],
             price: 21.5,
             quantity: 3,
+            readinessStateId: undefined,
           },
           {
             sku: undefined,
             propertyValues: [{ propertyId: 200, name: "Color", valueIds: [2], values: ["Red"] }],
             price: 19.99, // fell back to the base price
             quantity: 5, // fell back to the base quantity
+            readinessStateId: undefined,
           },
         ],
         priceOnProperty: [200],
         quantityOnProperty: [200],
         skuOnProperty: [200],
+        readinessStateOnProperty: [],
       },
     ]);
   }, 30_000);
