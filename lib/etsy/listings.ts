@@ -40,6 +40,9 @@ export interface EtsyListing {
   endingTimestampMs: number | null;
   /** The shop section this listing is filed under, or null when it's in none. */
   shopSectionId: number | null;
+  /** First non-blank SKU string, or null. Not on `getShopListings` — comes from
+   * a separate batch inventory call (see {@link fetchSkusForListings}). */
+  sku: string | null;
 }
 
 export interface ShopListingsPage {
@@ -199,7 +202,7 @@ const HTML_ENTITIES: Record<string, string> = {
  * Server-side (no DOM available here, unlike the client-side decode already
  * used for shop-section titles in `ListingForm.tsx`).
  */
-function decodeHtmlEntities(s: string): string {
+export function decodeHtmlEntities(s: string): string {
   if (!s.includes("&")) return s;
   return s.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (match, entity: string) => {
     if (entity[0] === "#") {
@@ -255,7 +258,62 @@ function mapListing(raw: EtsyRawListing): EtsyListing {
       typeof raw.shop_section_id === "number" && raw.shop_section_id > 0
         ? raw.shop_section_id
         : null,
+    sku: null, // filled in by fetchSkusForListings after the initial map
   };
+}
+
+/** Etsy's cap on `listing_ids` per `/listings/batch/inventory` call. */
+const SKU_BATCH_LIMIT = 100;
+
+interface EtsyInventoryBatchResponse {
+  count: number;
+  results?: Array<{ listing_id: number; skus?: string[] }>;
+}
+
+const SKU_CACHE_MS = 60 * 1000; // 1min — matches LISTINGS_CACHE_MS below
+const skuCache = new TtlCache<string, Map<number, string | null>>(SKU_CACHE_MS);
+
+/**
+ * SKUs aren't part of the regular shop-listings response — only the batch
+ * inventory endpoint returns them (as a top-level `skus` array per listing).
+ * Fetches in chunks of {@link SKU_BATCH_LIMIT} and takes the first non-blank
+ * SKU string per listing; listings with none map to `null`.
+ */
+async function fetchSkusForListings(listingIds: number[]): Promise<Map<number, string | null>> {
+  if (listingIds.length === 0) return new Map();
+  const sorted = [...new Set(listingIds)].sort((a, b) => a - b);
+  const cacheKey = sorted.join(",");
+
+  return skuCache.get(cacheKey, async () => {
+    const chunks: number[][] = [];
+    for (let i = 0; i < sorted.length; i += SKU_BATCH_LIMIT) {
+      chunks.push(sorted.slice(i, i + SKU_BATCH_LIMIT));
+    }
+
+    const pages = await Promise.all(
+      chunks.map((chunk) =>
+        etsyGetJson<EtsyInventoryBatchResponse>(
+          `/listings/batch/inventory?listing_ids=${chunk.join(",")}`,
+        ),
+      ),
+    );
+
+    const map = new Map<number, string | null>();
+    for (const page of pages) {
+      for (const r of page.results ?? []) {
+        map.set(r.listing_id, (r.skus ?? []).find((s) => s.trim().length > 0) ?? null);
+      }
+    }
+    return map;
+  });
+}
+
+/** Mutates `listings` in place, filling in each `sku` from a batched lookup. */
+async function attachSkus(listings: EtsyListing[]): Promise<void> {
+  const skuByListingId = await fetchSkusForListings(listings.map((l) => l.listingId));
+  for (const listing of listings) {
+    listing.sku = skuByListingId.get(listing.listingId) ?? null;
+  }
 }
 
 export interface FetchShopListingsOptions {
@@ -303,12 +361,15 @@ export async function fetchShopListings(
       `/shops/${shopId}/listings?${query.toString()}`,
     );
 
+    const listings = (data.results ?? []).map(mapListing);
+    await attachSkus(listings);
+
     return {
       shopId,
       count: data.count ?? 0,
       limit,
       offset,
-      listings: (data.results ?? []).map(mapListing),
+      listings,
     };
   });
 }
@@ -397,6 +458,7 @@ export async function fetchAllShopListings(
     const listings = [...pages.keys()]
       .sort((a, b) => a - b)
       .flatMap((offset) => pages.get(offset)!);
+    await attachSkus(listings);
 
     return { shopId, count: first.count, limit: listings.length, offset: 0, listings };
   });

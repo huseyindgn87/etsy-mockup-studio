@@ -25,6 +25,10 @@ const RAW_LISTING = (id: number, title: string, withImage = false) => ({
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** Default stub for `/listings/batch/inventory` — no SKUs, matching how most
+ * fixtures don't care about SKU mapping (covered separately below). */
+const noSkus = () => json({ count: 0, results: [] });
+
 beforeEach(() => {
   etsyFetch.mockReset();
 });
@@ -41,6 +45,7 @@ describe("fetchAllShopListings", () => {
           results: [RAW_LISTING(1, "Miami skyline print", true), RAW_LISTING(2, "Chicago mug", true)],
         });
       }
+      if (path.includes("/listings/batch/inventory")) return noSkus();
       throw new Error(`unexpected path: ${path}`);
     });
 
@@ -87,6 +92,7 @@ describe("fetchAllShopListings", () => {
         expect(path).toContain("state=draft");
         return json({ count: 1, results: [RAW_LISTING(9, "Draft thing")] });
       }
+      if (path.includes("/listings/batch/inventory")) return noSkus();
       throw new Error(`unexpected path: ${path}`);
     });
     const page = await fetchAllShopListings({ state: "draft" });
@@ -119,6 +125,7 @@ describe("fetchShopListings (unaffected by fetchAllShopListings)", () => {
       if (path.includes("/shops/7/listings?")) {
         return json({ count: 1, results: [RAW_LISTING(5, "Sticker", true)] });
       }
+      if (path.includes("/listings/batch/inventory")) return noSkus();
       throw new Error(`unexpected path: ${path}`);
     });
     const page = await fetchShopListings({ state: "active" });
@@ -134,6 +141,7 @@ describe("fetchShopListings (unaffected by fetchAllShopListings)", () => {
           results: [RAW_LISTING(6, "I&#39;d Rather Be Thrifting &gt;&gt;SALE&lt;&lt;")],
         });
       }
+      if (path.includes("/listings/batch/inventory")) return noSkus();
       throw new Error(`unexpected path: ${path}`);
     });
     const page = await fetchShopListings({ state: "active" });
@@ -151,6 +159,7 @@ describe("fetchShopListings (unaffected by fetchAllShopListings)", () => {
           ],
         });
       }
+      if (path.includes("/listings/batch/inventory")) return noSkus();
       throw new Error(`unexpected path: ${path}`);
     });
     const page = await fetchShopListings({ state: "active" });
@@ -166,6 +175,7 @@ describe("fetchShopListings (unaffected by fetchAllShopListings)", () => {
       if (path.includes("/shops/8/listings?")) {
         return json({ count: 1, results: [{ ...RAW_LISTING(6, "No section"), shop_section_id: 0 }] });
       }
+      if (path.includes("/listings/batch/inventory")) return noSkus();
       throw new Error(`unexpected path: ${path}`);
     });
     // fresh state ("inactive") to avoid the previous test's cached page
@@ -182,11 +192,39 @@ describe("fetchShopListings (unaffected by fetchAllShopListings)", () => {
         calls++;
         return json({ count: 1, results: [RAW_LISTING(1, "Cached thing")] });
       }
+      if (path.includes("/listings/batch/inventory")) return noSkus();
       throw new Error(`unexpected path: ${path}`);
     });
     await fetchShopListings({ state: "active", limit: 10, offset: 0 });
     await fetchShopListings({ state: "active", limit: 10, offset: 0 });
     expect(calls).toBe(1); // second call served from cache
+  });
+
+  test("attaches the first non-blank SKU from the batch inventory endpoint", async () => {
+    etsyFetch.mockImplementation(async (path: string) => {
+      if (path.includes("/users/me")) return json({ user_id: 1, shop_id: 12 });
+      if (path.includes("/shops/12/listings?")) {
+        return json({
+          count: 2,
+          results: [RAW_LISTING(101, "Has a sku"), RAW_LISTING(102, "No sku")],
+        });
+      }
+      if (path.includes("/listings/batch/inventory")) {
+        expect(path).toContain("listing_ids=101,102");
+        return json({
+          count: 2,
+          results: [
+            { listing_id: 101, skus: ["", "ABC-123"] },
+            { listing_id: 102, skus: [] },
+          ],
+        });
+      }
+      throw new Error(`unexpected path: ${path}`);
+    });
+
+    const page = await fetchShopListings({ state: "active" });
+    expect(page.listings.find((l) => l.listingId === 101)?.sku).toBe("ABC-123");
+    expect(page.listings.find((l) => l.listingId === 102)?.sku).toBeNull();
   });
 });
 

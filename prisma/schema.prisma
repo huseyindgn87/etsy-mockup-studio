@@ -33,3 +33,37 @@ model MockupCalibration {
   @@index([etsyUserId])
   @@map("mockup_calibrations")
 }
+
+/// A user's in-progress listing draft — saved to our own DB, never to Etsy
+/// (see memory `live-listing-never-auto-modified`). `formData` is the editor's
+/// full `ListingFormValue` (app/mockups/ListingForm.tsx); `photosData` is the
+/// `DraftPhotosData` shape from lib/drafts/types.ts (mockup/design/own-image
+/// metadata, photo-grid order, alt text). The binary files themselves — PSDs,
+/// design images, own photos, and a small thumbnail — live in R2 (lib/storage/r2.ts),
+/// keyed deterministically as `drafts/{id}/{kind}/{itemId}`, not in this row.
+/// `hasThumbnail` just records whether that thumbnail object exists, so the
+/// drafts list can build its URL without a storage round trip.
+model ListingDraft {
+  id           String   @id @default(cuid())
+  etsyUserId   String
+  title        String   @default("")
+  hasThumbnail Boolean  @default(false)
+  formData     Json
+  photosData   Json
+  /// The listing this draft was seeded from, if any — "copy" (publishes as a
+  /// brand-new listing borrowing category/shipping/return-policy from
+  /// `sourceListingId` at publish time, same as `getListingStructure`) or
+  /// "existing" (publishes as an edit/addition to `sourceListingId` itself).
+  /// Both null for a from-scratch draft. Persisted here — not just the
+  /// editor URL's `mode`/`listingId` — so resuming from "My drafts" still
+  /// knows it's a copy/edit instead of silently falling back to "new" and
+  /// losing the category borrow. String, not Int: Etsy listing ids are
+  /// already close to Int32's ~2.1B ceiling.
+  sourceMode      String?
+  sourceListingId String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([etsyUserId, updatedAt])
+  @@map("listing_drafts")
+}

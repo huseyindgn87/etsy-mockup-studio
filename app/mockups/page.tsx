@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { blobToRaster, dataUrlToBlob, rasterToDataUrl } from "@/lib/mockup/client";
 import { compose } from "@/lib/mockup/compose";
@@ -9,6 +9,8 @@ import { quadList } from "@/lib/mockup/geometry";
 import type { Calibration, Overlay, Quad, Raster } from "@/lib/mockup/types";
 import { normalizeBlendMode } from "@/lib/mockup/validate";
 import { MAX_COMBINATIONS_HARD_CAP } from "@/lib/etsy/variation-limits";
+import { MAX_DRAFT_PSDS } from "@/lib/drafts/constants";
+import type { DraftPhotosData, DraftSource } from "@/lib/drafts/types";
 import { howItsMadeError } from "@/lib/etsy/listing-classification";
 import { personalizationQuestionsError } from "@/lib/etsy/listing-personalization";
 import {
@@ -65,6 +67,71 @@ interface MockupItem {
   hasSavedCalibration: boolean;
   include: boolean;
   tone: string | null;
+  /**
+   * The raw uploaded .psd, kept only so "Save draft" can upload it to R2 in
+   * the background — absent for a mockup restored from a draft (its PSD is
+   * already stored there; see the draft-upload effect in MockupsPageInner).
+   */
+  psdFile?: File;
+}
+
+/**
+ * Builds a `MockupItem` from a PSD parse result — the shape both a fresh
+ * upload (`POST /api/mockups/psd`) and a restored draft (`GET /api/drafts/[id]`,
+ * which re-runs the same parse server-side) come back as. Shared so restore
+ * doesn't drift from the live-upload path.
+ */
+async function buildMockupItem(params: {
+  id: string;
+  name: string;
+  contentHash: string;
+  psdW: number;
+  psdH: number;
+  composite: string; // data URL
+  overlaysIn: { image: string; x: number; y: number; blend: string; alpha: number; clip: boolean; name: string }[];
+  areaNames: string[];
+  calibration: Calibration;
+  hasSavedCalibration: boolean;
+  include: boolean;
+  tone: string | null;
+  psdFile?: File;
+}): Promise<MockupItem> {
+  const scale = Math.min(1, PREVIEW_MAX / Math.max(params.psdW, params.psdH));
+  const compositeBlob = dataUrlToBlob(params.composite);
+  const compositeFile = new File([compositeBlob], `${params.name}.png`, { type: "image/png" });
+  const mockRaster = await blobToRaster(compositeBlob, { scale });
+  const overlays: OverlayMeta[] = await Promise.all(
+    params.overlaysIn.map(async (ov) => {
+      const blob = dataUrlToBlob(ov.image);
+      return {
+        file: new File([blob], `${ov.name || "overlay"}.png`, { type: "image/png" }),
+        raster: await blobToRaster(blob, { scale }),
+        x: ov.x,
+        y: ov.y,
+        blend: ov.blend,
+        alpha: ov.alpha,
+        clip: ov.clip,
+        name: ov.name,
+      };
+    }),
+  );
+  return {
+    id: params.id,
+    name: params.name,
+    file: compositeFile,
+    psdW: params.psdW,
+    psdH: params.psdH,
+    contentHash: params.contentHash,
+    previewScale: scale,
+    mockRaster,
+    overlays,
+    areaNames: params.areaNames,
+    calibration: params.calibration,
+    hasSavedCalibration: params.hasSavedCalibration,
+    include: params.include,
+    tone: params.tone,
+    psdFile: params.psdFile,
+  };
 }
 
 /** A mockup's overlays, positioned/scaled for compositing at `mockRaster`'s resolution. */
@@ -100,6 +167,25 @@ interface TargetListing {
   listingId: number;
   title: string;
   thumbnailUrl: string | null;
+}
+
+/** Reads the "copy to"/"add to" target straight off the editor URL's `listingId`/`title`/`thumbnailUrl`. */
+function targetListingFromParams(params: ReturnType<typeof useSearchParams>): TargetListing | null {
+  const listingId = Number.parseInt(params.get("listingId") ?? "", 10);
+  if (!Number.isInteger(listingId) || listingId <= 0) return null;
+  return {
+    listingId,
+    title: params.get("title") || `Listing #${listingId}`,
+    thumbnailUrl: params.get("thumbnailUrl"),
+  };
+}
+
+/** Reads the publish mode off the editor URL's `mode` param — "copy"/"existing" need a real
+ * target listing, falling back to a blank "new" draft (matching "Create listing") without one. */
+function publishModeFromParams(params: ReturnType<typeof useSearchParams>): PublishMode {
+  const mode = params.get("mode");
+  if (mode !== "copy" && mode !== "existing") return "new";
+  return targetListingFromParams(params) ? mode : "new";
 }
 
 /** A user-uploaded photo, added straight into the photo grid alongside rendered mockups. */
@@ -325,25 +411,20 @@ function MockupsPageInner() {
   const [error, setError] = useState<string | null>(null);
 
   // The target listing and mode are chosen once, on the Listings page (its
-  // row actions, or "Create listing" for a blank draft) — never re-chosen
-  // here, so these are read from the URL a single time, not React state.
+  // row actions, or "Create listing" for a blank draft) — read from the URL
+  // a single time (mount-only useState initializers, not a live useMemo off
+  // `searchParams`, so autosave later appending `draftId` to the URL can't
+  // re-derive and reset these). They're state, not a frozen snapshot, only
+  // because restoring a saved copy/existing draft (below) needs to override
+  // them from the draft's own persisted `source` — the URL alone has nothing
+  // to derive them from once resumed via a plain `?draftId=` link.
   const searchParams = useSearchParams();
-  const targetListing = useMemo<TargetListing | null>(() => {
-    const listingId = Number.parseInt(searchParams.get("listingId") ?? "", 10);
-    if (!Number.isInteger(listingId) || listingId <= 0) return null;
-    return {
-      listingId,
-      title: searchParams.get("title") || `Listing #${listingId}`,
-      thumbnailUrl: searchParams.get("thumbnailUrl"),
-    };
-  }, [searchParams]);
-  const publishMode: PublishMode = useMemo(() => {
-    const mode = searchParams.get("mode");
-    // "copy"/"existing" need a real target — falls back to a blank "new"
-    // draft (matching "Create listing") if one wasn't actually given.
-    if ((mode === "copy" || mode === "existing") && !targetListing) return "new";
-    return mode === "copy" || mode === "existing" ? mode : "new";
-  }, [searchParams, targetListing]);
+  const [targetListing, setTargetListing] = useState<TargetListing | null>(() =>
+    targetListingFromParams(searchParams),
+  );
+  const [publishMode, setPublishMode] = useState<PublishMode>(() =>
+    publishModeFromParams(searchParams),
+  );
   const publishId = targetListing?.listingId ?? null;
   const [overwriteExisting, setOverwriteExisting] = useState(false);
   const [listingForm, setListingForm] = useState<ListingFormValue>(EMPTY_LISTING_FORM);
@@ -382,6 +463,32 @@ function MockupsPageInner() {
   const [altTextBySlot, setAltTextBySlot] = useState<Record<string, string>>({});
   const [enlargedSlotId, setEnlargedSlotId] = useState<string | null>(null);
   const [jobThumbs, setJobThumbs] = useState<Record<string, string>>({});
+
+  // ---- "Save draft" — see the effects below photoSlots, and lib/drafts/* ----
+  const router = useRouter();
+  // Snapshotted once: saveDraftNow adds `draftId` to the URL itself once it
+  // creates one, and that must never be mistaken for "the user navigated to a
+  // different saved draft" and re-trigger a restore mid-save (it would fetch
+  // the still-blank row and clobber whatever the user just typed).
+  const [initialDraftId] = useState(() => searchParams.get("draftId"));
+  // Snapshotted once at mount, same idiom as `initialDraftId` above — a
+  // "copy" source is chosen on the Listings page and never re-chosen here,
+  // so this must stay stable even once autosave adds `draftId` to the URL
+  // (which would otherwise change `searchParams`/`targetListing` identity
+  // and re-trigger the prefill effect on every save).
+  const [copySourceListingId] = useState(() =>
+    searchParams.get("mode") === "copy" && !searchParams.get("draftId")
+      ? (Number.parseInt(searchParams.get("listingId") ?? "", 10) || null)
+      : null,
+  );
+  const [draftId, setDraftId] = useState<string | null>(null);
+  const [draftStatus, setDraftStatus] = useState<"idle" | "restoring" | "saving" | "saved" | "error">(
+    initialDraftId ? "restoring" : "idle",
+  );
+  const [draftError, setDraftError] = useState<string | null>(null);
+  /** `${kind}:${itemId}` for every binary file already confirmed uploaded to R2 — drives both what autosave persists and what the upload effect still needs to send. */
+  const [uploadedAssetKeys, setUploadedAssetKeys] = useState<Set<string>>(new Set());
+  const inFlightUploads = useRef<Set<string>>(new Set());
 
   const addOwnImages = useCallback((files: File[]) => {
     setError(null);
@@ -450,9 +557,13 @@ function MockupsPageInner() {
   const addPsds = useCallback(async (files: File[]) => {
     const psds = files.filter((f) => /\.psd$/i.test(f.name));
     if (!psds.length) return;
+    if (mockups.length >= MAX_DRAFT_PSDS) {
+      setError(`A draft can hold at most ${MAX_DRAFT_PSDS} PSDs.`);
+      return;
+    }
     setError(null);
     const added: MockupItem[] = [];
-    for (let i = 0; i < psds.length; i++) {
+    for (let i = 0; i < psds.length && mockups.length + added.length < MAX_DRAFT_PSDS; i++) {
       setBusy(`Reading PSD (${i + 1}/${psds.length})`);
       const file = psds[i];
       try {
@@ -479,51 +590,23 @@ function MockupsPageInner() {
           savedCalibration: Calibration | null;
         };
 
-        const scale = Math.min(
-          1,
-          PREVIEW_MAX / Math.max(body.psd.width, body.psd.height),
-        );
-        const compositeBlob = dataUrlToBlob(body.composite);
-        const compositeFile = new File(
-          [compositeBlob],
-          `${stripExt(file.name)}.png`,
-          { type: "image/png" },
-        );
-        const mockRaster = await blobToRaster(compositeBlob, { scale });
-        const overlays: OverlayMeta[] = await Promise.all(
-          body.overlays.map(async (ov) => {
-            const blob = dataUrlToBlob(ov.image);
-            return {
-              file: new File([blob], `${ov.name || "overlay"}.png`, {
-                type: "image/png",
-              }),
-              raster: await blobToRaster(blob, { scale }),
-              x: ov.x,
-              y: ov.y,
-              blend: ov.blend,
-              alpha: ov.alpha,
-              clip: ov.clip,
-              name: ov.name,
-            };
+        added.push(
+          await buildMockupItem({
+            id: uid(),
+            name: stripExt(file.name),
+            contentHash: body.contentHash,
+            psdW: body.psd.width,
+            psdH: body.psd.height,
+            composite: body.composite,
+            overlaysIn: body.overlays,
+            areaNames: body.areaNames ?? [],
+            calibration: body.savedCalibration ?? body.suggestedCalibration,
+            hasSavedCalibration: !!body.savedCalibration,
+            include: true,
+            tone: body.tone?.tone ?? null,
+            psdFile: file,
           }),
         );
-
-        added.push({
-          id: uid(),
-          name: stripExt(file.name),
-          file: compositeFile,
-          psdW: body.psd.width,
-          psdH: body.psd.height,
-          contentHash: body.contentHash,
-          previewScale: scale,
-          mockRaster,
-          overlays,
-          areaNames: body.areaNames ?? [],
-          calibration: body.savedCalibration ?? body.suggestedCalibration,
-          hasSavedCalibration: !!body.savedCalibration,
-          include: true,
-          tone: body.tone?.tone ?? null,
-        });
       } catch (err) {
         setError(`${file.name}: ${err instanceof Error ? err.message : "could not be read"}`);
       }
@@ -533,7 +616,7 @@ function MockupsPageInner() {
       setActiveId((cur) => cur ?? added[0].id);
     }
     setBusy(null);
-  }, []);
+  }, [mockups.length]);
 
   const addDesigns = useCallback(async (files: File[]) => {
     const imgs = files.filter((f) => f.type.startsWith("image/"));
@@ -733,6 +816,339 @@ function MockupsPageInner() {
   );
   const publishCount = Math.min(photoSlots.length, MAX_LISTING_IMAGES);
   const enlargedSlot = photoSlots.find((s) => s.slotId === enlargedSlotId) ?? null;
+
+  // ---- restore a saved draft named in the URL (?draftId=...), once ----
+  useEffect(() => {
+    if (!initialDraftId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/drafts/${initialDraftId}`);
+        if (!res.ok) throw new Error(await errorFrom(res));
+        const body = (await res.json()) as {
+          id: string;
+          formData: ListingFormValue;
+          source: DraftSource | null;
+          activeTab: NavTab;
+          imageOrder: ImageSlotRef[];
+          altTextBySlot: Record<string, string>;
+          mockups: {
+            id: string;
+            name: string;
+            contentHash: string;
+            include: boolean;
+            calibration: Calibration;
+            psd: { width: number; height: number };
+            composite: string;
+            overlays: {
+              image: string;
+              x: number;
+              y: number;
+              blend: string;
+              alpha: number;
+              clip: boolean;
+              name: string;
+            }[];
+            areaNames: string[];
+            tone: string | null;
+          }[];
+          designs: { id: string; name: string; url: string }[];
+          ownImages: { id: string; name: string; url: string }[];
+        };
+        if (cancelled) return;
+
+        const restoredMockups = await Promise.all(
+          body.mockups.map((m) =>
+            buildMockupItem({
+              id: m.id,
+              name: m.name,
+              contentHash: m.contentHash,
+              psdW: m.psd.width,
+              psdH: m.psd.height,
+              composite: m.composite,
+              overlaysIn: m.overlays,
+              areaNames: m.areaNames,
+              calibration: m.calibration,
+              hasSavedCalibration: true,
+              include: m.include,
+              tone: m.tone,
+            }),
+          ),
+        );
+        const restoredDesigns: DesignItem[] = [];
+        for (const d of body.designs) {
+          const r = await fetch(d.url);
+          if (!r.ok) continue;
+          const blob = await r.blob();
+          const file = new File([blob], d.name, { type: blob.type || "image/png" });
+          restoredDesigns.push({
+            id: d.id,
+            name: d.name,
+            file,
+            raster: await blobToRaster(file, { maxSide: 1600 }),
+            url: URL.createObjectURL(file),
+          });
+        }
+        const restoredOwn: OwnImage[] = [];
+        for (const o of body.ownImages) {
+          const r = await fetch(o.url);
+          if (!r.ok) continue;
+          const blob = await r.blob();
+          const file = new File([blob], o.name, { type: blob.type || "image/jpeg" });
+          restoredOwn.push({ id: o.id, file, url: URL.createObjectURL(file) });
+        }
+        if (cancelled) return;
+
+        setListingForm({ ...EMPTY_LISTING_FORM, ...body.formData });
+        // Restores the copy/edit identity the draft was saved with — makes
+        // this resumed session behave exactly like the original copy/existing
+        // flow (category/shipping borrowed from the source at publish time,
+        // same validation skips, same "Copy of ..."/"Adding to ..." header)
+        // instead of silently degrading to a from-scratch "new" draft just
+        // because the URL itself only carries `?draftId=`.
+        if (body.source) {
+          setPublishMode(body.source.mode);
+          setTargetListing({
+            listingId: body.source.listingId,
+            title: body.formData?.title || `Listing #${body.source.listingId}`,
+            thumbnailUrl: null,
+          });
+        }
+        setActiveTab(body.activeTab || "photos");
+        setAltTextBySlot(body.altTextBySlot ?? {});
+        setImageOrder(body.imageOrder ?? []);
+        setMockups(restoredMockups);
+        setDesigns(restoredDesigns);
+        setOwnImages(restoredOwn);
+        setActiveId(restoredMockups[0]?.id ?? null);
+        setPreviewDesignId(restoredDesigns[0]?.id ?? null);
+
+        const keys = new Set<string>();
+        for (const m of restoredMockups) keys.add(`psd:${m.id}`);
+        for (const d of restoredDesigns) keys.add(`design:${d.id}`);
+        for (const o of restoredOwn) keys.add(`own:${o.id}`);
+        setUploadedAssetKeys(keys);
+
+        setDraftId(body.id);
+        setDraftStatus("saved");
+      } catch (err) {
+        if (cancelled) return;
+        setDraftStatus("error");
+        setDraftError(err instanceof Error ? err.message : "Could not load the saved draft.");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Runs once for the draftId given in the URL at mount — a draft is never
+    // re-chosen mid-session. May call setPublishMode/setTargetListing once,
+    // above, to restore a saved copy/existing identity; neither is otherwise
+    // touched again after mount.
+  }, [initialDraftId]);
+
+  // ---- "copy" mode: prefill title/description/tags/price/section/photos
+  // from the source listing, once. GET-only (`getListingCopySource`) — the
+  // source listing is only ever read, never written back to. Skipped when
+  // restoring an already-saved copy draft (its own saved form/photos win).
+  useEffect(() => {
+    if (copySourceListingId == null) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/etsy/listings/${copySourceListingId}/copy-source`);
+        if (!res.ok) throw new Error(await errorFrom(res));
+        const src = (await res.json()) as {
+          title: string;
+          description: string;
+          tags: string[];
+          price: number | null;
+          shopSectionId: number | null;
+          images: { dataUrl: string; fileName: string }[];
+        };
+        if (cancelled) return;
+
+        setListingForm((prev) => ({
+          ...prev,
+          title: src.title || prev.title,
+          description: src.description,
+          tags: src.tags,
+          price: src.price != null ? src.price.toFixed(2) : prev.price,
+          shopSectionId: src.shopSectionId,
+        }));
+
+        const files: File[] = [];
+        for (const img of src.images) {
+          const r = await fetch(img.dataUrl);
+          const blob = await r.blob();
+          files.push(new File([blob], img.fileName, { type: blob.type || "image/jpeg" }));
+        }
+        if (!cancelled && files.length > 0) addOwnImages(files);
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : "Could not load the listing to copy.");
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [copySourceListingId, addOwnImages]);
+
+  // ---- background upload: every mockup/design/own-image not yet in R2 ----
+  const [retryTick, setRetryTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setRetryTick((n) => n + 1), 8000);
+    return () => clearInterval(t);
+  }, []);
+
+  useEffect(() => {
+    if (!draftId || draftStatus === "restoring") return;
+    async function uploadOne(kind: "psd" | "design" | "own", itemId: string, file: File) {
+      const mapKey = `${kind}:${itemId}`;
+      if (uploadedAssetKeys.has(mapKey) || inFlightUploads.current.has(mapKey)) return;
+      inFlightUploads.current.add(mapKey);
+      try {
+        const res = await fetch(`/api/drafts/${draftId}/assets/${kind}/${itemId}`, {
+          method: "PUT",
+          headers: { "Content-Type": file.type || "application/octet-stream" },
+          body: file,
+        });
+        if (res.ok) setUploadedAssetKeys((prev) => new Set(prev).add(mapKey));
+      } catch {
+        // left pending — the next retry tick (or a relevant state change) tries again
+      } finally {
+        inFlightUploads.current.delete(mapKey);
+      }
+    }
+    for (const m of mockups) if (m.psdFile) void uploadOne("psd", m.id, m.psdFile);
+    for (const d of designs) void uploadOne("design", d.id, d.file);
+    for (const o of ownImages) void uploadOne("own", o.id, o.file);
+  }, [mockups, designs, ownImages, draftId, draftStatus, uploadedAssetKeys, retryTick]);
+
+  /** True once the editor has anything worth saving — avoids creating a draft row for a blank, untouched session. */
+  const hasDraftableContent = useCallback(
+    () =>
+      listingForm.title.trim() !== "" ||
+      listingForm.description.trim() !== "" ||
+      listingForm.tags.length > 0 ||
+      mockups.length > 0 ||
+      designs.length > 0 ||
+      ownImages.length > 0,
+    [listingForm, mockups.length, designs.length, ownImages.length],
+  );
+
+  const saveDraftNow = useCallback(async () => {
+    if (draftStatus === "restoring") return;
+    if (!draftId && !hasDraftableContent()) return;
+    setDraftStatus("saving");
+    try {
+      let id = draftId;
+      if (!id) {
+        const res = await fetch("/api/drafts", { method: "POST" });
+        if (!res.ok) throw new Error(await errorFrom(res));
+        const created = (await res.json()) as { id: string };
+        id = created.id;
+        setDraftId(id);
+        const params = new URLSearchParams(searchParams.toString());
+        params.set("draftId", id);
+        router.replace(`/mockups?${params.toString()}`, { scroll: false });
+      }
+
+      // Best-effort thumbnail — whatever the first photo-grid slot shows right now.
+      let hasThumbnail: boolean | undefined;
+      const firstThumb = photoSlots[0]?.thumbnailUrl;
+      if (firstThumb) {
+        try {
+          const blob = await fetch(firstThumb).then((r) => r.blob());
+          const put = await fetch(`/api/drafts/${id}/assets/thumbnail/thumb`, {
+            method: "PUT",
+            headers: { "Content-Type": blob.type || "image/png" },
+            body: blob,
+          });
+          hasThumbnail = put.ok;
+        } catch {
+          hasThumbnail = undefined; // leave whatever the draft already has
+        }
+      }
+
+      const photosData: DraftPhotosData = {
+        mockups: mockups
+          .filter((m) => uploadedAssetKeys.has(`psd:${m.id}`))
+          .map((m) => ({
+            id: m.id,
+            name: m.name,
+            contentHash: m.contentHash,
+            calibration: m.calibration,
+            include: m.include,
+          })),
+        designs: designs
+          .filter((d) => uploadedAssetKeys.has(`design:${d.id}`))
+          .map((d) => ({ id: d.id, name: d.name })),
+        ownImages: ownImages
+          .filter((o) => uploadedAssetKeys.has(`own:${o.id}`))
+          .map((o) => ({ id: o.id, name: o.file.name })),
+        imageOrder,
+        altTextBySlot,
+        activeTab,
+      };
+
+      // Persisted with the draft itself (not just the editor URL) so
+      // resuming from "My drafts" still knows this is a copy/edit — see the
+      // restore effect above, which reads it back as `body.source`.
+      const source: DraftSource | null =
+        (publishMode === "copy" || publishMode === "existing") && targetListing
+          ? { mode: publishMode, listingId: targetListing.listingId }
+          : null;
+
+      const res = await fetch(`/api/drafts/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: listingForm.title,
+          formData: listingForm,
+          photosData,
+          source,
+          ...(hasThumbnail !== undefined ? { hasThumbnail } : {}),
+        }),
+      });
+      if (!res.ok) throw new Error(await errorFrom(res));
+      setDraftStatus("saved");
+      setDraftError(null);
+    } catch (err) {
+      setDraftStatus("error");
+      setDraftError(err instanceof Error ? err.message : "Could not save draft.");
+    }
+  }, [
+    draftId,
+    draftStatus,
+    hasDraftableContent,
+    photoSlots,
+    mockups,
+    designs,
+    ownImages,
+    uploadedAssetKeys,
+    imageOrder,
+    altTextBySlot,
+    activeTab,
+    listingForm,
+    publishMode,
+    targetListing,
+    router,
+    searchParams,
+  ]);
+
+  // ---- autosave, debounced so a closed tab doesn't lose the work ----
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (draftStatus === "restoring") return;
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      void saveDraftNow();
+    }, 2000);
+    return () => {
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+    };
+  }, [saveDraftNow, draftStatus]);
 
   const buildBatchForm = useCallback(
     (publishTo?: Record<string, unknown>) => {
@@ -1059,6 +1475,22 @@ function MockupsPageInner() {
           </div>
 
           <div className="ml-auto flex flex-wrap items-center gap-2">
+            <span
+              className={`text-xs ${draftStatus === "error" ? "text-red-600 dark:text-red-400" : "text-zinc-400 dark:text-zinc-500"}`}
+            >
+              {draftStatus === "restoring" && "Loading draft…"}
+              {draftStatus === "saving" && "Saving…"}
+              {draftStatus === "saved" && "Saved"}
+              {draftStatus === "error" && (draftError || "Could not save draft")}
+            </span>
+            <button
+              type="button"
+              onClick={() => void saveDraftNow()}
+              disabled={draftStatus === "saving" || draftStatus === "restoring"}
+              className="h-9 rounded-full border border-black/10 px-4 text-sm font-medium transition-colors hover:bg-black/[.04] disabled:opacity-40 dark:border-white/15 dark:hover:bg-white/[.06]"
+            >
+              Save draft
+            </button>
             <span className="max-w-xs truncate text-xs text-zinc-500 dark:text-zinc-400">
               {modeCaption}
             </span>

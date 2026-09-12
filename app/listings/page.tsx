@@ -1,7 +1,9 @@
 "use client";
 
 import Link from "next/link";
+import { Copy, Merge, Pencil, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { DraftSummary } from "@/lib/drafts/types";
 
 interface Listing {
   listingId: number;
@@ -13,6 +15,7 @@ interface Listing {
   thumbnailUrl: string | null;
   endingTimestampMs: number | null;
   shopSectionId: number | null;
+  sku: string | null;
 }
 
 interface ListingsPage {
@@ -56,6 +59,16 @@ function formatDate(ms: number | null): string {
   });
 }
 
+/** Draft "last saved" needs same-day resolution too, unlike a listing's expiry date. */
+function formatSavedAt(iso: string): string {
+  return new Date(iso).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 /** Builds the editor URL for a row action — the listing's display fields ride along so the editor never needs a refetch just to show them. */
 function editorUrl(mode: "copy" | "new" | "existing", listing?: Listing): string {
   const params = new URLSearchParams({ mode });
@@ -76,6 +89,44 @@ export default function ListingsPage() {
   const [error, setError] = useState<string | null>(null);
   const [counts, setCounts] = useState<Record<string, number> | null>(null);
   const [sections, setSections] = useState<SectionOption[] | null>(null);
+  const [viewingDrafts, setViewingDrafts] = useState(false);
+  const [drafts, setDrafts] = useState<DraftSummary[] | null>(null);
+  const [draftsLoading, setDraftsLoading] = useState(false);
+  const [draftsError, setDraftsError] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Listing | null>(null);
+
+  const loadDrafts = useCallback(async () => {
+    setDraftsLoading(true);
+    setDraftsError(null);
+    try {
+      const res = await fetch("/api/drafts");
+      const body = await res.json().catch(() => null);
+      if (!res.ok) throw new Error((body && body.error) || `Request failed (${res.status})`);
+      setDrafts((body as { drafts: DraftSummary[] }).drafts);
+    } catch (err) {
+      setDraftsError(err instanceof Error ? err.message : "Failed to load drafts.");
+    } finally {
+      setDraftsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    // Same pattern as `load` below — flips loading state before awaiting, an
+    // intentional initial render pass (shows the skeleton).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    loadDrafts();
+  }, [loadDrafts]);
+
+  async function removeDraft(id: string) {
+    const prev = drafts;
+    setDrafts((d) => (d ? d.filter((x) => x.id !== id) : d));
+    try {
+      const res = await fetch(`/api/drafts/${id}`, { method: "DELETE" });
+      if (!res.ok) throw new Error();
+    } catch {
+      setDrafts(prev); // revert — the delete didn't actually happen
+    }
+  }
 
   useEffect(() => {
     fetch("/api/etsy/listings/counts")
@@ -159,6 +210,7 @@ export default function ListingsPage() {
   }, [load]);
 
   function selectState(next: ListingState) {
+    setViewingDrafts(false);
     if (next === state) return;
     setOffset(0);
     setState(next);
@@ -167,6 +219,20 @@ export default function ListingsPage() {
     if (next === sectionId) return;
     setOffset(0);
     setSectionId(next);
+  }
+
+  // TODO(merge): no merge-listings flow exists yet anywhere in this app —
+  // wire this up once there's a spec for what "merge" should do.
+  function handleMerge(listing: Listing) {
+    console.warn("[listings] Merge is not implemented yet.", listing.listingId);
+  }
+
+  // TODO(delete): no endpoint deletes a *live* Etsy listing yet — per
+  // memory `live-listing-never-auto-modified`, that needs an explicit,
+  // separate opt-in before it's wired up to actually call Etsy.
+  function confirmDelete() {
+    console.warn("[listings] Delete is not implemented yet.", deleteTarget?.listingId);
+    setDeleteTarget(null);
   }
 
   const total = data?.count ?? 0;
@@ -224,26 +290,121 @@ export default function ListingsPage() {
             ))}
           </nav>
 
-          <label className="mt-6 block text-sm">
-            <span className="text-xs text-zinc-500">Section</span>
-            <select
-              value={sectionId ?? ""}
-              onChange={(e) => selectSection(e.target.value ? Number(e.target.value) : null)}
-              className="mt-1 h-9 w-full rounded-lg border border-black/10 bg-white px-2 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
+          <nav className="mt-2 space-y-0.5 border-t border-black/10 pt-2 dark:border-white/15">
+            <button
+              type="button"
+              onClick={() => setViewingDrafts(true)}
+              className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition-colors ${
+                viewingDrafts
+                  ? "bg-black text-white dark:bg-white dark:text-black"
+                  : "text-zinc-600 hover:bg-black/[.04] dark:text-zinc-400 dark:hover:bg-white/[.06]"
+              }`}
             >
-              <option value="">All sections</option>
-              {(sections ?? []).map((s) => (
-                <option key={s.shopSectionId} value={s.shopSectionId}>
-                  {s.title}
-                </option>
-              ))}
-            </select>
-          </label>
+              <span>My drafts</span>
+              <span className={viewingDrafts ? "opacity-80" : "text-zinc-400"}>
+                {drafts ? drafts.length : "…"}
+              </span>
+            </button>
+          </nav>
+
+          {!viewingDrafts && (
+            <label className="mt-6 block text-sm">
+              <span className="text-xs text-zinc-500">Section</span>
+              <select
+                value={sectionId ?? ""}
+                onChange={(e) => selectSection(e.target.value ? Number(e.target.value) : null)}
+                className="mt-1 h-9 w-full rounded-lg border border-black/10 bg-white px-2 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
+              >
+                <option value="">All sections</option>
+                {(sections ?? []).map((s) => (
+                  <option key={s.shopSectionId} value={s.shopSectionId}>
+                    {s.title}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
         </aside>
 
         {/* ---- main: table + pagination ---- */}
         <div className="min-w-0 flex-1">
-          {error && (
+          {viewingDrafts && (
+            <>
+              {draftsError && (
+                <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-300">
+                  {draftsError}
+                </div>
+              )}
+              <div className="overflow-x-auto rounded-xl border border-black/10 bg-white dark:border-white/15 dark:bg-zinc-950">
+                <table className="w-full min-w-[520px] text-left text-sm">
+                  <thead>
+                    <tr className="border-b border-black/10 text-xs text-zinc-500 dark:border-white/15">
+                      <th className="px-4 py-3 font-medium">Draft</th>
+                      <th className="px-4 py-3 font-medium">Last saved</th>
+                      <th className="px-4 py-3 font-medium">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {draftsLoading && !drafts &&
+                      Array.from({ length: 3 }).map((_, i) => (
+                        <tr key={i} className="border-b border-black/5 last:border-0 dark:border-white/10">
+                          <td colSpan={3} className="px-4 py-4">
+                            <div className="h-8 w-full animate-pulse rounded bg-zinc-100 dark:bg-zinc-900" />
+                          </td>
+                        </tr>
+                      ))}
+
+                    {!draftsLoading && !draftsError && (drafts?.length ?? 0) === 0 && (
+                      <tr>
+                        <td colSpan={3} className="px-4 py-10 text-center text-sm text-zinc-500">
+                          No saved drafts. Autosave keeps a copy while you edit a listing — it
+                          shows up here.
+                        </td>
+                      </tr>
+                    )}
+
+                    {(drafts ?? []).map((draft) => (
+                      <tr key={draft.id} className="border-b border-black/5 last:border-0 dark:border-white/10">
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-3">
+                            <ListingThumb url={draft.thumbnailUrl} size={40} />
+                            <Link
+                              href={`/mockups?draftId=${draft.id}`}
+                              className="line-clamp-2 max-w-xs text-zinc-800 hover:underline dark:text-zinc-100"
+                            >
+                              {draft.title}
+                            </Link>
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 text-zinc-600 dark:text-zinc-400">
+                          {formatSavedAt(draft.updatedAt)}
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="flex flex-wrap gap-1.5">
+                            <Link
+                              href={`/mockups?draftId=${draft.id}`}
+                              className="h-7 whitespace-nowrap rounded-full border border-black/10 px-2.5 text-xs font-medium leading-7 transition-colors hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
+                            >
+                              Resume editing
+                            </Link>
+                            <button
+                              type="button"
+                              onClick={() => removeDraft(draft.id)}
+                              className="h-7 whitespace-nowrap rounded-full border border-black/10 px-2.5 text-xs font-medium leading-7 text-red-600 transition-colors hover:bg-red-50 dark:border-white/15 dark:text-red-400 dark:hover:bg-red-950/40"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+
+          {!viewingDrafts && error && (
             <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-300">
               {error}
               {error.includes("Not connected") && (
@@ -257,16 +418,18 @@ export default function ListingsPage() {
             </div>
           )}
 
+          {!viewingDrafts && (
+          <>
           <div className="overflow-x-auto rounded-xl border border-black/10 bg-white dark:border-white/15 dark:bg-zinc-950">
             <table className="w-full min-w-[760px] text-left text-sm">
               <thead>
                 <tr className="border-b border-black/10 text-xs text-zinc-500 dark:border-white/15">
-                  <th className="px-4 py-3 font-medium">Listing</th>
+                  <th className="px-4 py-3 font-medium">Title</th>
+                  <th className="px-4 py-3 font-medium">SKU</th>
                   <th className="px-4 py-3 font-medium">Stock</th>
                   <th className="px-4 py-3 font-medium">Price</th>
-                  <th className="px-4 py-3 font-medium">Expires</th>
+                  <th className="px-4 py-3 font-medium">Expires on</th>
                   <th className="px-4 py-3 font-medium">Section</th>
-                  <th className="px-4 py-3 font-medium">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -291,7 +454,7 @@ export default function ListingsPage() {
                 {listings.map((listing) => (
                   <tr
                     key={listing.listingId}
-                    className="border-b border-black/5 last:border-0 dark:border-white/10"
+                    className="group border-b border-black/5 last:border-0 transition-colors hover:bg-zinc-100 dark:border-white/10 dark:hover:bg-white/[.06]"
                   >
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-3">
@@ -306,38 +469,74 @@ export default function ListingsPage() {
                         </a>
                       </div>
                     </td>
-                    <td className="px-4 py-3 text-zinc-600 dark:text-zinc-400">{listing.quantity}</td>
                     <td className="px-4 py-3 text-zinc-600 dark:text-zinc-400">
-                      {listing.price ?? "—"}
+                      <span className="group-hover:invisible">{listing.sku ?? "—"}</span>
                     </td>
                     <td className="px-4 py-3 text-zinc-600 dark:text-zinc-400">
-                      {formatDate(listing.endingTimestampMs)}
+                      <span className="group-hover:invisible">{listing.quantity}</span>
                     </td>
                     <td className="px-4 py-3 text-zinc-600 dark:text-zinc-400">
-                      {listing.shopSectionId != null
-                        ? (sectionTitleById.get(listing.shopSectionId) ?? "—")
-                        : "—"}
+                      <span className="group-hover:invisible">{listing.price ?? "—"}</span>
                     </td>
-                    <td className="px-4 py-3">
-                      <div className="flex flex-wrap gap-1.5">
-                        <Link
-                          href={editorUrl("copy", listing)}
-                          className="h-7 whitespace-nowrap rounded-full border border-black/10 px-2.5 text-xs font-medium leading-7 transition-colors hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
-                        >
-                          Copy to a copy
-                        </Link>
-                        <Link
-                          href={editorUrl("new", listing)}
-                          className="h-7 whitespace-nowrap rounded-full border border-black/10 px-2.5 text-xs font-medium leading-7 transition-colors hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
-                        >
-                          New draft from it
-                        </Link>
-                        <Link
-                          href={editorUrl("existing", listing)}
-                          className="h-7 whitespace-nowrap rounded-full border border-black/10 px-2.5 text-xs font-medium leading-7 transition-colors hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
-                        >
-                          Add to it
-                        </Link>
+                    <td className="px-4 py-3 text-zinc-600 dark:text-zinc-400">
+                      <span className="group-hover:invisible">
+                        {formatDate(listing.endingTimestampMs)}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-zinc-600 dark:text-zinc-400">
+                      {/* Both layers are grid-stacked in the same cell (not
+                          display:none) so the column always reserves room for
+                          whichever is wider — hovering never resizes it. */}
+                      <div className="grid">
+                        <span className="col-start-1 row-start-1 truncate group-hover:invisible">
+                          {listing.shopSectionId != null
+                            ? (sectionTitleById.get(listing.shopSectionId) ?? "—")
+                            : "—"}
+                        </span>
+                        <div className="invisible col-start-1 row-start-1 flex items-center justify-end gap-1 group-hover:visible">
+                          <button
+                            type="button"
+                            title="Delete"
+                            aria-label="Delete listing"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setDeleteTarget(listing);
+                            }}
+                            className="rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-red-100 hover:text-red-700 dark:text-zinc-400 dark:hover:bg-red-950/50 dark:hover:text-red-400"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                          <Link
+                            href={editorUrl("copy", listing)}
+                            title="Copy to a copy"
+                            aria-label="Copy listing to a new draft"
+                            onClick={(e) => e.stopPropagation()}
+                            className="rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-black/[.06] hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/[.1] dark:hover:text-zinc-100"
+                          >
+                            <Copy size={16} />
+                          </Link>
+                          <button
+                            type="button"
+                            title="Merge"
+                            aria-label="Merge listing"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleMerge(listing);
+                            }}
+                            className="rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-black/[.06] hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/[.1] dark:hover:text-zinc-100"
+                          >
+                            <Merge size={16} />
+                          </button>
+                          <Link
+                            href={editorUrl("existing", listing)}
+                            title="Edit"
+                            aria-label="Edit listing"
+                            onClick={(e) => e.stopPropagation()}
+                            className="rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-black/[.06] hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/[.1] dark:hover:text-zinc-100"
+                          >
+                            <Pencil size={16} />
+                          </Link>
+                        </div>
                       </div>
                     </td>
                   </tr>
@@ -369,6 +568,69 @@ export default function ListingsPage() {
               </button>
             </div>
           </div>
+          </>
+          )}
+        </div>
+      </div>
+
+      {deleteTarget && (
+        <DeleteListingModal
+          listing={deleteTarget}
+          onCancel={() => setDeleteTarget(null)}
+          onConfirm={confirmDelete}
+        />
+      )}
+    </div>
+  );
+}
+
+/** Confirmation modal for the delete row action. Confirming is currently a
+ * TODO (see `confirmDelete`) — no endpoint deletes a live Etsy listing yet. */
+function DeleteListingModal({
+  listing,
+  onCancel,
+  onConfirm,
+}: {
+  listing: Listing;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="delete-listing-title"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+      onClick={onCancel}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-sm rounded-xl bg-white p-5 shadow-xl dark:bg-zinc-950"
+      >
+        <h2 id="delete-listing-title" className="text-base font-semibold text-black dark:text-zinc-50">
+          Delete listing?
+        </h2>
+        <p className="mt-2 text-sm text-zinc-600 dark:text-zinc-400">
+          <span className="line-clamp-2 font-medium text-zinc-800 dark:text-zinc-200">
+            {listing.title}
+          </span>{" "}
+          will be permanently deleted from Etsy. This can&apos;t be undone.
+        </p>
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="h-9 rounded-full border border-black/[.08] px-4 text-sm font-medium transition-colors hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-white/[.06]"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="h-9 rounded-full bg-red-600 px-4 text-sm font-medium text-white transition-colors hover:bg-red-700"
+          >
+            Delete
+          </button>
         </div>
       </div>
     </div>
