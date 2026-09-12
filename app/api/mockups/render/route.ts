@@ -10,6 +10,7 @@ import {
 } from "@/lib/etsy/listing-create";
 import { uploadListingImage } from "@/lib/etsy/listing-images";
 import { EtsyApiError, getShopId } from "@/lib/etsy/listings";
+import { MAX_VARIATION_COMBINATIONS } from "@/lib/etsy/variation-limits";
 import { getRenderPool } from "@/lib/mockup/render-pool";
 import type { RenderJobInput } from "@/lib/mockup/render-types";
 import {
@@ -190,8 +191,6 @@ function sanitizeProperties(raw: unknown): PropertyEntry[] {
   return out;
 }
 
-const MAX_VARIATION_PRODUCTS = 100; // Etsy's own grid is far smaller than this; just a sanity cap
-
 interface CleanVariationProduct {
   propertyValues: { propertyId: number; name: string; valueIds: number[]; values: string[] }[];
   price?: number;
@@ -220,7 +219,7 @@ const positiveIntArray = (v: unknown): number[] =>
 function sanitizeVariations(raw: unknown): CleanVariations | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
-  const rawProducts = Array.isArray(r.products) ? r.products.slice(0, MAX_VARIATION_PRODUCTS) : [];
+  const rawProducts = Array.isArray(r.products) ? r.products.slice(0, MAX_VARIATION_COMBINATIONS) : [];
 
   const products: CleanVariationProduct[] = [];
   for (const p of rawProducts) {

@@ -1,6 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  MAX_OPTIONS_PER_VARIATION,
+  MAX_PRICED_ROWS,
+  MAX_VARIATION_COMBINATIONS,
+} from "@/lib/etsy/variation-limits";
 
 /** The shape this form edits — read by the page when publishing `mode: "new"`. */
 export interface ListingFormProperty {
@@ -105,7 +110,6 @@ const MAX_TAG_LENGTH = 20;
 const MAX_TITLE_LENGTH = 140;
 /** Etsy itself caps a listing at 2 variations. */
 const MAX_VARIATIONS = 2;
-const MAX_VARIATION_ROWS = 100; // mirrors the server's sanity cap
 
 interface TaxonomyNode {
   id: number;
@@ -864,8 +868,32 @@ function VariationsSection({
     setApplied(false);
   }
 
+  // Analytical counts — cheap even when the real combinations count is too
+  // large to materialize, so the limit checks below never need the full grid.
+  const oversizedVariation = value.variations.find((v) => v.values.length > MAX_OPTIONS_PER_VARIATION) ?? null;
+  const totalCombinations =
+    value.variations.length === 0
+      ? 0
+      : value.variations.reduce((acc, v) => acc * Math.max(v.valueIds.length, 1), 1);
+  const distinctCountFor = (appliesTo: number[]): number =>
+    appliesTo.reduce((acc, i) => acc * Math.max(value.variations[i]?.valueIds.length ?? 1, 1), 1);
+  const pricedRows = Math.max(
+    1,
+    ...(["price", "quantity", "sku"] as const)
+      .filter((k) => value.variationToggles[k].enabled)
+      .map((k) => distinctCountFor(value.variationToggles[k].appliesTo)),
+  );
+
+  const violation: string | null = oversizedVariation
+    ? `"${oversizedVariation.name}" has ${oversizedVariation.values.length} options — Etsy allows at most ${MAX_OPTIONS_PER_VARIATION} per variation type.`
+    : totalCombinations > MAX_VARIATION_COMBINATIONS
+      ? `${totalCombinations} combinations exceeds Etsy's limit of ${MAX_VARIATION_COMBINATIONS} per listing.`
+      : pricedRows > MAX_PRICED_ROWS
+        ? `${pricedRows} priced rows exceeds Etsy's limit of ${MAX_PRICED_ROWS} unique price/SKU/quantity values.`
+        : null;
+
   const combos = useMemo<VariationCombo[]>(() => {
-    if (value.variations.length === 0) return [];
+    if (value.variations.length === 0 || violation) return [];
     let acc: VariationCombo[] = [{ valueIds: [], values: [] }];
     for (const v of value.variations) {
       const next: VariationCombo[] = [];
@@ -876,9 +904,8 @@ function VariationsSection({
       }
       acc = next;
     }
-    return acc.slice(0, MAX_VARIATION_ROWS);
-  }, [value.variations]);
-  const combosTruncated = value.variations.length > 0 && combos.length >= MAX_VARIATION_ROWS;
+    return acc;
+  }, [value.variations, violation]);
 
   function setToggle(key: VariationToggleKey, partial: Partial<VariationToggleState>) {
     patch({
@@ -982,15 +1009,19 @@ function VariationsSection({
             );
           })}
 
-          <p className="text-xs text-zinc-500">
-            {combos.length} combinations will be created
-            {combosTruncated ? ` (capped at ${MAX_VARIATION_ROWS})` : ""}.
+          <p className={`text-xs ${totalCombinations > MAX_VARIATION_COMBINATIONS ? "font-medium text-red-600" : "text-zinc-500"}`}>
+            {totalCombinations} combinations (max {MAX_VARIATION_COMBINATIONS}).
           </p>
+          <p className={`text-xs ${pricedRows > MAX_PRICED_ROWS ? "font-medium text-red-600" : "text-zinc-500"}`}>
+            {pricedRows} priced rows (max {MAX_PRICED_ROWS}).
+          </p>
+          {violation && <p className="text-xs font-medium text-red-600">{violation}</p>}
 
           <button
             type="button"
             onClick={() => setApplied(true)}
-            className="h-8 rounded-lg bg-[#f56400] px-3 text-xs font-medium text-white hover:bg-[#d95700]"
+            disabled={!!violation}
+            className="h-8 rounded-lg bg-[#f56400] px-3 text-xs font-medium text-white hover:bg-[#d95700] disabled:cursor-not-allowed disabled:opacity-40"
           >
             Apply
           </button>

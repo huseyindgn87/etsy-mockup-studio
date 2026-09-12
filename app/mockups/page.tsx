@@ -6,6 +6,7 @@ import { blobToRaster, dataUrlToBlob } from "@/lib/mockup/client";
 import { quadList } from "@/lib/mockup/geometry";
 import type { Calibration, Overlay, Quad, Raster } from "@/lib/mockup/types";
 import { normalizeBlendMode } from "@/lib/mockup/validate";
+import { MAX_VARIATION_COMBINATIONS } from "@/lib/etsy/variation-limits";
 import ListingForm, {
   EMPTY_LISTING_FORM,
   type ListingFormTab,
@@ -64,8 +65,6 @@ interface ListingOption {
 /** First 40 characters of a title, as shown per row in the listing picker. */
 const shortTitle = (t: string) => (t.length > 40 ? `${t.slice(0, 40)}…` : t);
 
-const MAX_VARIATION_ROWS = 100; // mirrors the server's sanity cap
-
 /** The joined value ids a field's `appliesTo`-scoped subset of one combination — matches `ListingForm`'s own key. */
 function comboKeyFor(appliesTo: number[], valueIds: number[]): string {
   return appliesTo.map((i) => valueIds[i]).join(":");
@@ -111,7 +110,7 @@ function buildVariationsPayload(
     }
     combos = next;
   }
-  combos = combos.slice(0, MAX_VARIATION_ROWS);
+  combos = combos.slice(0, MAX_VARIATION_COMBINATIONS);
 
   const read = (key: VariationToggleKey, valueIds: number[]): string | undefined => {
     const toggle = form.variationToggles[key];
