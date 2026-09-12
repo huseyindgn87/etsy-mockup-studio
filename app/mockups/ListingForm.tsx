@@ -6,6 +6,30 @@ import {
   MAX_VARIATIONS,
   maxCombinationsFor,
 } from "@/lib/etsy/variation-limits";
+import {
+  WHEN_MADE_VALUES,
+  WHO_MADE_OPTIONS,
+  formatWhenMade,
+  howItsMadeError,
+  type WhenMade,
+  type WhoMade,
+} from "@/lib/etsy/listing-classification";
+import {
+  EMPTY_PERSONALIZATION_QUESTION,
+  PERSONALIZATION_CHAR_COUNT_MAX,
+  PERSONALIZATION_CHAR_COUNT_MIN,
+  PERSONALIZATION_FIELD_TYPES,
+  PERSONALIZATION_INSTRUCTIONS_MAX,
+  PERSONALIZATION_MAX_FILES_MAX,
+  PERSONALIZATION_MAX_FILES_MIN,
+  PERSONALIZATION_MAX_OPTIONS,
+  PERSONALIZATION_MAX_QUESTIONS,
+  PERSONALIZATION_OPTION_LABEL_MAX,
+  PERSONALIZATION_QUESTION_TEXT_MAX,
+  personalizationQuestionError,
+  type PersonalizationFieldType,
+  type PersonalizationQuestionInput,
+} from "@/lib/etsy/listing-personalization";
 
 /** The shape this form edits — read by the page when publishing `mode: "new"`. */
 export interface ListingFormProperty {
@@ -44,6 +68,8 @@ export type ListingFormTab =
   | "description"
   | "tags"
   | "details"
+  | "howMade"
+  | "personalization"
   | "price"
   | "inventory"
   | "variations"
@@ -84,6 +110,21 @@ export interface ListingFormValue {
   sku: string;
   /** Etsy's processing-profile id — required on every physical listing. */
   readinessStateId: number | null;
+  /**
+   * Etsy's "How it's made" classification — `who_made`/`is_supply`/`when_made`
+   * plus production partners (required when `whoMade` is "someone_else").
+   * Always the user's own choice here; never borrowed from another listing.
+   */
+  whoMade: WhoMade;
+  isSupply: boolean;
+  whenMade: WhenMade;
+  productionPartnerIds: number[];
+  /**
+   * Up to {@link PERSONALIZATION_MAX_QUESTIONS} personalization questions
+   * (this tab exposes 2, matching Vela's layout). Empty -> the listing isn't
+   * personalizable.
+   */
+  personalizationQuestions: PersonalizationQuestionInput[];
   /** Up to 3, in display order. */
   variations: ListingFormVariation[];
   variationToggles: Record<VariationToggleKey, VariationToggleState>;
@@ -126,6 +167,11 @@ export const EMPTY_LISTING_FORM: ListingFormValue = {
   quantity: "1",
   sku: "",
   readinessStateId: null,
+  whoMade: "i_did",
+  isSupply: false,
+  whenMade: "made_to_order",
+  productionPartnerIds: [],
+  personalizationQuestions: [],
   variations: [],
   variationToggles: EMPTY_VARIATION_TOGGLES,
   variationRows: EMPTY_VARIATION_ROWS,
@@ -179,6 +225,11 @@ interface ProcessingProfileOption {
   minProcessingDays: number;
   maxProcessingDays: number;
   displayLabel: string;
+}
+interface ProductionPartnerOption {
+  productionPartnerId: number;
+  partnerName: string;
+  location: string;
 }
 
 /** Shown for both pickers below instead of Etsy's raw 429 body, which isn't user-facing text. */
@@ -400,6 +451,35 @@ export default function ListingForm({
       });
   }, []);
 
+  // ---- production partners (How it's made) ----
+  const [productionPartners, setProductionPartners] = useState<ProductionPartnerOption[] | null>(null);
+  const [productionPartnersError, setProductionPartnersError] = useState<string | null>(null);
+  useEffect(() => {
+    fetch("/api/etsy/production-partners")
+      .then(async (res) => {
+        const body = (await res.json().catch(() => null)) as
+          | { partners?: ProductionPartnerOption[]; error?: string }
+          | null;
+        if (!res.ok) {
+          throw new Error(res.status === 429 ? RATE_LIMIT_MESSAGE : body?.error || `Request failed (${res.status})`);
+        }
+        setProductionPartners(body?.partners ?? []);
+      })
+      .catch((err) => {
+        setProductionPartners([]);
+        setProductionPartnersError(
+          err instanceof Error ? err.message : "Could not load production partners.",
+        );
+      });
+  }, []);
+
+  function toggleProductionPartner(id: number) {
+    const next = value.productionPartnerIds.includes(id)
+      ? value.productionPartnerIds.filter((x) => x !== id)
+      : [...value.productionPartnerIds, id];
+    patch({ productionPartnerIds: next });
+  }
+
   const inputCls =
     "w-full rounded-lg border border-black/10 bg-white px-3 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950";
   const sectionHeadingCls = "text-base font-bold text-zinc-900 dark:text-zinc-50";
@@ -409,6 +489,15 @@ export default function ListingForm({
   // deleted) rather than fought over with the combination grid.
   const priceVariesByVariation =
     value.variationToggles.price.enabled && value.variationToggles.price.appliesTo.length > 0;
+
+  // Live preview of the same check `publishToEtsy` runs before sending anything to
+  // Etsy — lets the user see and fix a rejected combination right on this tab.
+  const howMadeError = howItsMadeError({
+    whoMade: value.whoMade,
+    isSupply: value.isSupply,
+    whenMade: value.whenMade,
+    productionPartnerIds: value.productionPartnerIds,
+  });
 
   if (activeTab === null) return null;
 
@@ -592,6 +681,116 @@ export default function ListingForm({
         </section>
       )}
 
+      {activeTab === "howMade" && (
+        <section className="max-w-2xl space-y-6">
+          <h3 className={sectionHeadingCls}>How it&apos;s made</h3>
+
+          <fieldset className="space-y-1.5">
+            <legend className="text-xs text-zinc-500">Who made it? *</legend>
+            {WHO_MADE_OPTIONS.map((opt) => (
+              <label key={opt.value} className="flex items-center gap-2 text-sm">
+                <input
+                  type="radio"
+                  name="who-made"
+                  checked={value.whoMade === opt.value}
+                  onChange={() => patch({ whoMade: opt.value })}
+                  className="accent-[#f56400]"
+                />
+                {opt.label}
+              </label>
+            ))}
+          </fieldset>
+
+          <fieldset className="space-y-1.5">
+            <legend className="text-xs text-zinc-500">What is it? *</legend>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="radio"
+                name="is-supply"
+                checked={!value.isSupply}
+                onChange={() => patch({ isSupply: false })}
+                className="accent-[#f56400]"
+              />
+              A finished product
+            </label>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="radio"
+                name="is-supply"
+                checked={value.isSupply}
+                onChange={() => patch({ isSupply: true })}
+                className="accent-[#f56400]"
+              />
+              A supply or tool to make things
+            </label>
+          </fieldset>
+
+          <label className="block max-w-xs text-sm">
+            <span className="text-xs text-zinc-500">When was it made? *</span>
+            <select
+              value={value.whenMade}
+              onChange={(e) => patch({ whenMade: e.target.value as WhenMade })}
+              className={`${inputCls} mt-1 h-9`}
+            >
+              {WHEN_MADE_VALUES.map((v) => (
+                <option key={v} value={v}>
+                  {formatWhenMade(v)}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          {value.whoMade === "someone_else" && (
+            <div className="space-y-2">
+              <span className="block text-xs text-zinc-500">
+                Production partners * — required when someone else made this item
+              </span>
+              {productionPartnersError && (
+                <p className="text-xs text-red-600">{productionPartnersError}</p>
+              )}
+              {productionPartners == null && !productionPartnersError && (
+                <p className="text-xs text-zinc-500">Loading production partners…</p>
+              )}
+              {productionPartners && productionPartners.length === 0 && !productionPartnersError && (
+                <p className="text-xs text-zinc-500">
+                  This shop has no production partners yet.{" "}
+                  <a
+                    href="https://www.etsy.com/your/shops/me/production-partners"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="underline"
+                  >
+                    Add one on Etsy
+                  </a>
+                  , then reload this page.
+                </p>
+              )}
+              {productionPartners && productionPartners.length > 0 && (
+                <div className="max-h-48 space-y-1 overflow-y-auto rounded-lg border border-black/10 p-2 dark:border-white/15">
+                  {productionPartners.map((p) => (
+                    <label
+                      key={p.productionPartnerId}
+                      className="flex items-center gap-2 rounded px-1 py-0.5 text-sm hover:bg-black/[.04] dark:hover:bg-white/[.06]"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={value.productionPartnerIds.includes(p.productionPartnerId)}
+                        onChange={() => toggleProductionPartner(p.productionPartnerId)}
+                        className="accent-[#f56400]"
+                      />
+                      {p.partnerName}
+                      {p.location && <span className="text-xs text-zinc-500">· {p.location}</span>}
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {howMadeError && <p className="text-sm font-medium text-red-600">{howMadeError}</p>}
+        </section>
+      )}
+
       {activeTab === "price" && (
         <section className="max-w-xs space-y-3">
           <h3 className={sectionHeadingCls}>Price</h3>
@@ -669,6 +868,10 @@ export default function ListingForm({
           sectionHeadingCls={sectionHeadingCls}
           onGoToTab={onGoToTab}
         />
+      )}
+
+      {activeTab === "personalization" && (
+        <PersonalizationSection value={value} patch={patch} sectionHeadingCls={sectionHeadingCls} />
       )}
 
       {activeTab === "shipping" && (
@@ -2076,6 +2279,231 @@ function VariationTable({
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Personalization — two independent, fully editable question slots (Etsy
+// allows up to 5; this tab offers 2, matching Vela's layout). The first slot
+// is always shown; the second starts collapsed behind "No second
+// personalization" until explicitly added. Clearing a slot's label excludes
+// it from the listing entirely — nothing is ever locked once configured.
+// ---------------------------------------------------------------------------
+
+const personalizationInputCls =
+  "mt-1 h-9 w-full rounded-lg border border-black/10 bg-white px-2 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950";
+
+function PersonalizationSection({
+  value,
+  patch,
+  sectionHeadingCls,
+}: {
+  value: ListingFormValue;
+  patch: (partial: Partial<ListingFormValue>) => void;
+  sectionHeadingCls: string;
+}) {
+  const slot0 = value.personalizationQuestions[0] ?? EMPTY_PERSONALIZATION_QUESTION;
+  const slot1 = value.personalizationQuestions[1] ?? null;
+
+  function setSlot0(q: PersonalizationQuestionInput) {
+    patch({ personalizationQuestions: slot1 ? [q, slot1] : [q] });
+  }
+  function setSlot1(q: PersonalizationQuestionInput) {
+    patch({ personalizationQuestions: [slot0, q] });
+  }
+  function addSlot1() {
+    patch({ personalizationQuestions: [slot0, EMPTY_PERSONALIZATION_QUESTION] });
+  }
+  function removeSlot1() {
+    patch({ personalizationQuestions: [slot0] });
+  }
+
+  return (
+    <section className="max-w-2xl space-y-6">
+      <h3 className={sectionHeadingCls}>Personalization</h3>
+      <p className="text-sm text-zinc-500">
+        Let buyers customize this listing — a text box, a list of options, or a file upload.
+        Etsy allows up to {PERSONALIZATION_MAX_QUESTIONS} personalization questions per listing;
+        this form offers 2.
+      </p>
+
+      <PersonalizationFieldEditor index={0} question={slot0} onChange={setSlot0} />
+
+      {slot1 ? (
+        <PersonalizationFieldEditor index={1} question={slot1} onChange={setSlot1} onRemove={removeSlot1} />
+      ) : (
+        <div className="flex items-center justify-between rounded-lg border border-dashed border-black/20 px-4 py-3 dark:border-white/25">
+          <span className="text-sm text-zinc-500">No second personalization</span>
+          <button
+            type="button"
+            onClick={addSlot1}
+            className="h-8 rounded-full border border-black/10 px-3 text-xs font-medium hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
+          >
+            + Add second personalization
+          </button>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function PersonalizationFieldEditor({
+  index,
+  question,
+  onChange,
+  onRemove,
+}: {
+  index: number;
+  question: PersonalizationQuestionInput;
+  onChange: (q: PersonalizationQuestionInput) => void;
+  /** Omitted for the first (always-present) slot. */
+  onRemove?: () => void;
+}) {
+  const error = question.questionText.trim()
+    ? personalizationQuestionError(question, `Personalization ${index + 1}`)
+    : null;
+
+  function patchQuestion(partial: Partial<PersonalizationQuestionInput>) {
+    onChange({ ...question, ...partial });
+  }
+
+  // Switching type resets the type-specific sub-fields to sensible defaults,
+  // so stale state from a previously chosen type is never silently sent.
+  function setFieldType(fieldType: PersonalizationFieldType) {
+    onChange({
+      ...question,
+      fieldType,
+      instructions: fieldType === "dropdown" ? "" : question.instructions,
+      maxAllowedCharacters:
+        fieldType === "text_input" ? question.maxAllowedCharacters || 50 : question.maxAllowedCharacters,
+      maxAllowedFiles:
+        fieldType === "unlabeled_upload" ? question.maxAllowedFiles || 1 : question.maxAllowedFiles,
+      options: fieldType === "dropdown" ? question.options : [],
+    });
+  }
+
+  return (
+    <div className="space-y-3 rounded-lg border border-black/10 p-4 dark:border-white/15">
+      <div className="flex items-start justify-between gap-2">
+        <label className="block max-w-xs flex-1 text-sm">
+          <span className="text-xs text-zinc-500">Choose field type</span>
+          <select
+            value={question.fieldType}
+            onChange={(e) => setFieldType(e.target.value as PersonalizationFieldType)}
+            className={personalizationInputCls}
+          >
+            {PERSONALIZATION_FIELD_TYPES.map((t) => (
+              <option key={t.value} value={t.value}>
+                {t.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        {onRemove && (
+          <button
+            type="button"
+            onClick={onRemove}
+            className="mt-5 shrink-0 text-xs font-medium text-red-600 hover:underline"
+          >
+            Remove
+          </button>
+        )}
+      </div>
+
+      <label className="block text-sm">
+        <span className="flex justify-between text-xs text-zinc-500">
+          <span>Label shown to the buyer</span>
+          <span className="font-mono">
+            {question.questionText.length}/{PERSONALIZATION_QUESTION_TEXT_MAX}
+          </span>
+        </span>
+        <input
+          type="text"
+          value={question.questionText}
+          maxLength={PERSONALIZATION_QUESTION_TEXT_MAX}
+          onChange={(e) => patchQuestion({ questionText: e.target.value })}
+          placeholder="e.g. What name would you like engraved?"
+          className={personalizationInputCls}
+        />
+      </label>
+
+      {question.fieldType !== "dropdown" && (
+        <label className="block text-sm">
+          <span className="flex justify-between text-xs text-zinc-500">
+            <span>Instructions for the buyer (optional)</span>
+            <span className="font-mono">
+              {question.instructions.length}/{PERSONALIZATION_INSTRUCTIONS_MAX}
+            </span>
+          </span>
+          <input
+            type="text"
+            value={question.instructions}
+            maxLength={PERSONALIZATION_INSTRUCTIONS_MAX}
+            onChange={(e) => patchQuestion({ instructions: e.target.value })}
+            placeholder="e.g. Please enter the name exactly as it should appear"
+            className={personalizationInputCls}
+          />
+        </label>
+      )}
+
+      {question.fieldType === "text_input" && (
+        <label className="block max-w-[240px] text-sm">
+          <span className="text-xs text-zinc-500">
+            Max characters (Etsy allows {PERSONALIZATION_CHAR_COUNT_MIN}–{PERSONALIZATION_CHAR_COUNT_MAX})
+          </span>
+          <input
+            type="number"
+            min={PERSONALIZATION_CHAR_COUNT_MIN}
+            max={PERSONALIZATION_CHAR_COUNT_MAX}
+            value={question.maxAllowedCharacters}
+            onChange={(e) => patchQuestion({ maxAllowedCharacters: Number(e.target.value) })}
+            className={personalizationInputCls}
+          />
+        </label>
+      )}
+
+      {question.fieldType === "unlabeled_upload" && (
+        <label className="block max-w-[240px] text-sm">
+          <span className="text-xs text-zinc-500">
+            Max files (Etsy allows {PERSONALIZATION_MAX_FILES_MIN}–{PERSONALIZATION_MAX_FILES_MAX})
+          </span>
+          <input
+            type="number"
+            min={PERSONALIZATION_MAX_FILES_MIN}
+            max={PERSONALIZATION_MAX_FILES_MAX}
+            value={question.maxAllowedFiles}
+            onChange={(e) => patchQuestion({ maxAllowedFiles: Number(e.target.value) })}
+            className={personalizationInputCls}
+          />
+        </label>
+      )}
+
+      {question.fieldType === "dropdown" && (
+        <div>
+          <span className="text-xs text-zinc-500">
+            Options (1–{PERSONALIZATION_MAX_OPTIONS}, each up to {PERSONALIZATION_OPTION_LABEL_MAX} characters)
+          </span>
+          <div className="mt-1">
+            <CustomOptionsInput
+              options={question.options.map((text, id) => ({ id, text }))}
+              onChange={(options) => patchQuestion({ options: options.map((o) => o.text) })}
+            />
+          </div>
+        </div>
+      )}
+
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={question.required}
+          onChange={(e) => patchQuestion({ required: e.target.checked })}
+          className="accent-[#f56400]"
+        />
+        Required
+      </label>
+
+      {error && <p className="text-xs font-medium text-red-600">{error}</p>}
     </div>
   );
 }

@@ -66,6 +66,7 @@ async function postToken(
     } catch {
       /* keep raw text */
     }
+    console.error(`[etsy] POST ${ETSY_ENDPOINTS.token} -> ${res.status}`, text || "(empty response body)");
     throw new Error(`Etsy token request failed (${res.status}): ${detail}`);
   }
   return JSON.parse(text) as EtsyTokenResponse;

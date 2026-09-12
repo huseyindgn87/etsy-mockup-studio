@@ -1,23 +1,12 @@
 import { etsyFetch } from "@/lib/etsy/auth";
-import { EtsyApiError } from "@/lib/etsy/listings";
+import { EtsyApiError, readEtsyResponse } from "@/lib/etsy/listings";
+import { toPersonalizationWire, type PersonalizationQuestionInput } from "@/lib/etsy/listing-personalization";
 
 /**
  * Create a fresh draft listing so rendered mockups are never uploaded onto a
  * live listing without the user asking. Etsy API v3 has no "copy listing"
  * endpoint, so a copy is a new draft seeded from an existing listing's fields.
  */
-
-async function readJson(res: Response): Promise<unknown> {
-  const body = await res.json().catch(() => null);
-  if (!res.ok) {
-    const detail =
-      body && typeof body === "object" && "error" in body
-        ? String((body as { error: unknown }).error)
-        : `Etsy responded ${res.status}`;
-    throw new EtsyApiError(detail, res.status, body);
-  }
-  return body;
-}
 
 export interface ListingStructure {
   title: string;
@@ -26,8 +15,6 @@ export interface ListingStructure {
   /** Price in major currency units. */
   price: number;
   currencyCode: string;
-  whoMade: string;
-  whenMade: string;
   taxonomyId: number;
   shippingProfileId: number | null;
   returnPolicyId: number | null;
@@ -42,8 +29,6 @@ interface RawListing {
   description?: string;
   quantity?: number;
   price?: { amount: number; divisor: number; currency_code: string };
-  who_made?: string;
-  when_made?: string;
   taxonomy_id?: number;
   shipping_profile_id?: number | null;
   return_policy_id?: number | null;
@@ -52,11 +37,20 @@ interface RawListing {
   materials?: string[];
 }
 
-/** Read the structural fields of a listing (`GET /listings/{id}`). */
+/**
+ * Read the structural fields of a listing (`GET /listings/{id}`) — used to
+ * seed a "copy" draft's category/shipping/tags. Deliberately excludes
+ * `who_made`/`when_made`/`is_supply`: those always come from the user's own
+ * How it's made choices (see `listing-classification.ts`), never borrowed
+ * from whatever listing happens to be selected as a source.
+ */
 export async function getListingStructure(
   listingId: number,
 ): Promise<ListingStructure> {
-  const l = (await readJson(await etsyFetch(`/listings/${listingId}`))) as RawListing;
+  const l = (await readEtsyResponse(
+    await etsyFetch(`/listings/${listingId}`),
+    `GET /listings/${listingId}`,
+  )) as RawListing;
   return {
     title: l.title ?? "",
     description: l.description ?? "",
@@ -64,8 +58,6 @@ export async function getListingStructure(
     price:
       l.price && l.price.divisor ? l.price.amount / l.price.divisor : 1,
     currencyCode: l.price?.currency_code ?? "USD",
-    whoMade: l.who_made ?? "i_did",
-    whenMade: l.when_made ?? "made_to_order",
     taxonomyId: l.taxonomy_id ?? 0,
     shippingProfileId: l.shipping_profile_id ?? null,
     returnPolicyId: l.return_policy_id ?? null,
@@ -80,8 +72,12 @@ export interface DraftListingInput {
   description: string;
   quantity: number;
   price: number;
+  /** Always the user's own How it's made choice — never borrowed from a source listing. */
   whoMade: string;
+  isSupply: boolean;
   whenMade: string;
+  /** Etsy requires at least one when `whoMade` is `someone_else` (validated before this is called — see `howItsMadeError`). */
+  productionPartnerIds?: number[];
   taxonomyId: number;
   shippingProfileId?: number | null;
   returnPolicyId?: number | null;
@@ -107,6 +103,7 @@ export async function createDraftListing(
   form.set("price", (input.price > 0 ? input.price : 1).toFixed(2));
   form.set("who_made", input.whoMade);
   form.set("when_made", input.whenMade);
+  form.set("is_supply", String(input.isSupply));
   form.set("taxonomy_id", String(input.taxonomyId));
   if (input.shippingProfileId)
     form.set("shipping_profile_id", String(input.shippingProfileId));
@@ -117,13 +114,16 @@ export async function createDraftListing(
   if (input.shopSectionId) form.set("shop_section_id", String(input.shopSectionId));
   for (const t of input.tags ?? []) if (t) form.append("tags", t);
   for (const m of input.materials ?? []) if (m) form.append("materials", m);
+  for (const id of input.productionPartnerIds ?? []) form.append("production_partner_ids", String(id));
 
-  const body = (await readJson(
+  const body = (await readEtsyResponse(
     await etsyFetch(`/shops/${shopId}/listings`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: form.toString(),
     }),
+    `POST /shops/${shopId}/listings`,
+    form.toString(),
   )) as { listing_id?: number };
 
   if (!body.listing_id) {
@@ -153,12 +153,14 @@ export async function updateListingSettings(
   if (input.shouldAutoRenew != null) form.set("should_auto_renew", String(input.shouldAutoRenew));
   if ([...form.keys()].length === 0) return;
 
-  await readJson(
+  await readEtsyResponse(
     await etsyFetch(`/shops/${shopId}/listings/${listingId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: form.toString(),
     }),
+    `PATCH /shops/${shopId}/listings/${listingId}`,
+    form.toString(),
   );
 }
 
@@ -185,7 +187,7 @@ export async function setListingProperty(
   for (const v of input.values) form.append("values", v);
   if (input.scaleId) form.set("scale_id", String(input.scaleId));
 
-  await readJson(
+  await readEtsyResponse(
     await etsyFetch(
       `/shops/${shopId}/listings/${listingId}/properties/${input.propertyId}`,
       {
@@ -194,6 +196,8 @@ export async function setListingProperty(
         body: form.toString(),
       },
     ),
+    `PUT /shops/${shopId}/listings/${listingId}/properties/${input.propertyId}`,
+    form.toString(),
   );
 }
 
@@ -207,26 +211,29 @@ export async function setListingInventorySku(
   listingId: number,
   input: { sku: string; price: number; quantity: number },
 ): Promise<void> {
-  await readJson(
+  const requestBody = {
+    products: [
+      {
+        sku: input.sku.slice(0, 500),
+        property_values: [],
+        offerings: [
+          {
+            price: input.price > 0 ? input.price : 1,
+            quantity: Math.max(1, Math.trunc(input.quantity)),
+            is_enabled: true,
+          },
+        ],
+      },
+    ],
+  };
+  await readEtsyResponse(
     await etsyFetch(`/listings/${listingId}/inventory`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        products: [
-          {
-            sku: input.sku.slice(0, 500),
-            property_values: [],
-            offerings: [
-              {
-                price: input.price > 0 ? input.price : 1,
-                quantity: Math.max(1, Math.trunc(input.quantity)),
-                is_enabled: true,
-              },
-            ],
-          },
-        ],
-      }),
+      body: JSON.stringify(requestBody),
     }),
+    `PUT /listings/${listingId}/inventory`,
+    requestBody,
   );
 }
 
@@ -267,34 +274,37 @@ export async function updateListingInventory(
   listingId: number,
   input: UpdateInventoryInput,
 ): Promise<void> {
-  await readJson(
+  const requestBody = {
+    products: input.products.map((p) => ({
+      sku: p.sku ? p.sku.slice(0, 500) : null,
+      property_values: p.propertyValues.map((pv) => ({
+        property_id: pv.propertyId,
+        property_name: pv.name,
+        value_ids: pv.valueIds,
+        values: pv.values,
+      })),
+      offerings: [
+        {
+          price: p.price > 0 ? p.price : 1,
+          quantity: Math.max(0, Math.trunc(p.quantity)),
+          is_enabled: p.enabled !== false,
+          ...(p.readinessStateId ? { readiness_state_id: p.readinessStateId } : {}),
+        },
+      ],
+    })),
+    price_on_property: input.priceOnProperty ?? [],
+    quantity_on_property: input.quantityOnProperty ?? [],
+    sku_on_property: input.skuOnProperty ?? [],
+    readiness_state_on_property: input.readinessStateOnProperty ?? [],
+  };
+  await readEtsyResponse(
     await etsyFetch(`/listings/${listingId}/inventory?max_variations_supported=3`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        products: input.products.map((p) => ({
-          sku: p.sku ? p.sku.slice(0, 500) : null,
-          property_values: p.propertyValues.map((pv) => ({
-            property_id: pv.propertyId,
-            property_name: pv.name,
-            value_ids: pv.valueIds,
-            values: pv.values,
-          })),
-          offerings: [
-            {
-              price: p.price > 0 ? p.price : 1,
-              quantity: Math.max(0, Math.trunc(p.quantity)),
-              is_enabled: p.enabled !== false,
-              ...(p.readinessStateId ? { readiness_state_id: p.readinessStateId } : {}),
-            },
-          ],
-        })),
-        price_on_property: input.priceOnProperty ?? [],
-        quantity_on_property: input.quantityOnProperty ?? [],
-        sku_on_property: input.skuOnProperty ?? [],
-        readiness_state_on_property: input.readinessStateOnProperty ?? [],
-      }),
+      body: JSON.stringify(requestBody),
     }),
+    `PUT /listings/${listingId}/inventory`,
+    requestBody,
   );
 }
 
@@ -316,17 +326,51 @@ export async function updateVariationImages(
   images: VariationImageInput[],
 ): Promise<void> {
   if (images.length === 0) return;
-  await readJson(
+  const requestBody = {
+    variation_images: images.map((i) => ({
+      property_id: i.propertyId,
+      value_id: i.valueId,
+      image_id: i.imageId,
+    })),
+  };
+  await readEtsyResponse(
     await etsyFetch(`/shops/${shopId}/listings/${listingId}/variation-images`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        variation_images: images.map((i) => ({
-          property_id: i.propertyId,
-          value_id: i.valueId,
-          image_id: i.imageId,
-        })),
-      }),
+      body: JSON.stringify(requestBody),
     }),
+    `POST /shops/${shopId}/listings/${listingId}/variation-images`,
+    requestBody,
+  );
+}
+
+/**
+ * Create or replace a listing's personalization questions —
+ * `POST /shops/{shop}/listings/{listing}/personalization`. Fully replaces
+ * any existing personalization; see `listing-personalization.ts` for the
+ * field constraints and why this isn't the older flat `is_personalizable`/
+ * `personalization_*` fields (deprecated — not part of createDraftListing or
+ * updateListing at all). Always sent with
+ * `supports_multiple_personalization_questions=true`: without it, Etsy
+ * treats the caller as a legacy single-question integration and refuses
+ * (409) any request that would remove previously-configured questions.
+ */
+export async function updateListingPersonalization(
+  shopId: number,
+  listingId: number,
+  questions: PersonalizationQuestionInput[],
+): Promise<void> {
+  const requestBody = { personalization_questions: questions.map(toPersonalizationWire) };
+  await readEtsyResponse(
+    await etsyFetch(
+      `/shops/${shopId}/listings/${listingId}/personalization?supports_multiple_personalization_questions=true`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestBody),
+      },
+    ),
+    `POST /shops/${shopId}/listings/${listingId}/personalization`,
+    requestBody,
   );
 }

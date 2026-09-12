@@ -1,5 +1,5 @@
 import { etsyFetch } from "@/lib/etsy/auth";
-import { EtsyApiError } from "@/lib/etsy/listings";
+import { readEtsyResponse } from "@/lib/etsy/listings";
 import { MAX_ALT_TEXT_LENGTH } from "@/lib/etsy/listing-image-limits";
 
 /**
@@ -50,16 +50,19 @@ export async function uploadListingImage(params: {
     `/shops/${params.shopId}/listings/${params.listingId}/images`,
     { method: "POST", body: form },
   );
-  const body: unknown = await res.json().catch(() => null);
-  if (!res.ok) {
-    const detail =
-      body && typeof body === "object" && "error" in body
-        ? String((body as { error: unknown }).error)
-        : `Etsy responded ${res.status}`;
-    throw new EtsyApiError(detail, res.status, body);
-  }
-
-  const raw = body as RawListingImage;
+  // The body is multipart (binary image) — log its metadata, not the bytes.
+  const raw = (await readEtsyResponse(
+    res,
+    `POST /shops/${params.shopId}/listings/${params.listingId}/images`,
+    {
+      filename: params.filename,
+      contentType: params.contentType,
+      bytes: params.bytes.length,
+      rank: params.rank,
+      overwrite: params.overwrite,
+      altText: params.altText,
+    },
+  )) as RawListingImage;
   return {
     listingImageId: raw.listing_image_id,
     rank: raw.rank,

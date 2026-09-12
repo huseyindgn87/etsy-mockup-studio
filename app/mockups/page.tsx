@@ -8,6 +8,8 @@ import { quadList } from "@/lib/mockup/geometry";
 import type { Calibration, Overlay, Quad, Raster } from "@/lib/mockup/types";
 import { normalizeBlendMode } from "@/lib/mockup/validate";
 import { MAX_COMBINATIONS_HARD_CAP } from "@/lib/etsy/variation-limits";
+import { howItsMadeError } from "@/lib/etsy/listing-classification";
+import { personalizationQuestionsError } from "@/lib/etsy/listing-personalization";
 import {
   ACCEPTED_IMAGE_EXTENSIONS,
   MAX_ALT_TEXT_LENGTH,
@@ -263,16 +265,18 @@ async function errorFrom(res: Response): Promise<string> {
 }
 
 /** Left-nav tabs, mirroring Etsy's own "New listing" screen. */
-type NavTab = ListingFormTab | "photos" | "personalization";
+type NavTab = ListingFormTab | "photos";
 
 const LISTING_FORM_TABS: readonly ListingFormTab[] = [
   "title",
   "description",
   "tags",
   "details",
+  "howMade",
   "price",
   "inventory",
   "variations",
+  "personalization",
   "shipping",
   "settings",
 ];
@@ -286,6 +290,7 @@ const NAV_ITEMS: { key: NavTab; label: string }[] = [
   { key: "description", label: "Description" },
   { key: "tags", label: "Tags" },
   { key: "details", label: "Details" },
+  { key: "howMade", label: "How it's made" },
   { key: "price", label: "Price" },
   { key: "inventory", label: "Inventory" },
   { key: "variations", label: "Variations" },
@@ -842,6 +847,28 @@ export default function MockupsPage() {
       setError("Choose a processing profile for the new draft (Shipping tab).");
       return;
     }
+    if (publishMode !== "existing") {
+      const howError = howItsMadeError({
+        whoMade: listingForm.whoMade,
+        isSupply: listingForm.isSupply,
+        whenMade: listingForm.whenMade,
+        productionPartnerIds: listingForm.productionPartnerIds,
+      });
+      if (howError) {
+        setError(`${howError} (How it's made tab)`);
+        return;
+      }
+    }
+    const activePersonalization = listingForm.personalizationQuestions.filter(
+      (q) => q.questionText.trim() !== "",
+    );
+    if (publishMode !== "existing") {
+      const personalizationError = personalizationQuestionsError(activePersonalization);
+      if (personalizationError) {
+        setError(`${personalizationError} (Personalization tab)`);
+        return;
+      }
+    }
     setError(null);
     setPublishResult(null);
     try {
@@ -855,6 +882,17 @@ export default function MockupsPage() {
         listingId: publishId,
       };
       if (publishMode === "existing") publishTo.overwrite = overwriteExisting;
+      if (publishMode !== "existing") {
+        publishTo.howItsMade = {
+          whoMade: listingForm.whoMade,
+          isSupply: listingForm.isSupply,
+          whenMade: listingForm.whenMade,
+          productionPartnerIds: listingForm.productionPartnerIds,
+        };
+        if (activePersonalization.length > 0) {
+          publishTo.personalization = activePersonalization;
+        }
+      }
       if (publishMode === "new") {
         const price = Number.parseFloat(listingForm.price);
         const quantity = Number.parseInt(listingForm.quantity, 10);
@@ -940,6 +978,24 @@ export default function MockupsPage() {
         return listingForm.tags.length === 0;
       case "details":
         return listingForm.taxonomyId == null;
+      case "howMade":
+        return (
+          howItsMadeError({
+            whoMade: listingForm.whoMade,
+            isSupply: listingForm.isSupply,
+            whenMade: listingForm.whenMade,
+            productionPartnerIds: listingForm.productionPartnerIds,
+          }) != null
+        );
+      case "personalization":
+        // Optional — a blank slot (no label typed) is just "not configured",
+        // not incomplete. Only a question the user started filling in but
+        // left invalid (e.g. a dropdown with no options) flags the tab.
+        return (
+          personalizationQuestionsError(
+            listingForm.personalizationQuestions.filter((q) => q.questionText.trim() !== ""),
+          ) != null
+        );
       case "price": {
         // Hidden and not required once price varies by variation — it's
         // entered per combination on the Variations tab instead.
@@ -1390,8 +1446,6 @@ export default function MockupsPage() {
               </div>
             )}
 
-            {activeTab === "personalization" && <ComingNextPanel label="Personalization" />}
-
             <ListingForm
               value={listingForm}
               onChange={setListingForm}
@@ -1792,16 +1846,6 @@ function VideoSlot({
           e.target.value = "";
         }}
       />
-    </div>
-  );
-}
-
-/** Placeholder panel for nav tabs whose Etsy calls aren't wired up yet. */
-function ComingNextPanel({ label }: { label: string }) {
-  return (
-    <div className="rounded-lg border border-dashed border-black/15 p-10 text-center dark:border-white/20">
-      <h3 className="text-base font-bold text-zinc-900 dark:text-zinc-50">{label}</h3>
-      <p className="mt-1 text-sm text-zinc-500">Coming next.</p>
     </div>
   );
 }

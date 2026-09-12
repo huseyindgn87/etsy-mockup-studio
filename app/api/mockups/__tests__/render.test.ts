@@ -75,10 +75,12 @@ const skuCalls: unknown[] = [];
 const inventoryCalls: unknown[] = [];
 const variationImageCalls: unknown[] = [];
 const settingsCalls: unknown[] = [];
+const personalizationCalls: unknown[] = [];
 let propertyShouldFail = false;
 let skuShouldFail = false;
 let inventoryShouldFail = false;
 let settingsShouldFail = false;
+let personalizationShouldFail = false;
 vi.mock("@/lib/etsy/listing-create", () => ({
   getListingStructure: vi.fn(async () => ({
     title: "Source tee",
@@ -117,6 +119,10 @@ vi.mock("@/lib/etsy/listing-create", () => ({
   }),
   updateVariationImages: vi.fn(async (_shop: number, _listing: number, images: unknown) => {
     variationImageCalls.push(images);
+  }),
+  updateListingPersonalization: vi.fn(async (_shop: number, _listing: number, questions: unknown) => {
+    personalizationCalls.push(questions);
+    if (personalizationShouldFail) throw new Error("Etsy rejected the personalization");
   }),
 }));
 
@@ -168,6 +174,14 @@ function form(
   fd.append("payload", JSON.stringify(payload));
   return new Request("http://localhost/api/mockups/render", { method: "POST", body: fd });
 }
+
+/** An Etsy-acceptable "How it's made" block — every mode:new/copy test needs one now that nothing is borrowed from the source listing. */
+const HOW_ITS_MADE_OK = {
+  whoMade: "i_did" as const,
+  isSupply: false,
+  whenMade: "made_to_order" as const,
+  productionPartnerIds: [] as number[],
+};
 
 describe("POST /api/mockups/render", () => {
   test("streams a ZIP of the rendered jobs", async () => {
@@ -595,7 +609,7 @@ describe("POST /api/mockups/render", () => {
     const res = await POST(
       form(
         {
-          publishTo: { mode: "copy", listingId: 500 },
+          publishTo: { mode: "copy", listingId: 500, howItsMade: HOW_ITS_MADE_OK },
           mockups: [{ name: "tee", width: 120, height: 100, calibration: {} }],
           designs: [{ name: "a" }],
           jobs: [{ mockup: 0, design: 0 }],
@@ -638,7 +652,7 @@ describe("POST /api/mockups/render", () => {
     const noTitle = await POST(
       form(
         {
-          publishTo: { mode: "new", listingId: 500, newListing: {} },
+          publishTo: { mode: "new", listingId: 500, newListing: {}, howItsMade: HOW_ITS_MADE_OK },
           mockups: [{ name: "m", calibration: {} }],
           designs: [],
           jobs: [{ mockup: 0 }],
@@ -654,6 +668,7 @@ describe("POST /api/mockups/render", () => {
           publishTo: {
             mode: "new",
             listingId: 500,
+            howItsMade: HOW_ITS_MADE_OK,
             newListing: { title: "Blank draft", quantity: 7 },
           },
           mockups: [{ name: "m", calibration: {} }],
@@ -671,7 +686,273 @@ describe("POST /api/mockups/render", () => {
       readinessStateId: 321, // falls back to the source listing's since none was chosen
       tags: [],
       materials: [],
+      // never borrowed from the source listing — always the caller's own choice
+      whoMade: "i_did",
+      isSupply: false,
+      whenMade: "made_to_order",
     });
+  }, 30_000);
+
+  test("mode:new requires howItsMade and never falls back to the source listing's who_made/when_made", async () => {
+    createCalls.length = 0;
+    const mock = await png(80, 80, [0, 0, 0]);
+
+    const res = await POST(
+      form(
+        {
+          publishTo: { mode: "new", listingId: 500, newListing: { title: "No how-made" } },
+          mockups: [{ name: "m", calibration: {} }],
+          designs: [],
+          jobs: [{ mockup: 0 }],
+        },
+        [{ field: "mockup", buf: mock, name: "m.png" }],
+      ),
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/how it's made/i);
+    expect(createCalls).toHaveLength(0); // never reached Etsy
+  });
+
+  test("mode:new blocks someone_else + not-a-supply + made-to-order before calling Etsy", async () => {
+    createCalls.length = 0;
+    const mock = await png(80, 80, [0, 0, 0]);
+
+    const res = await POST(
+      form(
+        {
+          publishTo: {
+            mode: "new",
+            listingId: 500,
+            howItsMade: {
+              whoMade: "someone_else",
+              isSupply: false,
+              whenMade: "made_to_order",
+              productionPartnerIds: [123],
+            },
+            newListing: { title: "Reseller item" },
+          },
+          mockups: [{ name: "m", calibration: {} }],
+          designs: [],
+          jobs: [{ mockup: 0 }],
+        },
+        [{ field: "mockup", buf: mock, name: "m.png" }],
+      ),
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/another company or person/i);
+    expect(createCalls).toHaveLength(0); // never reached Etsy
+  });
+
+  test("mode:new requires at least one production partner when who_made is someone_else", async () => {
+    createCalls.length = 0;
+    const mock = await png(80, 80, [0, 0, 0]);
+
+    const res = await POST(
+      form(
+        {
+          publishTo: {
+            mode: "new",
+            listingId: 500,
+            howItsMade: {
+              whoMade: "someone_else",
+              isSupply: true,
+              whenMade: "made_to_order",
+              productionPartnerIds: [],
+            },
+            newListing: { title: "Reseller supply" },
+          },
+          mockups: [{ name: "m", calibration: {} }],
+          designs: [],
+          jobs: [{ mockup: 0 }],
+        },
+        [{ field: "mockup", buf: mock, name: "m.png" }],
+      ),
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/production partner/i);
+    expect(createCalls).toHaveLength(0); // never reached Etsy
+  });
+
+  test("mode:new accepts someone_else with a production partner and is_supply true, and sends production_partner_ids", async () => {
+    createCalls.length = 0;
+    const mock = await png(80, 80, [0, 0, 0]);
+
+    const res = await POST(
+      form(
+        {
+          publishTo: {
+            mode: "new",
+            listingId: 500,
+            howItsMade: {
+              whoMade: "someone_else",
+              isSupply: true,
+              whenMade: "made_to_order",
+              productionPartnerIds: [123, 456],
+            },
+            newListing: { title: "Reseller supply" },
+          },
+          mockups: [{ name: "m", calibration: {} }],
+          designs: [],
+          jobs: [{ mockup: 0 }],
+        },
+        [{ field: "mockup", buf: mock, name: "m.png" }],
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(createCalls[0]).toMatchObject({
+      whoMade: "someone_else",
+      isSupply: true,
+      productionPartnerIds: [123, 456],
+    });
+  }, 30_000);
+
+  test("mode:new with no personalization never calls updateListingPersonalization", async () => {
+    personalizationCalls.length = 0;
+    const mock = await png(80, 80, [0, 0, 0]);
+
+    const res = await POST(
+      form(
+        {
+          publishTo: { mode: "new", listingId: 500, howItsMade: HOW_ITS_MADE_OK, newListing: { title: "Plain" } },
+          mockups: [{ name: "m", calibration: {} }],
+          designs: [],
+          jobs: [{ mockup: 0 }],
+        },
+        [{ field: "mockup", buf: mock, name: "m.png" }],
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(personalizationCalls).toEqual([]);
+  }, 30_000);
+
+  test("mode:new sanitizes and passes through valid personalization questions", async () => {
+    personalizationCalls.length = 0;
+    const mock = await png(80, 80, [0, 0, 0]);
+
+    const res = await POST(
+      form(
+        {
+          publishTo: {
+            mode: "new",
+            listingId: 500,
+            howItsMade: HOW_ITS_MADE_OK,
+            newListing: { title: "Personalized item" },
+            personalization: [
+              {
+                questionText: "Engraving",
+                instructions: "Enter the name",
+                required: true,
+                fieldType: "text_input",
+                maxAllowedCharacters: 50,
+              },
+              {
+                questionText: "Font",
+                required: true,
+                fieldType: "dropdown",
+                options: ["Arial", "Times New Roman"],
+              },
+            ],
+          },
+          mockups: [{ name: "m", calibration: {} }],
+          designs: [],
+          jobs: [{ mockup: 0 }],
+        },
+        [{ field: "mockup", buf: mock, name: "m.png" }],
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(personalizationCalls).toHaveLength(1);
+    // `updateListingPersonalization` itself (mocked out here) does the
+    // domain->Etsy-wire mapping — see lib/etsy/__tests__/listing-personalization.test.ts.
+    expect(personalizationCalls[0]).toEqual([
+      {
+        questionId: undefined,
+        questionText: "Engraving",
+        instructions: "Enter the name",
+        required: true,
+        fieldType: "text_input",
+        maxAllowedCharacters: 50,
+        maxAllowedFiles: 0,
+        options: [],
+      },
+      {
+        questionId: undefined,
+        questionText: "Font",
+        instructions: "",
+        required: true,
+        fieldType: "dropdown",
+        maxAllowedCharacters: 0,
+        maxAllowedFiles: 0,
+        options: ["Arial", "Times New Roman"],
+      },
+    ]);
+  }, 30_000);
+
+  test("mode:new blocks two file-upload personalization questions before calling Etsy", async () => {
+    personalizationCalls.length = 0;
+    createCalls.length = 0;
+    const mock = await png(80, 80, [0, 0, 0]);
+
+    const res = await POST(
+      form(
+        {
+          publishTo: {
+            mode: "new",
+            listingId: 500,
+            howItsMade: HOW_ITS_MADE_OK,
+            newListing: { title: "Two uploads" },
+            personalization: [
+              { questionText: "Photo A", required: true, fieldType: "unlabeled_upload", maxAllowedFiles: 1 },
+              { questionText: "Photo B", required: true, fieldType: "unlabeled_upload", maxAllowedFiles: 1 },
+            ],
+          },
+          mockups: [{ name: "m", calibration: {} }],
+          designs: [],
+          jobs: [{ mockup: 0 }],
+        },
+        [{ field: "mockup", buf: mock, name: "m.png" }],
+      ),
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/one file-upload/i);
+    expect(createCalls).toHaveLength(0); // never reached Etsy
+  });
+
+  test("mode:new reports a personalization failure without failing the whole publish", async () => {
+    personalizationCalls.length = 0;
+    personalizationShouldFail = true;
+    const mock = await png(80, 80, [0, 0, 0]);
+
+    const res = await POST(
+      form(
+        {
+          publishTo: {
+            mode: "new",
+            listingId: 500,
+            howItsMade: HOW_ITS_MADE_OK,
+            newListing: { title: "Will fail personalization" },
+            personalization: [
+              { questionText: "Engraving", required: true, fieldType: "text_input", maxAllowedCharacters: 50 },
+            ],
+          },
+          mockups: [{ name: "m", calibration: {} }],
+          designs: [],
+          jobs: [{ mockup: 0 }],
+        },
+        [{ field: "mockup", buf: mock, name: "m.png" }],
+      ),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { createdDraft: boolean; uploaded: unknown[]; failed: { name: string }[] };
+    expect(body.createdDraft).toBe(true);
+    expect(body.uploaded).toHaveLength(1); // image upload still went through
+    expect(body.failed.map((f) => f.name)).toEqual(["Personalization"]);
+
+    personalizationShouldFail = false;
   }, 30_000);
 
   test("mode:new uses the form's chosen readiness state instead of the source's", async () => {
@@ -684,6 +965,7 @@ describe("POST /api/mockups/render", () => {
           publishTo: {
             mode: "new",
             listingId: 500,
+            howItsMade: HOW_ITS_MADE_OK,
             newListing: { title: "Ready to ship tee", readinessStateId: 654 },
           },
           mockups: [{ name: "m", calibration: {} }],
@@ -709,6 +991,7 @@ describe("POST /api/mockups/render", () => {
           publishTo: {
             mode: "new",
             listingId: 500,
+            howItsMade: HOW_ITS_MADE_OK,
             newListing: { title: "Featured tee", featuredRank: 1, shouldAutoRenew: false },
           },
           mockups: [{ name: "m", calibration: {} }],
@@ -729,6 +1012,7 @@ describe("POST /api/mockups/render", () => {
           publishTo: {
             mode: "new",
             listingId: 500,
+            howItsMade: HOW_ITS_MADE_OK,
             newListing: { title: "Featured tee 2", featuredRank: 1 },
           },
           mockups: [{ name: "m", calibration: {} }],
@@ -766,6 +1050,7 @@ describe("POST /api/mockups/render", () => {
           publishTo: {
             mode: "new",
             listingId: 500,
+            howItsMade: HOW_ITS_MADE_OK,
             newListing: {
               title: "Miami skyline tee",
               description: "A tee",
@@ -828,6 +1113,7 @@ describe("POST /api/mockups/render", () => {
           publishTo: {
             mode: "new",
             listingId: 500,
+            howItsMade: HOW_ITS_MADE_OK,
             newListing: {
               title: "Retry-safe draft",
               sku: "X-1",
@@ -870,6 +1156,7 @@ describe("POST /api/mockups/render", () => {
           publishTo: {
             mode: "new",
             listingId: 500,
+            howItsMade: HOW_ITS_MADE_OK,
             newListing: {
               title: "Tee with variations",
               price: 19.99,
@@ -954,6 +1241,7 @@ describe("POST /api/mockups/render", () => {
           publishTo: {
             mode: "new",
             listingId: 500,
+            howItsMade: HOW_ITS_MADE_OK,
             newListing: {
               title: "Tee with a discontinued color",
               price: 19.99,
@@ -1010,6 +1298,7 @@ describe("POST /api/mockups/render", () => {
           publishTo: {
             mode: "new",
             listingId: 500,
+            howItsMade: HOW_ITS_MADE_OK,
             newListing: {
               title: "Tee with per-value images",
               price: 10,
@@ -1079,6 +1368,7 @@ describe("POST /api/mockups/render", () => {
           publishTo: {
             mode: "new",
             listingId: 500,
+            howItsMade: HOW_ITS_MADE_OK,
             newListing: {
               title: "Tee, inventory will fail",
               variations: {

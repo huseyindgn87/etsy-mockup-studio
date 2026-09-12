@@ -6,11 +6,18 @@ import {
   setListingInventorySku,
   setListingProperty,
   updateListingInventory,
+  updateListingPersonalization,
   updateListingSettings,
   updateVariationImages,
 } from "@/lib/etsy/listing-create";
 import { uploadListingImage } from "@/lib/etsy/listing-images";
 import { MAX_LISTING_IMAGES } from "@/lib/etsy/listing-image-limits";
+import { WHEN_MADE_VALUES, WHO_MADE_OPTIONS, howItsMadeError } from "@/lib/etsy/listing-classification";
+import {
+  PERSONALIZATION_FIELD_TYPES,
+  personalizationQuestionsError,
+  type PersonalizationQuestionInput,
+} from "@/lib/etsy/listing-personalization";
 import { uploadListingVideo } from "@/lib/etsy/listing-video";
 import { EtsyApiError, getShopId } from "@/lib/etsy/listings";
 import { MAX_COMBINATIONS_HARD_CAP } from "@/lib/etsy/variation-limits";
@@ -69,6 +76,29 @@ interface ImageOrderEntry {
   kind: "job" | "own";
   index: number;
 }
+/**
+ * Etsy's "How it's made" classification — `who_made`/`is_supply`/`when_made`
+ * plus production partners (required when `who_made` is `someone_else`).
+ * Always the user's own choice on the How it's made tab; never borrowed from
+ * `listingId`'s source listing (see `getListingStructure`).
+ */
+interface HowItsMadeSpec {
+  whoMade?: string;
+  isSupply?: boolean;
+  whenMade?: string;
+  productionPartnerIds?: number[];
+}
+/** One personalization question, in the same shape as `PersonalizationQuestionInput` — see `listing-personalization.ts`. */
+interface PersonalizationQuestionSpec {
+  questionId?: number;
+  questionText?: string;
+  instructions?: string;
+  required?: boolean;
+  fieldType?: string;
+  maxAllowedCharacters?: number;
+  maxAllowedFiles?: number;
+  options?: string[];
+}
 interface PublishSpec {
   /**
    * "existing" — append to `listingId` (never replaces unless `overwrite`).
@@ -84,6 +114,10 @@ interface PublishSpec {
   /** "existing" mode only. Replace the image at each rank. Default false. */
   overwrite?: boolean;
   copyTitle?: string;
+  /** Required for "copy" and "new" — see {@link HowItsMadeSpec}. */
+  howItsMade?: HowItsMadeSpec;
+  /** Optional, "copy"/"new" only — 0 to `PERSONALIZATION_MAX_QUESTIONS` questions. Omitted/empty -> no personalization is set. */
+  personalization?: PersonalizationQuestionSpec[];
   newListing?: {
     title?: string;
     description?: string;
@@ -361,6 +395,96 @@ function sanitizeImageOrder(raw: unknown, jobCount: number, ownCount: number): I
   return out;
 }
 
+const WHO_MADE_VALUES = WHO_MADE_OPTIONS.map((o) => o.value);
+
+interface ValidHowItsMade {
+  whoMade: (typeof WHO_MADE_OPTIONS)[number]["value"];
+  isSupply: boolean;
+  whenMade: string;
+  productionPartnerIds: number[];
+}
+
+/**
+ * Validate the client's "How it's made" block. Unlike the other sanitizers
+ * in this file, a malformed or missing value here fails the whole publish
+ * (with a 400 and a clear message) rather than being silently dropped —
+ * Etsy requires `who_made`/`when_made`/`is_supply` together on every
+ * physical listing, and this app never fills them in on the caller's behalf
+ * (see `getListingStructure` and `listing-classification.ts`).
+ */
+function sanitizeHowItsMade(raw: unknown): { value: ValidHowItsMade } | { error: string } {
+  if (!raw || typeof raw !== "object") {
+    return {
+      error: "How it's made is required — choose who made this item, what it is, and when it was made.",
+    };
+  }
+  const r = raw as HowItsMadeSpec;
+  if (typeof r.whoMade !== "string" || !(WHO_MADE_VALUES as string[]).includes(r.whoMade)) {
+    return { error: "How it's made: choose who made this item." };
+  }
+  if (typeof r.whenMade !== "string" || !(WHEN_MADE_VALUES as readonly string[]).includes(r.whenMade)) {
+    return { error: "How it's made: choose when this item was made." };
+  }
+  if (typeof r.isSupply !== "boolean") {
+    return { error: "How it's made: choose whether this is a finished product or a supply." };
+  }
+  const productionPartnerIds = Array.isArray(r.productionPartnerIds)
+    ? r.productionPartnerIds.filter((id): id is number => Number.isInteger(id) && id > 0)
+    : [];
+  const value: ValidHowItsMade = {
+    whoMade: r.whoMade as ValidHowItsMade["whoMade"],
+    isSupply: r.isSupply,
+    whenMade: r.whenMade,
+    productionPartnerIds,
+  };
+  const businessError = howItsMadeError(value);
+  if (businessError) return { error: businessError };
+  return { value };
+}
+
+const PERSONALIZATION_FIELD_TYPE_VALUES = PERSONALIZATION_FIELD_TYPES.map((t) => t.value);
+
+/**
+ * Validate the client's personalization questions. Unlike `sanitizeHowItsMade`,
+ * an omitted/empty array is valid — personalization is entirely optional. A
+ * malformed or Etsy-incompatible set fails the whole publish (400, a clear
+ * message) rather than being silently dropped or partially sent.
+ */
+function sanitizePersonalization(
+  raw: unknown,
+): { value: PersonalizationQuestionInput[] } | { error: string } {
+  if (raw == null) return { value: [] };
+  if (!Array.isArray(raw)) {
+    return { error: "publishTo.personalization must be an array." };
+  }
+  const value: PersonalizationQuestionInput[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") {
+      return { error: "Personalization: each question must be an object." };
+    }
+    const q = item as PersonalizationQuestionSpec;
+    if (
+      typeof q.fieldType !== "string" ||
+      !(PERSONALIZATION_FIELD_TYPE_VALUES as string[]).includes(q.fieldType)
+    ) {
+      return { error: "Personalization: choose a field type for every question." };
+    }
+    value.push({
+      questionId: Number.isInteger(q.questionId) ? q.questionId : undefined,
+      questionText: typeof q.questionText === "string" ? q.questionText : "",
+      instructions: typeof q.instructions === "string" ? q.instructions : "",
+      required: q.required === true,
+      fieldType: q.fieldType as PersonalizationQuestionInput["fieldType"],
+      maxAllowedCharacters: Number.isFinite(q.maxAllowedCharacters) ? Number(q.maxAllowedCharacters) : 0,
+      maxAllowedFiles: Number.isFinite(q.maxAllowedFiles) ? Number(q.maxAllowedFiles) : 0,
+      options: Array.isArray(q.options) ? q.options.filter((o): o is string => typeof o === "string") : [],
+    });
+  }
+  const businessError = personalizationQuestionsError(value);
+  if (businessError) return { error: businessError };
+  return { value };
+}
+
 /**
  * Batch-render every job and stream the results back as a ZIP.
  *
@@ -402,6 +526,12 @@ function sanitizeImageOrder(raw: unknown, jobCount: number, ownCount: number): I
  *   - "copy"     — new draft seeded from `listingId`
  *   - "new"      — new draft from `newListing`, category/shipping borrowed from `listingId`
  * A live listing is never modified except an explicit "existing" + `overwrite`.
+ *
+ * "copy" and "new" both require `publishTo.howItsMade` (`who_made`/`is_supply`/
+ * `when_made`/`production_partner_ids`) — always the caller's own choice, never
+ * borrowed from `listingId`'s source listing. A combination Etsy's marketplace-
+ * eligibility check would reject (see `listing-classification.ts`) is rejected
+ * here first, with a clear message, instead of surfacing as a bare 400 from Etsy.
  */
 export async function POST(request: Request) {
   if (!(await getEtsySession())) {
@@ -601,6 +731,29 @@ export async function POST(request: Request) {
         { status: 400 },
       );
     }
+    // Required for every new draft (copy or new) — never borrowed from the
+    // source listing (see `getListingStructure`) and never defaulted here;
+    // a combination Etsy would reject is caught now, with a clear message,
+    // instead of surfacing as a bare 400 once it reaches Etsy.
+    let howItsMade: ValidHowItsMade | undefined;
+    if (mode !== "existing") {
+      const sanitized = sanitizeHowItsMade(publish.howItsMade);
+      if ("error" in sanitized) {
+        return NextResponse.json({ error: sanitized.error }, { status: 400 });
+      }
+      howItsMade = sanitized.value;
+    }
+    // Optional, "copy"/"new" only — an omitted/empty array just means no
+    // personalization. A malformed or Etsy-incompatible set is rejected now,
+    // with a clear message, instead of surfacing as a bare 400 from Etsy.
+    let personalization: PersonalizationQuestionInput[] = [];
+    if (mode !== "existing") {
+      const sanitized = sanitizePersonalization(publish.personalization);
+      if ("error" in sanitized) {
+        return NextResponse.json({ error: sanitized.error }, { status: 400 });
+      }
+      personalization = sanitized.value;
+    }
     const startRank =
       typeof publish.startRank === "number" && publish.startRank >= 1
         ? Math.trunc(publish.startRank)
@@ -661,8 +814,12 @@ export async function POST(request: Request) {
           description: mode === "copy" ? src.description : nl.description || (nl.title as string),
           quantity,
           price,
-          whoMade: src.whoMade,
-          whenMade: src.whenMade,
+          // Validated above whenever mode !== "existing" — this call only
+          // ever runs in that branch, so `howItsMade` is always set here.
+          whoMade: howItsMade!.whoMade,
+          isSupply: howItsMade!.isSupply,
+          whenMade: howItsMade!.whenMade,
+          productionPartnerIds: howItsMade!.productionPartnerIds,
           taxonomyId,
           shippingProfileId: src.shippingProfileId,
           returnPolicyId: src.returnPolicyId,
@@ -687,6 +844,23 @@ export async function POST(request: Request) {
           } catch (err) {
             failed.push({
               name: "Settings",
+              error: err instanceof Error ? err.message : "could not be saved",
+            });
+          }
+        }
+
+        // Personalization isn't part of createDraftListing either — Etsy has
+        // no personalization params on createDraftListing/updateListing at
+        // all (its older flat fields are deprecated); it's a dedicated
+        // resource set with a separate call once the listing exists. Skipped
+        // entirely when nothing was configured, so a "copy"/"new" draft with
+        // no personalization tab input never sends an empty-replacing call.
+        if (personalization.length > 0) {
+          try {
+            await updateListingPersonalization(shopId, targetListingId, personalization);
+          } catch (err) {
+            failed.push({
+              name: "Personalization",
               error: err instanceof Error ? err.message : "could not be saved",
             });
           }

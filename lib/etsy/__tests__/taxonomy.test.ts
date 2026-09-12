@@ -10,7 +10,7 @@ import {
 } from "@/lib/etsy/taxonomy";
 
 const json = (body: unknown, ok = true, status = 200): Response =>
-  ({ ok, status, json: async () => body }) as Response;
+  ({ ok, status, json: async () => body, text: async () => JSON.stringify(body) }) as Response;
 
 beforeEach(() => {
   etsyFetch.mockReset();

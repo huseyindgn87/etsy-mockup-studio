@@ -1,6 +1,6 @@
 import { etsyFetch } from "@/lib/etsy/auth";
 import { TtlCache } from "@/lib/etsy/cache";
-import { EtsyApiError, getShopId } from "@/lib/etsy/listings";
+import { getShopId, readEtsyResponse } from "@/lib/etsy/listings";
 
 /**
  * Shop processing profiles ("readiness states") — the per-shop list of
@@ -15,19 +15,7 @@ const profilesCache = new TtlCache<number, ProcessingProfileOption[]>(SHOP_CACHE
 
 async function etsyGetJson<T>(path: string): Promise<T> {
   const res = await etsyFetch(path);
-  const body: unknown = await res.json().catch(() => null);
-  if (!res.ok) {
-    console.error(
-      `[etsy] GET ${path} -> ${res.status}`,
-      typeof body === "string" ? body : JSON.stringify(body),
-    );
-    throw new EtsyApiError(
-      `Etsy API responded ${res.status} for ${path}`,
-      res.status,
-      body,
-    );
-  }
-  return body as T;
+  return (await readEtsyResponse(res, `GET ${path}`)) as T;
 }
 
 export interface ProcessingProfileOption {

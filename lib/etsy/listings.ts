@@ -58,6 +58,60 @@ export class EtsyApiError extends Error {
   }
 }
 
+/** How much of a non-JSON (or shapeless) error body to keep in the thrown message. */
+const ERROR_BODY_PREVIEW_LENGTH = 500;
+
+/**
+ * Read an Etsy API v3 response, throwing an {@link EtsyApiError} carrying
+ * Etsy's own error text when the call failed. Etsy's error responses are
+ * `{ error: string }` (the OpenAPI spec's `ErrorSchema`, on every documented
+ * 4xx/5xx) — this reads the raw body first so a response that *isn't* that
+ * shape (or isn't JSON at all — Etsy's edge can return an HTML error page)
+ * still surfaces its actual text instead of a bare status code.
+ *
+ * The raw body and, on failure, `requestBody` (pass the exact payload just
+ * sent — form fields, JSON, whatever the caller built) are both logged
+ * server-side via `console.error`, so a failure is diagnosable from the dev
+ * server's own log without reproducing it with a debugger attached.
+ *
+ * `context` is a short label for the log line, e.g. `"POST /shops/1/listings"`.
+ */
+export async function readEtsyResponse(
+  res: Response,
+  context: string,
+  requestBody?: unknown,
+): Promise<unknown> {
+  const text = await res.text();
+  let parsed: unknown = null;
+  if (text) {
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = null; // not JSON — `text` itself is still surfaced below
+    }
+  }
+
+  if (!res.ok) {
+    console.error(`[etsy] ${context} -> ${res.status}`, text || "(empty response body)");
+    if (requestBody !== undefined) {
+      console.error(`[etsy] ${context} request body:`, requestBody);
+    }
+    const errorField =
+      parsed && typeof parsed === "object" && "error" in parsed
+        ? (parsed as { error: unknown }).error
+        : undefined;
+    const detail =
+      typeof errorField === "string" && errorField
+        ? errorField
+        : text
+          ? text.slice(0, ERROR_BODY_PREVIEW_LENGTH)
+          : `Etsy responded ${res.status} with no error detail.`;
+    throw new EtsyApiError(detail, res.status, parsed ?? text);
+  }
+
+  return parsed;
+}
+
 interface EtsyPrice {
   amount: number;
   divisor: number;
@@ -94,22 +148,7 @@ interface EtsyMeResponse {
 
 async function etsyGetJson<T>(path: string): Promise<T> {
   const res = await etsyFetch(path);
-  const body: unknown = await res.json().catch(() => null);
-  if (!res.ok) {
-    // Surface the raw Etsy error body in the dev server logs — its `error`
-    // string is the only reliable way to tell scope vs. app-approval vs.
-    // ownership failures apart.
-    console.error(
-      `[etsy] GET ${path} -> ${res.status}`,
-      typeof body === "string" ? body : JSON.stringify(body),
-    );
-    throw new EtsyApiError(
-      `Etsy API responded ${res.status} for ${path}`,
-      res.status,
-      body,
-    );
-  }
-  return body as T;
+  return (await readEtsyResponse(res, `GET ${path}`)) as T;
 }
 
 /** Resolve the connected user's shop id. Throws if the account has no shop. */

@@ -16,7 +16,7 @@ import {
 } from "@/lib/etsy/listing-create";
 
 const json = (body: unknown, ok = true, status = 200): Response =>
-  ({ ok, status, json: async () => body }) as Response;
+  ({ ok, status, json: async () => body, text: async () => JSON.stringify(body) }) as Response;
 
 beforeEach(() => {
   etsyFetch.mockReset();
@@ -33,6 +33,7 @@ describe("createDraftListing", () => {
       price: 19.99,
       whoMade: "i_did",
       whenMade: "made_to_order",
+      isSupply: false,
       taxonomyId: 777,
       shopSectionId: 88,
       tags: ["beach", "summer"],
@@ -48,6 +49,28 @@ describe("createDraftListing", () => {
     expect(body.getAll("tags")).toEqual(["beach", "summer"]);
   });
 
+  test("sends is_supply and every production_partner_id as a form field", async () => {
+    etsyFetch.mockResolvedValue(json({ listing_id: 556 }));
+
+    await createDraftListing(42, {
+      title: "Resold vintage find",
+      description: "A find",
+      quantity: 1,
+      price: 9.99,
+      whoMade: "someone_else",
+      whenMade: "1990s",
+      isSupply: true,
+      productionPartnerIds: [111, 222],
+      taxonomyId: 1,
+    });
+
+    const [, init] = etsyFetch.mock.calls[0];
+    const body = new URLSearchParams(init?.body as string);
+    expect(body.get("who_made")).toBe("someone_else");
+    expect(body.get("is_supply")).toBe("true");
+    expect(body.getAll("production_partner_ids")).toEqual(["111", "222"]);
+  });
+
   test("omits shop_section_id when not given", async () => {
     etsyFetch.mockResolvedValue(json({ listing_id: 1 }));
     await createDraftListing(42, {
@@ -57,6 +80,7 @@ describe("createDraftListing", () => {
       price: 1,
       whoMade: "i_did",
       whenMade: "made_to_order",
+      isSupply: false,
       taxonomyId: 1,
     });
     const [, init] = etsyFetch.mock.calls[0];
@@ -73,6 +97,7 @@ describe("createDraftListing", () => {
       price: 1,
       whoMade: "i_did",
       whenMade: "made_to_order",
+      isSupply: false,
       taxonomyId: 1,
       readinessStateId: 654,
     });
@@ -87,6 +112,7 @@ describe("createDraftListing", () => {
       price: 1,
       whoMade: "i_did",
       whenMade: "made_to_order",
+      isSupply: false,
       taxonomyId: 1,
     });
     const [, withoutId] = etsyFetch.mock.calls[1];
@@ -103,6 +129,7 @@ describe("createDraftListing", () => {
         price: 1,
         whoMade: "i_did",
         whenMade: "made_to_order",
+        isSupply: false,
         taxonomyId: 1,
       }),
     ).rejects.toThrow();

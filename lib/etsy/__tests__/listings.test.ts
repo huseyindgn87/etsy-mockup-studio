@@ -6,7 +6,7 @@ vi.mock("@/lib/etsy/auth", () => ({ etsyFetch: (path: string) => etsyFetch(path)
 import { fetchAllShopListings, fetchShopListings, getShopName } from "@/lib/etsy/listings";
 
 const json = (body: unknown, ok = true, status = 200): Response =>
-  ({ ok, status, json: async () => body }) as Response;
+  ({ ok, status, json: async () => body, text: async () => JSON.stringify(body) }) as Response;
 
 const RAW_LISTING = (id: number, title: string, withImage = false) => ({
   listing_id: id,

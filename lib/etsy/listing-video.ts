@@ -1,5 +1,5 @@
 import { etsyFetch } from "@/lib/etsy/auth";
-import { EtsyApiError } from "@/lib/etsy/listings";
+import { readEtsyResponse } from "@/lib/etsy/listings";
 
 /**
  * Upload a video to an Etsy listing (API v3).
@@ -42,16 +42,11 @@ export async function uploadListingVideo(params: {
     method: "POST",
     body: form,
   });
-  const body: unknown = await res.json().catch(() => null);
-  if (!res.ok) {
-    const detail =
-      body && typeof body === "object" && "error" in body
-        ? String((body as { error: unknown }).error)
-        : `Etsy responded ${res.status}`;
-    throw new EtsyApiError(detail, res.status, body);
-  }
-
-  const raw = body as RawListingVideo;
+  const raw = (await readEtsyResponse(
+    res,
+    `POST /shops/${params.shopId}/listings/${params.listingId}/videos`,
+    { filename: params.filename, contentType: params.contentType, bytes: params.bytes.length },
+  )) as RawListingVideo;
   return {
     videoId: raw.video_id,
     videoUrl: raw.video_url ?? null,

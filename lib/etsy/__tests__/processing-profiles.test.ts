@@ -6,7 +6,7 @@ vi.mock("@/lib/etsy/auth", () => ({ etsyFetch: (path: string) => etsyFetch(path)
 import { getShopProcessingProfiles } from "@/lib/etsy/processing-profiles";
 
 const json = (body: unknown, ok = true, status = 200): Response =>
-  ({ ok, status, json: async () => body }) as Response;
+  ({ ok, status, json: async () => body, text: async () => JSON.stringify(body) }) as Response;
 
 beforeEach(() => {
   etsyFetch.mockReset();
