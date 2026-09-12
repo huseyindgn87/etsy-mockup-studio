@@ -51,9 +51,11 @@ const propertyCalls: unknown[] = [];
 const skuCalls: unknown[] = [];
 const inventoryCalls: unknown[] = [];
 const variationImageCalls: unknown[] = [];
+const settingsCalls: unknown[] = [];
 let propertyShouldFail = false;
 let skuShouldFail = false;
 let inventoryShouldFail = false;
+let settingsShouldFail = false;
 vi.mock("@/lib/etsy/listing-create", () => ({
   getListingStructure: vi.fn(async () => ({
     title: "Source tee",
@@ -85,6 +87,10 @@ vi.mock("@/lib/etsy/listing-create", () => ({
   updateListingInventory: vi.fn(async (_listing: number, input: unknown) => {
     inventoryCalls.push(input);
     if (inventoryShouldFail) throw new Error("Etsy rejected the inventory grid");
+  }),
+  updateListingSettings: vi.fn(async (_shop: number, _listing: number, input: unknown) => {
+    settingsCalls.push(input);
+    if (settingsShouldFail) throw new Error("Etsy rejected the settings update");
   }),
   updateVariationImages: vi.fn(async (_shop: number, _listing: number, images: unknown) => {
     variationImageCalls.push(images);
@@ -380,6 +386,54 @@ describe("POST /api/mockups/render", () => {
 
     expect(res.status).toBe(200);
     expect(createCalls[0]).toMatchObject({ readinessStateId: 654 });
+  }, 30_000);
+
+  test("mode:new sends featured_rank/should_auto_renew via a follow-up settings call, and reports its failure without failing the publish", async () => {
+    settingsCalls.length = 0;
+    settingsShouldFail = false;
+    const mock = await png(60, 60, [0, 0, 0]);
+
+    const ok = await POST(
+      form(
+        {
+          publishTo: {
+            mode: "new",
+            listingId: 500,
+            newListing: { title: "Featured tee", featuredRank: 1, shouldAutoRenew: false },
+          },
+          mockups: [{ name: "m", calibration: {} }],
+          designs: [],
+          jobs: [{ mockup: 0 }],
+        },
+        [{ field: "mockup", buf: mock, name: "m.png" }],
+      ),
+    );
+    expect(ok.status).toBe(200);
+    expect(settingsCalls).toEqual([{ featuredRank: 1, shouldAutoRenew: false }]);
+
+    settingsCalls.length = 0;
+    settingsShouldFail = true;
+    const res = await POST(
+      form(
+        {
+          publishTo: {
+            mode: "new",
+            listingId: 500,
+            newListing: { title: "Featured tee 2", featuredRank: 1 },
+          },
+          mockups: [{ name: "m", calibration: {} }],
+          designs: [],
+          jobs: [{ mockup: 0 }],
+        },
+        [{ field: "mockup", buf: mock, name: "m.png" }],
+      ),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { createdDraft: boolean; failed: { name: string }[] };
+    expect(body.createdDraft).toBe(true);
+    expect(body.failed.map((f) => f.name)).toEqual(["Settings"]);
+
+    settingsShouldFail = false;
   }, 30_000);
 
   test("mode:new sends a chosen category, deduped/capped tags, section and properties, then sets the SKU", async () => {

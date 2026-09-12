@@ -132,6 +132,36 @@ export async function createDraftListing(
   return body.listing_id;
 }
 
+export interface ListingSettingsInput {
+  /** Position in the shop's featured listings (1 = left-most). Etsy has no plain on/off — the Settings tab maps its toggle to rank 1. */
+  featuredRank?: number | null;
+  shouldAutoRenew?: boolean;
+}
+
+/**
+ * Update listing-level settings not available on `createDraftListing`
+ * (`featured_rank`, `should_auto_renew`) — `PATCH /shops/{shop}/listings/{listing}`.
+ * Called as a follow-up once the draft already exists.
+ */
+export async function updateListingSettings(
+  shopId: number,
+  listingId: number,
+  input: ListingSettingsInput,
+): Promise<void> {
+  const form = new URLSearchParams();
+  if (input.featuredRank != null) form.set("featured_rank", String(input.featuredRank));
+  if (input.shouldAutoRenew != null) form.set("should_auto_renew", String(input.shouldAutoRenew));
+  if ([...form.keys()].length === 0) return;
+
+  await readJson(
+    await etsyFetch(`/shops/${shopId}/listings/${listingId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: form.toString(),
+    }),
+  );
+}
+
 export interface ListingPropertyInput {
   propertyId: number;
   valueIds: number[];

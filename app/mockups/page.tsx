@@ -197,6 +197,7 @@ const LISTING_FORM_TABS: readonly ListingFormTab[] = [
   "inventory",
   "variations",
   "shipping",
+  "settings",
 ];
 function isListingFormTab(tab: NavTab): tab is ListingFormTab {
   return (LISTING_FORM_TABS as readonly string[]).includes(tab);
@@ -214,6 +215,7 @@ const NAV_ITEMS: { key: NavTab; label: string }[] = [
   { key: "variations", label: "Variations" },
   { key: "personalization", label: "Personalization" },
   { key: "shipping", label: "Shipping" },
+  { key: "settings", label: "Settings" },
 ];
 
 export default function MockupsPage() {
@@ -607,6 +609,10 @@ export default function MockupsPage() {
           quantity: Number.isInteger(quantity) && quantity > 0 ? quantity : undefined,
           sku: listingForm.sku.trim() || undefined,
           variations: buildVariationsPayload(listingForm),
+          // featured_rank/should_auto_renew aren't settable on createDraftListing —
+          // the server sends them via a follow-up updateListing call.
+          featuredRank: listingForm.featureListing ? 1 : undefined,
+          shouldAutoRenew: listingForm.autoRenew,
         };
       }
 

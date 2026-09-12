@@ -47,7 +47,8 @@ export type ListingFormTab =
   | "price"
   | "inventory"
   | "variations"
-  | "shipping";
+  | "shipping"
+  | "settings";
 
 export interface VariationToggleState {
   enabled: boolean;
@@ -100,6 +101,16 @@ export interface ListingFormValue {
    * value combination to be supplied, so they're sent with is_enabled:false.
    */
   variationRowEnabled: Record<string, boolean>;
+  /** Shows the listing at the top of the shop's home page. Sent as `featured_rank` on an existing listing (not settable at draft creation). */
+  featureListing: boolean;
+  /**
+   * Etsy Ads participation. Etsy's Open API has no endpoint for Ads
+   * campaigns, so this is never sent anywhere — kept only so the Settings
+   * tab can mirror Etsy's own listing editor and say so explicitly.
+   */
+  promoteWithAds: boolean;
+  /** Automatic (true, Etsy's own default) or Manual renewal. Sent as `should_auto_renew`. */
+  autoRenew: boolean;
 }
 
 export const EMPTY_LISTING_FORM: ListingFormValue = {
@@ -119,6 +130,9 @@ export const EMPTY_LISTING_FORM: ListingFormValue = {
   variationToggles: EMPTY_VARIATION_TOGGLES,
   variationRows: EMPTY_VARIATION_ROWS,
   variationRowEnabled: {},
+  featureListing: false,
+  promoteWithAds: false,
+  autoRenew: true,
 };
 
 const MAX_TAGS = 13;
@@ -569,27 +583,6 @@ export default function ListingForm({
               ))}
             </div>
           )}
-
-          <label className="block text-sm">
-            <span className="text-xs text-zinc-500">Section</span>
-            <select
-              value={value.shopSectionId ?? ""}
-              onChange={(e) => {
-                const id = e.target.value ? Number(e.target.value) : null;
-                const title = sections?.find((s) => s.shopSectionId === id)?.title ?? "";
-                patch({ shopSectionId: id, shopSectionTitle: title });
-              }}
-              className={`${inputCls} mt-1 h-9`}
-            >
-              <option value="">No section</option>
-              {(sections ?? []).map((s) => (
-                <option key={s.shopSectionId} value={s.shopSectionId}>
-                  {decodeHtmlEntities(s.title)}
-                </option>
-              ))}
-            </select>
-            {sectionsError && <p className="mt-1 text-xs text-red-600">{sectionsError}</p>}
-          </label>
         </section>
       )}
 
@@ -697,6 +690,99 @@ export default function ListingForm({
               )}
             </label>
           )}
+        </section>
+      )}
+
+      {activeTab === "settings" && (
+        <section className="max-w-md space-y-5">
+          <h3 className={sectionHeadingCls}>Settings</h3>
+
+          <label className="block text-sm">
+            <span className="text-xs text-zinc-500">Shop section</span>
+            <select
+              value={value.shopSectionId ?? ""}
+              onChange={(e) => {
+                const id = e.target.value ? Number(e.target.value) : null;
+                const title = sections?.find((s) => s.shopSectionId === id)?.title ?? "";
+                patch({ shopSectionId: id, shopSectionTitle: title });
+              }}
+              className={`${inputCls} mt-1 h-9`}
+            >
+              <option value="">No section</option>
+              {(sections ?? []).map((s) => (
+                <option key={s.shopSectionId} value={s.shopSectionId}>
+                  {decodeHtmlEntities(s.title)}
+                </option>
+              ))}
+            </select>
+            {sectionsError && <p className="mt-1 text-xs text-red-600">{sectionsError}</p>}
+            <p className="mt-1 text-xs text-zinc-500">
+              Use shop sections to organize your products into groups shoppers can explore.
+            </p>
+          </label>
+
+          <label className="flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={value.featureListing}
+              onChange={(e) => patch({ featureListing: e.target.checked })}
+              className="mt-0.5 accent-[#f56400]"
+            />
+            <span>
+              Feature this listing
+              <span className="block text-xs text-zinc-500">
+                Showcase this listing at the top of your shop home to make it stand out.
+              </span>
+            </span>
+          </label>
+
+          <label className="flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={value.promoteWithAds}
+              onChange={(e) => patch({ promoteWithAds: e.target.checked })}
+              className="mt-0.5 accent-[#f56400]"
+            />
+            <span>
+              Etsy Ads
+              <span className="block text-xs text-zinc-500">
+                Promote this listing on Etsy as part of your Etsy Ads campaign.
+              </span>
+              <span className="block text-xs text-amber-600 dark:text-amber-500">
+                Etsy&apos;s Open API has no Ads-campaign endpoint — this isn&apos;t sent anywhere.
+                Manage Etsy Ads from your shop&apos;s dashboard on Etsy.com.
+              </span>
+            </span>
+          </label>
+
+          <fieldset className="text-sm">
+            <legend className="text-xs text-zinc-500">Renewal options *</legend>
+            <div className="mt-1 space-y-1.5">
+              <label className="flex items-center gap-2">
+                <input
+                  type="radio"
+                  name="renewal-option"
+                  checked={value.autoRenew}
+                  onChange={() => patch({ autoRenew: true })}
+                  className="accent-[#f56400]"
+                />
+                Automatic
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="radio"
+                  name="renewal-option"
+                  checked={!value.autoRenew}
+                  onChange={() => patch({ autoRenew: false })}
+                  className="accent-[#f56400]"
+                />
+                Manual
+              </label>
+            </div>
+            <p className="mt-1 text-xs text-zinc-500">
+              Each renewal lasts for four months or until the listing sells out.
+            </p>
+          </fieldset>
         </section>
       )}
     </>

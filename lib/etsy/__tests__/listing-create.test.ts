@@ -11,6 +11,7 @@ import {
   setListingInventorySku,
   setListingProperty,
   updateListingInventory,
+  updateListingSettings,
   updateVariationImages,
 } from "@/lib/etsy/listing-create";
 
@@ -134,6 +135,34 @@ describe("getListingStructure", () => {
     etsyFetch.mockResolvedValue(json({ title: "Tee" }));
     const structure = await getListingStructure(555);
     expect(structure.readinessStateId).toBeNull();
+  });
+});
+
+describe("updateListingSettings", () => {
+  test("PATCHes featured_rank and should_auto_renew as form fields", async () => {
+    etsyFetch.mockResolvedValue(json({}));
+    await updateListingSettings(42, 555, { featuredRank: 1, shouldAutoRenew: false });
+
+    const [path, init] = etsyFetch.mock.calls[0];
+    expect(path).toBe("/shops/42/listings/555");
+    expect(init?.method).toBe("PATCH");
+    const body = new URLSearchParams(init?.body as string);
+    expect(body.get("featured_rank")).toBe("1");
+    expect(body.get("should_auto_renew")).toBe("false");
+  });
+
+  test("omits a field entirely rather than sending it as null/undefined", async () => {
+    etsyFetch.mockResolvedValue(json({}));
+    await updateListingSettings(42, 555, { shouldAutoRenew: true });
+    const [, init] = etsyFetch.mock.calls[0];
+    const body = new URLSearchParams(init?.body as string);
+    expect(body.has("featured_rank")).toBe(false);
+    expect(body.get("should_auto_renew")).toBe("true");
+  });
+
+  test("makes no request at all when nothing is given", async () => {
+    await updateListingSettings(42, 555, {});
+    expect(etsyFetch).not.toHaveBeenCalled();
   });
 });
 

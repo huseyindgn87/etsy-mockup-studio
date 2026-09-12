@@ -6,6 +6,7 @@ import {
   setListingInventorySku,
   setListingProperty,
   updateListingInventory,
+  updateListingSettings,
   updateVariationImages,
 } from "@/lib/etsy/listing-create";
 import { uploadListingImage } from "@/lib/etsy/listing-images";
@@ -87,6 +88,10 @@ interface PublishSpec {
     price?: number;
     quantity?: number;
     sku?: string;
+    /** Not settable at draft creation — sent via a follow-up updateListing call. Omitted -> not featured. */
+    featuredRank?: number;
+    /** Not settable at draft creation — sent via a follow-up updateListing call. */
+    shouldAutoRenew?: boolean;
     /** Present -> use the Inventory API's variation grid instead of the single SKU above. */
     variations?: {
       priceOnProperty?: number[];
@@ -578,6 +583,22 @@ export async function POST(request: Request) {
           materials: mode === "copy" ? src.materials : [],
         });
         createdDraft = true;
+
+        // featured_rank/should_auto_renew aren't part of createDraftListing either —
+        // same follow-up-call pattern as properties/SKU/variations below.
+        if (mode === "new" && (nl.featuredRank != null || typeof nl.shouldAutoRenew === "boolean")) {
+          try {
+            await updateListingSettings(shopId, targetListingId, {
+              featuredRank: nl.featuredRank,
+              shouldAutoRenew: nl.shouldAutoRenew,
+            });
+          } catch (err) {
+            failed.push({
+              name: "Settings",
+              error: err instanceof Error ? err.message : "could not be saved",
+            });
+          }
+        }
 
         // Category-specific properties and SKU aren't part of createDraftListing —
         // Etsy sets them with separate calls once the listing exists. Failures
