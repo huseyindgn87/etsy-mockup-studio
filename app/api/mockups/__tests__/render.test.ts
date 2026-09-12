@@ -557,6 +557,7 @@ describe("POST /api/mockups/render", () => {
             price: 21.5,
             quantity: 3,
             readinessStateId: undefined,
+            enabled: true,
           },
           {
             sku: undefined,
@@ -564,6 +565,7 @@ describe("POST /api/mockups/render", () => {
             price: 19.99, // fell back to the base price
             quantity: 5, // fell back to the base quantity
             readinessStateId: undefined,
+            enabled: true,
           },
         ],
         priceOnProperty: [200],
@@ -572,6 +574,61 @@ describe("POST /api/mockups/render", () => {
         readinessStateOnProperty: [],
       },
     ]);
+  }, 30_000);
+
+  test("mode:new keeps a disabled combination in the grid, sent with enabled:false rather than dropped", async () => {
+    uploadCalls.length = 0;
+    skuCalls.length = 0;
+    inventoryCalls.length = 0;
+    variationImageCalls.length = 0;
+    inventoryShouldFail = false;
+    const mock = await png(60, 60, [0, 0, 0]);
+
+    const res = await POST(
+      form(
+        {
+          publishTo: {
+            mode: "new",
+            listingId: 500,
+            newListing: {
+              title: "Tee with a discontinued color",
+              price: 19.99,
+              quantity: 5,
+              variations: {
+                products: [
+                  {
+                    propertyValues: [
+                      { propertyId: 200, name: "Color", valueIds: [1], values: ["Black"] },
+                    ],
+                    enabled: true,
+                  },
+                  {
+                    propertyValues: [
+                      { propertyId: 200, name: "Color", valueIds: [2], values: ["Red"] },
+                    ],
+                    enabled: false,
+                  },
+                ],
+              },
+            },
+          },
+          mockups: [{ name: "m", calibration: {} }],
+          designs: [],
+          jobs: [{ mockup: 0 }],
+        },
+        [{ field: "mockup", buf: mock, name: "m.png" }],
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { createdDraft: boolean; failed: unknown[] };
+    expect(body.createdDraft).toBe(true);
+    expect(body.failed).toEqual([]);
+
+    expect(inventoryCalls).toHaveLength(1);
+    const products = (inventoryCalls[0] as { products: { enabled: boolean }[] }).products;
+    expect(products).toHaveLength(2); // the disabled row is still present, not dropped
+    expect(products.map((p) => p.enabled)).toEqual([true, false]);
   }, 30_000);
 
   test("mode:new resolves imagesByValue job indices to uploaded listing image ids", async () => {

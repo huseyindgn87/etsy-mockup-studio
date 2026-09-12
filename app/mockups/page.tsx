@@ -91,6 +91,7 @@ function buildVariationsPayload(
         quantity?: number;
         sku?: string;
         readinessStateId?: number;
+        enabled: boolean;
       }[];
     }
   | undefined {
@@ -134,6 +135,8 @@ function buildVariationsPayload(
       quantity: Number.isFinite(rq) && rq >= 0 ? rq : undefined,
       sku: rSku?.trim() || undefined,
       readinessStateId: Number.isFinite(rReadiness) && rReadiness > 0 ? rReadiness : undefined,
+      // Disabled rows are still sent — Etsy requires every combination — just marked inactive.
+      enabled: form.variationRowEnabled[c.valueIds.join(":")] !== false,
     };
   });
 

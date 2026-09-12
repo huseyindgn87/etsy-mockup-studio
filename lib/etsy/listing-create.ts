@@ -208,6 +208,8 @@ export interface InventoryProductInput {
   quantity: number;
   /** Etsy auto-assigns one when omitted. */
   readinessStateId?: number;
+  /** Etsy still requires every combination to be supplied; false just marks it inactive. Defaults to true. */
+  enabled?: boolean;
 }
 
 export interface UpdateInventoryInput {
@@ -249,7 +251,7 @@ export async function updateListingInventory(
             {
               price: p.price > 0 ? p.price : 1,
               quantity: Math.max(0, Math.trunc(p.quantity)),
-              is_enabled: true,
+              is_enabled: p.enabled !== false,
               ...(p.readinessStateId ? { readiness_state_id: p.readinessStateId } : {}),
             },
           ],

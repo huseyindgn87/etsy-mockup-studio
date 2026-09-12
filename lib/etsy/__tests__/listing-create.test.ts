@@ -286,6 +286,26 @@ describe("updateListingInventory", () => {
     expect(body.products[0].offerings[0].readiness_state_id).toBe(18201076875);
     expect(body.readiness_state_on_property).toEqual([1]);
   });
+
+  test("is_enabled defaults to true, and is never dropped when a product is explicitly disabled", async () => {
+    etsyFetch.mockResolvedValue(json({}));
+    await updateListingInventory(555, {
+      products: [
+        { propertyValues: [{ propertyId: 1, name: "Color", valueIds: [1], values: ["Black"] }], price: 10, quantity: 1 },
+        {
+          propertyValues: [{ propertyId: 1, name: "Color", valueIds: [2], values: ["Red"] }],
+          price: 10,
+          quantity: 1,
+          enabled: false,
+        },
+      ],
+    });
+    const [, init] = etsyFetch.mock.calls[0];
+    const body = JSON.parse(init?.body as string);
+    expect(body.products).toHaveLength(2); // the disabled one is still sent, not dropped
+    expect(body.products[0].offerings[0].is_enabled).toBe(true);
+    expect(body.products[1].offerings[0].is_enabled).toBe(false);
+  });
 });
 
 describe("updateVariationImages", () => {

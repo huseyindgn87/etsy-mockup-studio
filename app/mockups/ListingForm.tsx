@@ -85,6 +85,13 @@ export interface ListingFormValue {
    * collapses the "price" column to one cell per value instead of one per row.
    */
   variationRows: Record<VariationToggleKey, Record<string, string>>;
+  /**
+   * Per full combination (all variation value ids joined) — `false` marks
+   * that offering "not currently made". Absent (or `true`) means enabled.
+   * Disabled combinations are never dropped: Etsy requires every property-
+   * value combination to be supplied, so they're sent with is_enabled:false.
+   */
+  variationRowEnabled: Record<string, boolean>;
 }
 
 export const EMPTY_LISTING_FORM: ListingFormValue = {
@@ -103,6 +110,7 @@ export const EMPTY_LISTING_FORM: ListingFormValue = {
   variations: [],
   variationToggles: EMPTY_VARIATION_TOGGLES,
   variationRows: EMPTY_VARIATION_ROWS,
+  variationRowEnabled: {},
 };
 
 const MAX_TAGS = 13;
@@ -498,6 +506,7 @@ export default function ListingForm({
                               variations: [],
                               variationToggles: EMPTY_VARIATION_TOGGLES,
                               variationRows: EMPTY_VARIATION_ROWS,
+                              variationRowEnabled: {},
                             });
                             setCategoryOpen(false);
                             setCategoryQuery("");
@@ -779,6 +788,11 @@ function comboKeyFor(appliesTo: number[], combo: VariationCombo): string {
   return appliesTo.map((i) => combo.valueIds[i]).join(":");
 }
 
+/** Every value id in a combination, joined — its `variationRowEnabled` key (matches `ListingFormValue`'s own key). */
+function fullComboKey(combo: VariationCombo): string {
+  return combo.valueIds.join(":");
+}
+
 /** 513 for the first custom variation added, 514 for the second. */
 function nextCustomPropertyId(variations: ListingFormVariation[], editingIndex: number | null): number {
   const used = new Set(
@@ -925,6 +939,17 @@ function VariationsSection({
     patch({ variationRows: { ...value.variationRows, [key]: nextCol } });
   }
 
+  const disabledCount = combos.filter((c) => value.variationRowEnabled[fullComboKey(c)] === false).length;
+
+  function setRowsEnabled(keys: string[], enabled: boolean) {
+    const next = { ...value.variationRowEnabled };
+    for (const k of keys) {
+      if (enabled) delete next[k];
+      else next[k] = false;
+    }
+    patch({ variationRowEnabled: next });
+  }
+
   const usedPropertyIds = value.variations.filter((_, i) => i !== editingIndex).map((v) => v.propertyId);
 
   return (
@@ -1015,6 +1040,7 @@ function VariationsSection({
           <p className={`text-xs ${pricedRows > MAX_PRICED_ROWS ? "font-medium text-red-600" : "text-zinc-500"}`}>
             {pricedRows} priced rows (max {MAX_PRICED_ROWS}).
           </p>
+          <p className="text-xs text-zinc-500">{disabledCount} rows disabled.</p>
           {violation && <p className="text-xs font-medium text-red-600">{violation}</p>}
 
           <button
@@ -1038,6 +1064,8 @@ function VariationsSection({
           applyBulkFill={applyBulkFill}
           basePrice={value.price}
           baseQuantity={value.quantity}
+          rowEnabled={value.variationRowEnabled}
+          setRowsEnabled={setRowsEnabled}
         />
       )}
     </section>
@@ -1285,6 +1313,8 @@ function VariationTable({
   applyBulkFill,
   basePrice,
   baseQuantity,
+  rowEnabled,
+  setRowsEnabled,
 }: {
   combos: VariationCombo[];
   variations: ListingFormVariation[];
@@ -1294,6 +1324,9 @@ function VariationTable({
   applyBulkFill: (key: VariationToggleKey, value: string) => void;
   basePrice: string;
   baseQuantity: string;
+  /** Per full combination — `false` means disabled. Absent/true means enabled. */
+  rowEnabled: Record<string, boolean>;
+  setRowsEnabled: (keys: string[], enabled: boolean) => void;
 }) {
   const activeCols = (["price", "readiness", "quantity", "sku"] as VariationToggleKey[]).filter(
     (k) => toggles[k].enabled,
@@ -1304,11 +1337,60 @@ function VariationTable({
     quantity: "",
     sku: "",
   });
+  const firstVariation = variations[0];
+  const [disableValueId, setDisableValueId] = useState("");
 
   return (
     <div className="mt-3">
+      {/* ---- bulk visibility actions ---- */}
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setRowsEnabled(combos.map(fullComboKey), true)}
+          className="h-8 rounded-lg border border-black/10 px-2 text-xs hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
+        >
+          Enable all
+        </button>
+        <button
+          type="button"
+          onClick={() => setRowsEnabled(combos.map(fullComboKey), false)}
+          className="h-8 rounded-lg border border-black/10 px-2 text-xs hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
+        >
+          Disable all
+        </button>
+        {firstVariation && (
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs text-zinc-500">Disable rows where {firstVariation.name} is</span>
+            <select
+              value={disableValueId}
+              onChange={(e) => setDisableValueId(e.target.value)}
+              className="h-8 rounded-md border border-black/10 bg-white px-1.5 text-xs outline-none dark:border-white/15 dark:bg-zinc-900"
+            >
+              <option value="">Select…</option>
+              {firstVariation.valueIds.map((id, i) => (
+                <option key={id} value={id}>
+                  {firstVariation.values[i]}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              disabled={!disableValueId}
+              onClick={() => {
+                const id = Number(disableValueId);
+                const keys = combos.filter((c) => c.valueIds[0] === id).map(fullComboKey);
+                setRowsEnabled(keys, false);
+              }}
+              className="h-8 rounded-lg border border-black/10 px-2 text-xs hover:bg-black/[.04] disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/15 dark:hover:bg-white/[.06]"
+            >
+              Disable
+            </button>
+          </div>
+        )}
+      </div>
+
       {activeCols.length > 0 && (
-        <div className="flex flex-wrap gap-2">
+        <div className="mt-2 flex flex-wrap gap-2">
           {activeCols.map((k) => (
             <div key={k} className="flex items-center gap-1">
               <input
@@ -1334,6 +1416,9 @@ function VariationTable({
         <table className="w-full text-xs">
           <thead className="sticky top-0 bg-zinc-50 dark:bg-zinc-900">
             <tr>
+              <th className="px-2 py-1.5 text-left font-medium text-zinc-500">
+                <span className="sr-only">Enabled</span>
+              </th>
               {variations.map((v) => (
                 <th key={v.propertyId} className="px-2 py-1.5 text-left font-medium text-zinc-500">
                   {v.name}
@@ -1348,9 +1433,24 @@ function VariationTable({
           </thead>
           <tbody>
             {combos.map((c) => {
-              const rowKey = c.valueIds.join(":");
+              const rowKey = fullComboKey(c);
+              const enabled = rowEnabled[rowKey] !== false;
               return (
-                <tr key={rowKey} className="border-t border-black/5 dark:border-white/10">
+                <tr
+                  key={rowKey}
+                  className={`border-t border-black/5 dark:border-white/10 ${enabled ? "" : "opacity-40"}`}
+                >
+                  <td className="px-2 py-1">
+                    <button
+                      type="button"
+                      onClick={() => setRowsEnabled([rowKey], !enabled)}
+                      aria-label={enabled ? "Disable this combination" : "Enable this combination"}
+                      title={enabled ? "Sold — click to disable" : "Not sold — click to enable"}
+                      className="text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200"
+                    >
+                      {enabled ? "👁" : "⊘"}
+                    </button>
+                  </td>
                   {c.values.map((v, i) => (
                     <td key={i} className="px-2 py-1">
                       {v}

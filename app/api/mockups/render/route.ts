@@ -99,6 +99,8 @@ interface PublishSpec {
         quantity?: number;
         sku?: string;
         readinessStateId?: number;
+        /** Etsy still requires every combination to be supplied; false just marks it inactive. Defaults to true. */
+        enabled?: boolean;
       }[];
       /** Assign an already-rendered job's uploaded image to a specific property value. */
       imagesByValue?: { propertyId: number; valueId: number; jobIndex: number }[];
@@ -197,6 +199,8 @@ interface CleanVariationProduct {
   quantity?: number;
   sku?: string;
   readinessStateId?: number;
+  /** Etsy still requires every combination to be supplied; false just marks it inactive. */
+  enabled: boolean;
 }
 interface CleanVariations {
   products: CleanVariationProduct[];
@@ -264,6 +268,7 @@ function sanitizeVariations(raw: unknown): CleanVariations | null {
     const quantity = (p as { quantity?: unknown }).quantity;
     const sku = (p as { sku?: unknown }).sku;
     const readinessStateId = (p as { readinessStateId?: unknown }).readinessStateId;
+    const enabled = (p as { enabled?: unknown }).enabled;
     products.push({
       propertyValues,
       price: typeof price === "number" && price > 0 ? price : undefined,
@@ -273,6 +278,7 @@ function sanitizeVariations(raw: unknown): CleanVariations | null {
         Number.isInteger(readinessStateId) && (readinessStateId as number) > 0
           ? (readinessStateId as number)
           : undefined,
+      enabled: enabled !== false, // never dropped — Etsy requires every combination, just marked inactive
     });
   }
   if (products.length === 0) return null;
@@ -599,6 +605,7 @@ export async function POST(request: Request) {
                   price: p.price ?? price,
                   quantity: p.quantity ?? quantity,
                   readinessStateId: p.readinessStateId,
+                  enabled: p.enabled,
                 })),
                 priceOnProperty: variations.priceOnProperty,
                 quantityOnProperty: variations.quantityOnProperty,
