@@ -725,6 +725,10 @@ export default function MockupsPage() {
       case "details":
         return listingForm.taxonomyId == null;
       case "price": {
+        // Hidden and not required once price varies by variation — it's
+        // entered per combination on the Variations tab instead.
+        const priceToggle = listingForm.variationToggles.price;
+        if (priceToggle.enabled && priceToggle.appliesTo.length > 0) return false;
         const p = Number.parseFloat(listingForm.price);
         return !(Number.isFinite(p) && p > 0);
       }

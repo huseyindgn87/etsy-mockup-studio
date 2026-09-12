@@ -404,6 +404,12 @@ export default function ListingForm({
     "w-full rounded-lg border border-black/10 bg-white px-3 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950";
   const sectionHeadingCls = "text-base font-bold text-zinc-900 dark:text-zinc-50";
 
+  // Once price varies by at least one variation, it's entered per combination
+  // on the Variations tab instead — the main-form field is hidden (not
+  // deleted) rather than fought over with the combination grid.
+  const priceVariesByVariation =
+    value.variationToggles.price.enabled && value.variationToggles.price.appliesTo.length > 0;
+
   if (activeTab === null) return null;
 
   return (
@@ -589,19 +595,37 @@ export default function ListingForm({
       {activeTab === "price" && (
         <section className="max-w-xs space-y-3">
           <h3 className={sectionHeadingCls}>Price</h3>
-          <label className="block text-sm">
-            <span className="text-xs text-zinc-500">Price</span>
-            <input
-              type="number"
-              min="0"
-              step="0.01"
-              inputMode="decimal"
-              value={value.price}
-              onChange={(e) => patch({ price: e.target.value })}
-              placeholder="0.00"
-              className={`${inputCls} mt-1 h-10`}
-            />
-          </label>
+          {priceVariesByVariation ? (
+            <p className="text-sm text-zinc-500">
+              Price varies by variation — set it per combination on the{" "}
+              {onGoToTab ? (
+                <button
+                  type="button"
+                  onClick={() => onGoToTab("variations")}
+                  className="font-medium text-[#f56400] hover:underline"
+                >
+                  Variations tab
+                </button>
+              ) : (
+                "Variations tab"
+              )}
+              .
+            </p>
+          ) : (
+            <label className="block text-sm">
+              <span className="text-xs text-zinc-500">Price</span>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                inputMode="decimal"
+                value={value.price}
+                onChange={(e) => patch({ price: e.target.value })}
+                placeholder="0.00"
+                className={`${inputCls} mt-1 h-10`}
+              />
+            </label>
+          )}
         </section>
       )}
 
