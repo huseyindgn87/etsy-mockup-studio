@@ -10,8 +10,10 @@ import {
   updateVariationImages,
 } from "@/lib/etsy/listing-create";
 import { uploadListingImage } from "@/lib/etsy/listing-images";
+import { uploadListingVideo } from "@/lib/etsy/listing-video";
 import { EtsyApiError, getShopId } from "@/lib/etsy/listings";
 import { MAX_COMBINATIONS_HARD_CAP } from "@/lib/etsy/variation-limits";
+import { checkVideoFileBasics } from "@/lib/etsy/video-limits";
 import { getRenderPool } from "@/lib/mockup/render-pool";
 import type { RenderJobInput } from "@/lib/mockup/render-types";
 import {
@@ -322,6 +324,12 @@ function sanitizeVariations(raw: unknown): CleanVariations | null {
  *   - `mockup`  (file, repeated)  composites, addressed by index
  *   - `design`  (file, repeated)  designs, addressed by index
  *   - `overlay` (file, repeated)  overlay images, addressed by index
+ *   - `video`   (file, optional)  one listing video — only used with `publishTo`,
+ *                                 uploaded once the target listing exists, same
+ *                                 as the rendered images. Format/size are
+ *                                 re-checked server-side (see `video-limits.ts`);
+ *                                 the client is expected to have already
+ *                                 checked format/size/duration before sending it.
  *   - `payload` (json string):
  *       {
  *         format?: "jpeg" | "png",           // default "jpeg"
@@ -361,6 +369,12 @@ export async function POST(request: Request) {
   const mockupFiles = form.getAll("mockup").filter((f): f is File => f instanceof File);
   const designFiles = form.getAll("design").filter((f): f is File => f instanceof File);
   const overlayFiles = form.getAll("overlay").filter((f): f is File => f instanceof File);
+  const videoFileRaw = form.get("video");
+  const videoFile = videoFileRaw instanceof File && videoFileRaw.size > 0 ? videoFileRaw : null;
+  if (videoFile) {
+    const videoError = checkVideoFileBasics(videoFile);
+    if (videoError) return NextResponse.json({ error: videoError }, { status: 400 });
+  }
 
   if (mockupFiles.length === 0) {
     return NextResponse.json({ error: "At least one `mockup` file is required." }, { status: 400 });
@@ -662,6 +676,23 @@ export async function POST(request: Request) {
         { error: err instanceof Error ? err.message : "Etsy request failed." },
         { status: status >= 400 && status < 600 ? status : 502 },
       );
+    }
+
+    // The listing (existing, copied, or freshly drafted) now exists — upload
+    // the video the same way as the rendered images below. A failure here
+    // doesn't block image upload; it's reported alongside any other failure.
+    if (videoFile) {
+      try {
+        await uploadListingVideo({
+          shopId,
+          listingId: targetListingId,
+          bytes: new Uint8Array(await videoFile.arrayBuffer()),
+          filename: videoFile.name || "video",
+          contentType: videoFile.type || "application/octet-stream",
+        });
+      } catch (err) {
+        failed.push({ name: "Video", error: err instanceof Error ? err.message : "could not be uploaded" });
+      }
     }
 
     // Render all in parallel on the pool; upload sequentially so Etsy ranks

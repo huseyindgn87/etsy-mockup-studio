@@ -46,6 +46,23 @@ vi.mock("@/lib/etsy/listing-images", () => ({
   ),
 }));
 
+const videoCalls: { shopId: number; listingId: number; filename: string; contentType: string }[] = [];
+let videoShouldFail = false;
+vi.mock("@/lib/etsy/listing-video", () => ({
+  uploadListingVideo: vi.fn(
+    async (p: { shopId: number; listingId: number; filename: string; contentType: string }) => {
+      videoCalls.push({
+        shopId: p.shopId,
+        listingId: p.listingId,
+        filename: p.filename,
+        contentType: p.contentType,
+      });
+      if (videoShouldFail) throw new Error("Etsy rejected the video");
+      return { videoId: 5001, videoUrl: null, thumbnailUrl: null };
+    },
+  ),
+}));
+
 const createCalls: unknown[] = [];
 const propertyCalls: unknown[] = [];
 const skuCalls: unknown[] = [];
@@ -134,10 +151,13 @@ function zipEntryNames(buf: Uint8Array): { name: string; head: number[] }[] {
   return out;
 }
 
-function form(payload: unknown, files: { field: string; buf: Buffer; name: string }[]) {
+function form(
+  payload: unknown,
+  files: { field: string; buf: Buffer; name: string; type?: string }[],
+) {
   const fd = new FormData();
   for (const f of files) {
-    fd.append(f.field, new Blob([new Uint8Array(f.buf)], { type: "image/png" }), f.name);
+    fd.append(f.field, new Blob([new Uint8Array(f.buf)], { type: f.type ?? "image/png" }), f.name);
   }
   fd.append("payload", JSON.stringify(payload));
   return new Request("http://localhost/api/mockups/render", { method: "POST", body: fd });
@@ -274,6 +294,111 @@ describe("POST /api/mockups/render", () => {
     expect(uploadCalls.every((c) => c.contentType === "image/jpeg")).toBe(true);
     // never replaces images unless explicitly asked
     expect(uploadCalls.every((c) => c.overwrite === false)).toBe(true);
+  }, 30_000);
+
+  test("publishTo with a video uploads it once the listing exists, alongside the images", async () => {
+    uploadCalls.length = 0;
+    videoCalls.length = 0;
+    videoShouldFail = false;
+    const mock = await png(120, 100, [90, 100, 110]);
+    const clip = Buffer.from("not a real video, just bytes");
+
+    const res = await POST(
+      form(
+        {
+          publishTo: { listingId: 777 },
+          mockups: [{ name: "tee", width: 120, height: 100, calibration: {} }],
+          designs: [{ name: "a" }],
+          jobs: [{ mockup: 0, design: 0 }],
+        },
+        [
+          { field: "mockup", buf: mock, name: "m.png" },
+          { field: "design", buf: mock, name: "a.png" },
+          { field: "video", buf: clip, name: "demo.mp4", type: "video/mp4" },
+        ],
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { failed: unknown[]; uploaded: unknown[] };
+    expect(body.failed).toEqual([]);
+    expect(body.uploaded).toHaveLength(1);
+    expect(videoCalls).toEqual([
+      { shopId: 4242, listingId: 777, filename: "demo.mp4", contentType: "video/mp4" },
+    ]);
+  }, 30_000);
+
+  test("publishTo reports a video upload failure without failing the rest of the publish", async () => {
+    uploadCalls.length = 0;
+    videoCalls.length = 0;
+    videoShouldFail = true;
+    const mock = await png(80, 80, [0, 0, 0]);
+    const clip = Buffer.from("not a real video, just bytes");
+
+    const res = await POST(
+      form(
+        {
+          publishTo: { listingId: 777 },
+          mockups: [{ name: "tee", calibration: {} }],
+          designs: [],
+          jobs: [{ mockup: 0 }],
+        },
+        [
+          { field: "mockup", buf: mock, name: "m.png" },
+          { field: "video", buf: clip, name: "demo.mp4", type: "video/mp4" },
+        ],
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { failed: { name: string }[]; uploaded: unknown[] };
+    expect(body.uploaded).toHaveLength(1); // image upload still went through
+    expect(body.failed.map((f) => f.name)).toEqual(["Video"]);
+
+    videoShouldFail = false;
+  }, 30_000);
+
+  test("rejects an oversized or wrong-format video before touching Etsy", async () => {
+    videoCalls.length = 0;
+    const mock = await png(40, 40, [0, 0, 0]);
+
+    const wrongFormat = await POST(
+      form(
+        {
+          publishTo: { listingId: 777 },
+          mockups: [{ name: "tee", calibration: {} }],
+          designs: [],
+          jobs: [{ mockup: 0 }],
+        },
+        [
+          { field: "mockup", buf: mock, name: "m.png" },
+          { field: "video", buf: Buffer.from("x"), name: "demo.webm", type: "video/webm" },
+        ],
+      ),
+    );
+    expect(wrongFormat.status).toBe(400);
+
+    const tooBig = await POST(
+      form(
+        {
+          publishTo: { listingId: 777 },
+          mockups: [{ name: "tee", calibration: {} }],
+          designs: [],
+          jobs: [{ mockup: 0 }],
+        },
+        [
+          { field: "mockup", buf: mock, name: "m.png" },
+          {
+            field: "video",
+            buf: Buffer.alloc(101 * 1024 * 1024),
+            name: "demo.mp4",
+            type: "video/mp4",
+          },
+        ],
+      ),
+    );
+    expect(tooBig.status).toBe(400);
+    expect(videoCalls).toEqual([]); // never reached Etsy
   }, 30_000);
 
   test("mode:copy creates a draft seeded from the source and uploads there", async () => {

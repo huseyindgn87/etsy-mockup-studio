@@ -7,6 +7,14 @@ import { quadList } from "@/lib/mockup/geometry";
 import type { Calibration, Overlay, Quad, Raster } from "@/lib/mockup/types";
 import { normalizeBlendMode } from "@/lib/mockup/validate";
 import { MAX_COMBINATIONS_HARD_CAP } from "@/lib/etsy/variation-limits";
+import {
+  ACCEPTED_VIDEO_EXTENSIONS,
+  MAX_VIDEO_DURATION_SECONDS,
+  MAX_VIDEO_SIZE_BYTES,
+  MIN_VIDEO_DURATION_SECONDS,
+  checkVideoDuration,
+  checkVideoFileBasics,
+} from "@/lib/etsy/video-limits";
 import ListingForm, {
   EMPTY_LISTING_FORM,
   type ListingFormTab,
@@ -179,6 +187,24 @@ type SliderKey = (typeof SLIDERS)[number]["key"];
 const uid = () => Math.random().toString(36).slice(2, 10);
 const stripExt = (s: string) => s.replace(/\.[^.]+$/, "");
 
+/** Reads a video file's duration via a hidden `<video>` element — NaN if the browser can't decode it. */
+function probeVideoDuration(file: File): Promise<number> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const v = document.createElement("video");
+    v.preload = "metadata";
+    v.onloadedmetadata = () => {
+      URL.revokeObjectURL(url);
+      resolve(v.duration);
+    };
+    v.onerror = () => {
+      URL.revokeObjectURL(url);
+      resolve(NaN);
+    };
+    v.src = url;
+  });
+}
+
 async function errorFrom(res: Response): Promise<string> {
   const body = (await res.json().catch(() => null)) as { error?: string } | null;
   if (res.status === 401) return "Not connected to Etsy — reconnect from the home page.";
@@ -238,6 +264,30 @@ export default function MockupsPage() {
   const [cornerMode, setCornerMode] = useState<"free" | "ratio">("free");
   const [activeTab, setActiveTab] = useState<NavTab>("photos");
   const [shopName, setShopName] = useState<string | null>(null);
+  const [video, setVideo] = useState<File | null>(null);
+  const [videoError, setVideoError] = useState<string | null>(null);
+
+  const selectVideo = useCallback(async (file: File | null) => {
+    setVideoError(null);
+    if (!file) {
+      setVideo(null);
+      return;
+    }
+    const basicsError = checkVideoFileBasics(file);
+    if (basicsError) {
+      setVideo(null);
+      setVideoError(basicsError);
+      return;
+    }
+    const duration = await probeVideoDuration(file);
+    const durationError = checkVideoDuration(duration);
+    if (durationError) {
+      setVideo(null);
+      setVideoError(durationError);
+      return;
+    }
+    setVideo(file);
+  }, []);
 
   const psdInput = useRef<HTMLInputElement>(null);
   const designInput = useRef<HTMLInputElement>(null);
@@ -616,9 +666,11 @@ export default function MockupsPage() {
         };
       }
 
+      const fd = buildBatchForm(publishTo);
+      if (video) fd.set("video", video);
       const res = await fetch("/api/mockups/render", {
         method: "POST",
-        body: buildBatchForm(publishTo),
+        body: fd,
       });
       const body = (await res.json().catch(() => null)) as
         | (PublishResult & { error?: string })
@@ -653,6 +705,7 @@ export default function MockupsPage() {
     listingForm,
     publishCount,
     buildBatchForm,
+    video,
   ]);
 
   const areaCount = active ? quadList(active.calibration).length : 0;
@@ -1106,7 +1159,17 @@ export default function MockupsPage() {
               </div>
             )}
 
-            {activeTab === "video" && <ComingNextPanel label="Video" />}
+            {activeTab === "video" && (
+              <VideoSection
+                video={video}
+                error={videoError}
+                onSelect={selectVideo}
+                onRemove={() => {
+                  setVideo(null);
+                  setVideoError(null);
+                }}
+              />
+            )}
             {activeTab === "personalization" && <ComingNextPanel label="Personalization" />}
 
             <ListingForm
@@ -1166,6 +1229,87 @@ function Dropzone({
         hidden
         onChange={(e) => {
           onFiles([...(e.target.files ?? [])]);
+          e.target.value = "";
+        }}
+      />
+    </div>
+  );
+}
+
+/**
+ * One video, uploaded to the target listing in the same publish call as the
+ * rendered images (once the listing exists). Format and size are checked as
+ * soon as a file is picked; duration is checked once the browser can decode
+ * its metadata — an unreadable duration (an unusual codec) doesn't block the
+ * file, since Etsy is still the final check.
+ */
+function VideoSection({
+  video,
+  error,
+  onSelect,
+  onRemove,
+}: {
+  video: File | null;
+  error: string | null;
+  onSelect: (file: File | null) => void;
+  onRemove: () => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const url = useMemo(() => (video ? URL.createObjectURL(video) : null), [video]);
+  useEffect(() => {
+    return () => {
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [url]);
+
+  return (
+    <div className="space-y-4">
+      <h3 className="text-base font-bold text-zinc-900 dark:text-zinc-50">Video</h3>
+      <p className="text-sm text-zinc-500">
+        One video, up to {Math.round(MAX_VIDEO_SIZE_BYTES / (1024 * 1024))} MB,{" "}
+        {MIN_VIDEO_DURATION_SECONDS}-{MAX_VIDEO_DURATION_SECONDS} seconds long. Accepted formats:{" "}
+        {ACCEPTED_VIDEO_EXTENSIONS.join(", ").toUpperCase()}. Etsy removes audio on upload.
+      </p>
+
+      {error && <p className="text-sm font-medium text-red-600">{error}</p>}
+
+      {video && url ? (
+        <div className="max-w-sm space-y-2">
+          <video
+            src={url}
+            controls
+            className="w-full rounded-lg border border-black/10 dark:border-white/15"
+          />
+          <div className="flex items-center justify-between gap-2 text-xs text-zinc-500">
+            <span className="min-w-0 truncate">
+              {video.name} · {(video.size / (1024 * 1024)).toFixed(1)} MB
+            </span>
+            <button
+              type="button"
+              onClick={onRemove}
+              className="shrink-0 font-medium text-red-600 hover:underline"
+            >
+              Remove
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => inputRef.current?.click()}
+          className="flex w-full max-w-sm flex-col items-center gap-1 rounded-xl border-2 border-dashed border-black/15 px-4 py-6 text-sm text-zinc-500 hover:border-black/30 dark:border-white/20 dark:hover:border-white/40"
+        >
+          <span className="font-medium text-zinc-700 dark:text-zinc-300">Upload a video</span>
+          <span>click to choose a file</span>
+        </button>
+      )}
+      <input
+        ref={inputRef}
+        type="file"
+        accept="video/*"
+        hidden
+        onChange={(e) => {
+          onSelect(e.target.files?.[0] ?? null);
           e.target.value = "";
         }}
       />
