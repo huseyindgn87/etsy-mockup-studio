@@ -36,6 +36,10 @@ export interface EtsyListing {
   price: string | null;
   /** ~570px-wide primary image, or null when the listing has no image yet. */
   thumbnailUrl: string | null;
+  /** Expiration time in epoch milliseconds (Etsy sends seconds); null if Etsy omits it (e.g. drafts). */
+  endingTimestampMs: number | null;
+  /** The shop section this listing is filed under, or null when it's in none. */
+  shopSectionId: number | null;
 }
 
 export interface ShopListingsPage {
@@ -134,6 +138,8 @@ interface EtsyRawListing {
   quantity: number;
   price?: EtsyPrice;
   images?: EtsyListingImage[];
+  ending_timestamp?: number | null;
+  shop_section_id?: number | null;
 }
 
 interface EtsyListingsResponse {
@@ -179,6 +185,35 @@ export async function getShopName(): Promise<string> {
   });
 }
 
+const HTML_ENTITIES: Record<string, string> = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+};
+
+/**
+ * Etsy listing titles can come back HTML-escaped (e.g. `I&#39;d Rather...`,
+ * `&gt;&gt;SALE&lt;&lt;`) — decodes the common named/numeric entities.
+ * Server-side (no DOM available here, unlike the client-side decode already
+ * used for shop-section titles in `ListingForm.tsx`).
+ */
+function decodeHtmlEntities(s: string): string {
+  if (!s.includes("&")) return s;
+  return s.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (match, entity: string) => {
+    if (entity[0] === "#") {
+      const code =
+        entity[1] === "x" || entity[1] === "X"
+          ? Number.parseInt(entity.slice(2), 16)
+          : Number.parseInt(entity.slice(1), 10);
+      return Number.isFinite(code) ? String.fromCodePoint(code) : match;
+    }
+    const lower = entity.toLowerCase();
+    return lower in HTML_ENTITIES ? HTML_ENTITIES[lower] : match;
+  });
+}
+
 function formatPrice(price?: EtsyPrice): string | null {
   if (!price || typeof price.amount !== "number" || !price.divisor) return null;
   const value = price.amount / price.divisor;
@@ -208,12 +243,18 @@ function pickThumbnail(images?: EtsyListingImage[]): string | null {
 function mapListing(raw: EtsyRawListing): EtsyListing {
   return {
     listingId: raw.listing_id,
-    title: raw.title,
+    title: decodeHtmlEntities(raw.title),
     state: raw.state,
     url: raw.url,
     quantity: raw.quantity ?? 0,
     price: formatPrice(raw.price),
     thumbnailUrl: pickThumbnail(raw.images),
+    endingTimestampMs:
+      typeof raw.ending_timestamp === "number" ? raw.ending_timestamp * 1000 : null,
+    shopSectionId:
+      typeof raw.shop_section_id === "number" && raw.shop_section_id > 0
+        ? raw.shop_section_id
+        : null,
   };
 }
 
@@ -222,6 +263,17 @@ export interface FetchShopListingsOptions {
   limit?: number;
   offset?: number;
 }
+
+/**
+ * Listing pages change more often than shop-level config (sections,
+ * processing profiles) but still don't need every click to burn a fresh
+ * quota-metered call — a short TTL keeps repeat page/filter views (and the
+ * per-state sidebar counts, which are just `limit:1` calls to this same
+ * function) instant without going far stale. Etsy's quota is 5 req/s;
+ * `etsyFetch`'s own retry-with-backoff handles any 429 regardless.
+ */
+const LISTINGS_CACHE_MS = 60 * 1000; // 1min
+const listingsPageCache = new TtlCache<string, ShopListingsPage>(LISTINGS_CACHE_MS);
 
 /**
  * Fetch one page of the connected user's shop listings (newest first) with the
@@ -235,27 +287,47 @@ export async function fetchShopListings(
   const offset = Math.max(Math.trunc(options.offset ?? 0), 0);
 
   const shopId = await getShopId();
+  const cacheKey = `${shopId}:${state}:${limit}:${offset}`;
 
-  const query = new URLSearchParams({
-    state,
-    limit: String(limit),
-    offset: String(offset),
-    sort_on: "created",
-    sort_order: "desc",
-    includes: "Images",
+  return listingsPageCache.get(cacheKey, async () => {
+    const query = new URLSearchParams({
+      state,
+      limit: String(limit),
+      offset: String(offset),
+      sort_on: "created",
+      sort_order: "desc",
+      includes: "Images",
+    });
+
+    const data = await etsyGetJson<EtsyListingsResponse>(
+      `/shops/${shopId}/listings?${query.toString()}`,
+    );
+
+    return {
+      shopId,
+      count: data.count ?? 0,
+      limit,
+      offset,
+      listings: (data.results ?? []).map(mapListing),
+    };
   });
+}
 
-  const data = await etsyGetJson<EtsyListingsResponse>(
-    `/shops/${shopId}/listings?${query.toString()}`,
+/**
+ * The connected shop's listing count for every state, for the listings
+ * page's sidebar filters. One `limit:1` call per state (their `count` is the
+ * whole-state total regardless of `limit`) — shares `fetchShopListings`'s
+ * own cache, so this and the currently-selected state's real page fetch
+ * never double up on the same request.
+ */
+export async function getShopListingStateCounts(): Promise<Record<EtsyListingState, number>> {
+  const entries = await Promise.all(
+    ETSY_LISTING_STATES.map(async (state) => {
+      const page = await fetchShopListings({ state, limit: 1, offset: 0 });
+      return [state, page.count] as const;
+    }),
   );
-
-  return {
-    shopId,
-    count: data.count ?? 0,
-    limit,
-    offset,
-    listings: (data.results ?? []).map(mapListing),
-  };
+  return Object.fromEntries(entries) as Record<EtsyListingState, number>;
 }
 
 /** Etsy's per-request page cap. */
@@ -279,49 +351,53 @@ export interface FetchAllShopListingsOptions {
  * anywhere in the title. So title search is done ourselves, client-side,
  * over this full list, rather than trusting Etsy's search endpoint.
  */
+const fetchAllCache = new TtlCache<string, ShopListingsPage>(LISTINGS_CACHE_MS);
+
 export async function fetchAllShopListings(
   options: FetchAllShopListingsOptions = {},
 ): Promise<ShopListingsPage> {
   const state = options.state ?? "active";
   const shopId = await getShopId();
 
-  const fetchPage = async (offset: number): Promise<{ count: number; listings: EtsyListing[] }> => {
-    const query = new URLSearchParams({
-      state,
-      limit: String(MAX_PAGE),
-      offset: String(offset),
-      sort_on: "created",
-      sort_order: "desc",
-      includes: "Images",
-    });
-    const data = await etsyGetJson<EtsyListingsResponse>(
-      `/shops/${shopId}/listings?${query.toString()}`,
-    );
-    return { count: data.count ?? 0, listings: (data.results ?? []).map(mapListing) };
-  };
+  return fetchAllCache.get(`${shopId}:${state}`, async () => {
+    const fetchPage = async (offset: number): Promise<{ count: number; listings: EtsyListing[] }> => {
+      const query = new URLSearchParams({
+        state,
+        limit: String(MAX_PAGE),
+        offset: String(offset),
+        sort_on: "created",
+        sort_order: "desc",
+        includes: "Images",
+      });
+      const data = await etsyGetJson<EtsyListingsResponse>(
+        `/shops/${shopId}/listings?${query.toString()}`,
+      );
+      return { count: data.count ?? 0, listings: (data.results ?? []).map(mapListing) };
+    };
 
-  const first = await fetchPage(0);
-  const total = Math.min(first.count, FETCH_ALL_SAFETY_CAP);
-  const pages = new Map<number, EtsyListing[]>([[0, first.listings]]);
+    const first = await fetchPage(0);
+    const total = Math.min(first.count, FETCH_ALL_SAFETY_CAP);
+    const pages = new Map<number, EtsyListing[]>([[0, first.listings]]);
 
-  const remainingOffsets: number[] = [];
-  for (let offset = MAX_PAGE; offset < total; offset += MAX_PAGE) remainingOffsets.push(offset);
+    const remainingOffsets: number[] = [];
+    for (let offset = MAX_PAGE; offset < total; offset += MAX_PAGE) remainingOffsets.push(offset);
 
-  let cursor = 0;
-  async function worker(): Promise<void> {
-    while (cursor < remainingOffsets.length) {
-      const offset = remainingOffsets[cursor++];
-      pages.set(offset, (await fetchPage(offset)).listings);
+    let cursor = 0;
+    async function worker(): Promise<void> {
+      while (cursor < remainingOffsets.length) {
+        const offset = remainingOffsets[cursor++];
+        pages.set(offset, (await fetchPage(offset)).listings);
+      }
     }
-  }
-  await Promise.all(
-    Array.from({ length: Math.min(FETCH_ALL_CONCURRENCY, remainingOffsets.length) }, worker),
-  );
+    await Promise.all(
+      Array.from({ length: Math.min(FETCH_ALL_CONCURRENCY, remainingOffsets.length) }, worker),
+    );
 
-  // pages resolve out of order under concurrency — reassemble by offset
-  const listings = [...pages.keys()]
-    .sort((a, b) => a - b)
-    .flatMap((offset) => pages.get(offset)!);
+    // pages resolve out of order under concurrency — reassemble by offset
+    const listings = [...pages.keys()]
+      .sort((a, b) => a - b)
+      .flatMap((offset) => pages.get(offset)!);
 
-  return { shopId, count: first.count, limit: listings.length, offset: 0, listings };
+    return { shopId, count: first.count, limit: listings.length, offset: 0, listings };
+  });
 }

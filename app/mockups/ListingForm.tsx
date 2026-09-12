@@ -30,6 +30,7 @@ import {
   type PersonalizationFieldType,
   type PersonalizationQuestionInput,
 } from "@/lib/etsy/listing-personalization";
+import { applyPriceAdjustment, parsePriceAdjustment } from "@/lib/etsy/price-adjustment";
 
 /** The shape this form edits — read by the page when publishing `mode: "new"`. */
 export interface ListingFormProperty {
@@ -1244,6 +1245,10 @@ function VariationsSection({
     for (const k of keys) nextCol[k] = val;
     patch({ variationRows: { ...value.variationRows, [key]: nextCol } });
   }
+  /** Merges several cell updates into one column in a single patch — needed whenever more than one cell is written at once (see applyBulkFill above), since patchCell alone would have each call clobber the last. */
+  function patchCells(key: VariationToggleKey, updates: Record<string, string>) {
+    patch({ variationRows: { ...value.variationRows, [key]: { ...value.variationRows[key], ...updates } } });
+  }
   function setRowsEnabled(keys: string[], enabled: boolean) {
     const next = { ...value.variationRowEnabled };
     for (const k of keys) {
@@ -1364,6 +1369,7 @@ function VariationsSection({
               toggles={toggles}
               rows={value.variationRows}
               patchCell={patchCell}
+              patchCells={patchCells}
               applyBulkFill={applyBulkFill}
               basePrice={value.price}
               baseQuantity={value.quantity}
@@ -2103,6 +2109,7 @@ function VariationTable({
   toggles,
   rows,
   patchCell,
+  patchCells,
   applyBulkFill,
   basePrice,
   baseQuantity,
@@ -2114,6 +2121,7 @@ function VariationTable({
   toggles: Record<VariationToggleKey, VariationToggleState>;
   rows: Record<VariationToggleKey, Record<string, string>>;
   patchCell: (key: VariationToggleKey, cellKey: string, value: string) => void;
+  patchCells: (key: VariationToggleKey, updates: Record<string, string>) => void;
   applyBulkFill: (key: VariationToggleKey, value: string) => void;
   basePrice: string;
   baseQuantity: string;
@@ -2131,7 +2139,86 @@ function VariationTable({
     sku: "",
   });
   const firstVariation = variations[0];
+  const secondVariation = variations[1];
   const [disableValueId, setDisableValueId] = useState("");
+
+  // ---- row selection, for bulk price edits below ----
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [selectValueId0, setSelectValueId0] = useState("");
+  const [selectValueId1, setSelectValueId1] = useState("");
+  const [setPriceDraft, setSetPriceDraft] = useState("");
+  const [adjustDraft, setAdjustDraft] = useState("");
+  const [adjustError, setAdjustError] = useState<string | null>(null);
+  const selectAllRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (selectAllRef.current) {
+      selectAllRef.current.indeterminate = selected.size > 0 && selected.size < combos.length;
+    }
+  }, [selected, combos.length]);
+
+  // Selection is keyed by combos that still exist — a variation edit that
+  // removes/renames options should never leave stale keys selected. Pruning
+  // derived state to match a prop change, not a DOM/external-system sync.
+  useEffect(() => {
+    const validKeys = new Set(combos.map(fullComboKey));
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSelected((prev) => {
+      const next = new Set([...prev].filter((k) => validKeys.has(k)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [combos]);
+
+  function toggleRow(rowKey: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(rowKey)) next.delete(rowKey);
+      else next.add(rowKey);
+      return next;
+    });
+  }
+  function toggleSelectAll() {
+    setSelected((prev) => (prev.size === combos.length ? new Set() : new Set(combos.map(fullComboKey))));
+  }
+  /** Replaces the selection with exactly the rows where variation `index` has `valueId` — one click selects a whole size or colour. */
+  function selectWhereVariationIs(index: number, valueId: number) {
+    setSelected(new Set(combos.filter((c) => c.valueIds[index] === valueId).map(fullComboKey)));
+  }
+
+  /** The distinct price cell keys touched by the currently-selected rows (a price scoped to fewer variations than shown can be shared by several rows). */
+  function selectedPriceCellKeys(): string[] {
+    const keys = new Set<string>();
+    for (const c of combos) {
+      if (selected.has(fullComboKey(c))) keys.add(comboKeyFor(toggles.price.appliesTo, c));
+    }
+    return [...keys];
+  }
+
+  function applySetPriceToSelected() {
+    const parsedPrice = Number.parseFloat(setPriceDraft);
+    if (!Number.isFinite(parsedPrice) || parsedPrice <= 0) return;
+    const formatted = parsedPrice.toFixed(2);
+    const updates: Record<string, string> = {};
+    for (const cellKey of selectedPriceCellKeys()) updates[cellKey] = formatted;
+    patchCells("price", updates);
+    setSetPriceDraft("");
+  }
+
+  function applyAdjustmentToSelected() {
+    const parsed = parsePriceAdjustment(adjustDraft);
+    if (!parsed) {
+      setAdjustError('Enter a fixed amount (e.g. "2.00" or "-2.00") or a percentage (e.g. "10%" or "-10%").');
+      return;
+    }
+    setAdjustError(null);
+    const updates: Record<string, string> = {};
+    for (const cellKey of selectedPriceCellKeys()) {
+      const current = Number.parseFloat(rows.price[cellKey] || basePrice) || 0;
+      updates[cellKey] = applyPriceAdjustment(current, parsed).toFixed(2);
+    }
+    patchCells("price", updates);
+    setAdjustDraft("");
+  }
 
   return (
     <div className="mt-3">
@@ -2182,6 +2269,118 @@ function VariationTable({
         )}
       </div>
 
+      {/* ---- bulk selection actions ---- */}
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        {firstVariation && (
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs text-zinc-500">Select rows where {firstVariation.name} is</span>
+            <select
+              value={selectValueId0}
+              onChange={(e) => setSelectValueId0(e.target.value)}
+              className="h-8 rounded-md border border-black/10 bg-white px-1.5 text-xs outline-none dark:border-white/15 dark:bg-zinc-900"
+            >
+              <option value="">Select…</option>
+              {firstVariation.valueIds.map((id, i) => (
+                <option key={id} value={id}>
+                  {firstVariation.values[i]}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              disabled={!selectValueId0}
+              onClick={() => selectWhereVariationIs(0, Number(selectValueId0))}
+              className="h-8 rounded-lg border border-black/10 px-2 text-xs hover:bg-black/[.04] disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/15 dark:hover:bg-white/[.06]"
+            >
+              Select
+            </button>
+          </div>
+        )}
+        {secondVariation && (
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs text-zinc-500">Select rows where {secondVariation.name} is</span>
+            <select
+              value={selectValueId1}
+              onChange={(e) => setSelectValueId1(e.target.value)}
+              className="h-8 rounded-md border border-black/10 bg-white px-1.5 text-xs outline-none dark:border-white/15 dark:bg-zinc-900"
+            >
+              <option value="">Select…</option>
+              {secondVariation.valueIds.map((id, i) => (
+                <option key={id} value={id}>
+                  {secondVariation.values[i]}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              disabled={!selectValueId1}
+              onClick={() => selectWhereVariationIs(1, Number(selectValueId1))}
+              className="h-8 rounded-lg border border-black/10 px-2 text-xs hover:bg-black/[.04] disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/15 dark:hover:bg-white/[.06]"
+            >
+              Select
+            </button>
+          </div>
+        )}
+        <span className="text-xs text-zinc-500">
+          {selected.size} of {combos.length} selected
+        </span>
+        {selected.size > 0 && (
+          <button
+            type="button"
+            onClick={() => setSelected(new Set())}
+            className="text-xs font-medium text-zinc-500 hover:underline"
+          >
+            Clear selection
+          </button>
+        )}
+      </div>
+
+      {/* ---- bulk price edit for the selected rows ---- */}
+      {activeCols.includes("price") && selected.size > 0 && (
+        <div className="mt-2 flex flex-wrap items-center gap-4 rounded-lg border border-black/10 p-2 dark:border-white/15">
+          <div className="flex items-center gap-1">
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              value={setPriceDraft}
+              onChange={(e) => setSetPriceDraft(e.target.value)}
+              placeholder="Set price"
+              className="h-8 w-28 rounded-lg border border-black/10 bg-white px-2 text-xs outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
+            />
+            <button
+              type="button"
+              disabled={!setPriceDraft}
+              onClick={applySetPriceToSelected}
+              className="h-8 rounded-lg border border-black/10 px-2 text-xs hover:bg-black/[.04] disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/15 dark:hover:bg-white/[.06]"
+            >
+              Apply to selected
+            </button>
+          </div>
+          <div className="flex items-center gap-1">
+            <input
+              type="text"
+              value={adjustDraft}
+              onChange={(e) => {
+                setAdjustDraft(e.target.value);
+                setAdjustError(null);
+              }}
+              placeholder="e.g. +2.00 or -10%"
+              className="h-8 w-32 rounded-lg border border-black/10 bg-white px-2 text-xs outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
+            />
+            <button
+              type="button"
+              disabled={!adjustDraft}
+              onClick={applyAdjustmentToSelected}
+              className="h-8 rounded-lg border border-black/10 px-2 text-xs hover:bg-black/[.04] disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/15 dark:hover:bg-white/[.06]"
+            >
+              Adjust selected
+            </button>
+          </div>
+          {adjustError && <p className="w-full text-xs font-medium text-red-600">{adjustError}</p>}
+        </div>
+      )}
+
       {activeCols.length > 0 && (
         <div className="mt-2 flex flex-wrap gap-2">
           {activeCols.map((k) => (
@@ -2210,6 +2409,16 @@ function VariationTable({
           <thead className="sticky top-0 bg-zinc-50 dark:bg-zinc-900">
             <tr>
               <th className="px-2 py-1.5 text-left font-medium text-zinc-500">
+                <input
+                  ref={selectAllRef}
+                  type="checkbox"
+                  checked={combos.length > 0 && selected.size === combos.length}
+                  onChange={toggleSelectAll}
+                  aria-label="Select all rows"
+                  className="accent-[#f56400]"
+                />
+              </th>
+              <th className="px-2 py-1.5 text-left font-medium text-zinc-500">
                 <span className="sr-only">Enabled</span>
               </th>
               {variations.map((v) => (
@@ -2228,11 +2437,23 @@ function VariationTable({
             {combos.map((c) => {
               const rowKey = fullComboKey(c);
               const enabled = rowEnabled[rowKey] !== false;
+              const isSelected = selected.has(rowKey);
               return (
                 <tr
                   key={rowKey}
-                  className={`border-t border-black/5 dark:border-white/10 ${enabled ? "" : "opacity-40"}`}
+                  className={`border-t border-black/5 dark:border-white/10 ${enabled ? "" : "opacity-40"} ${
+                    isSelected ? "bg-[#f56400]/5" : ""
+                  }`}
                 >
+                  <td className="px-2 py-1">
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={() => toggleRow(rowKey)}
+                      aria-label={`Select ${c.values.join(" / ")}`}
+                      className="accent-[#f56400]"
+                    />
+                  </td>
                   <td className="px-2 py-1">
                     <button
                       type="button"

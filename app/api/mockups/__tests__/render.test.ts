@@ -1420,4 +1420,79 @@ describe("POST /api/mockups/render", () => {
     );
     expect(res.status).toBe(400);
   });
+
+  test("mode:copy requires a listingId — nothing to copy from without one", async () => {
+    const mock = await png(20, 20, [0, 0, 0]);
+    const res = await POST(
+      form(
+        {
+          publishTo: { mode: "copy", howItsMade: HOW_ITS_MADE_OK },
+          mockups: [{ name: "m", calibration: {} }],
+          designs: [],
+          jobs: [{ mockup: 0 }],
+        },
+        [{ field: "mockup", buf: mock, name: "m.png" }],
+      ),
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/listingId is required/i);
+  });
+
+  test('mode:new with no listingId ("Create listing") requires its own category', async () => {
+    createCalls.length = 0;
+    const mock = await png(20, 20, [0, 0, 0]);
+    const res = await POST(
+      form(
+        {
+          publishTo: { mode: "new", howItsMade: HOW_ITS_MADE_OK, newListing: { title: "From scratch" } },
+          mockups: [{ name: "m", calibration: {} }],
+          designs: [],
+          jobs: [{ mockup: 0 }],
+        },
+        [{ field: "mockup", buf: mock, name: "m.png" }],
+      ),
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/category/i);
+    expect(createCalls).toHaveLength(0);
+  });
+
+  test('mode:new with no listingId ("Create listing") creates a draft with no borrowed shipping/return-policy', async () => {
+    createCalls.length = 0;
+    const mock = await png(20, 20, [0, 0, 0]);
+    const res = await POST(
+      form(
+        {
+          publishTo: {
+            mode: "new",
+            howItsMade: HOW_ITS_MADE_OK,
+            newListing: {
+              title: "From scratch",
+              taxonomyId: 999,
+              price: 12.5,
+              quantity: 2,
+            },
+          },
+          mockups: [{ name: "m", calibration: {} }],
+          designs: [],
+          jobs: [{ mockup: 0 }],
+        },
+        [{ field: "mockup", buf: mock, name: "m.png" }],
+      ),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { createdDraft: boolean; sourceListingId: number | null };
+    expect(body.createdDraft).toBe(true);
+    expect(body.sourceListingId).toBeNull();
+    expect(createCalls[0]).toMatchObject({
+      title: "From scratch",
+      taxonomyId: 999,
+      price: 12.5,
+      quantity: 2,
+      shippingProfileId: null,
+      returnPolicyId: null,
+    });
+  }, 30_000);
 });

@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { blobToRaster, dataUrlToBlob, rasterToDataUrl } from "@/lib/mockup/client";
 import { compose } from "@/lib/mockup/compose";
 import { quadList } from "@/lib/mockup/geometry";
@@ -90,7 +91,12 @@ interface DesignItem {
   url: string;
 }
 
-interface ListingOption {
+/**
+ * The listing an edit session targets — chosen on the Listings page (its row
+ * actions), never in the editor itself. Carried over via URL query params so
+ * the editor needs no refetch just to show the title/thumbnail.
+ */
+interface TargetListing {
   listingId: number;
   title: string;
   thumbnailUrl: string | null;
@@ -122,9 +128,6 @@ interface PhotoSlot {
 
 const jobKey = (mockupId: string, designId: string) => `${mockupId}::${designId}`;
 const slotIdFor = (ref: ImageSlotRef) => (ref.kind === "job" ? `job:${ref.key}` : `own:${ref.id}`);
-
-/** First 40 characters of a title, as shown per row in the listing picker. */
-const shortTitle = (t: string) => (t.length > 40 ? `${t.slice(0, 40)}…` : t);
 
 /** The joined value ids a field's `appliesTo`-scoped subset of one combination — matches `ListingForm`'s own key. */
 function comboKeyFor(appliesTo: number[], valueIds: number[]): string {
@@ -299,7 +302,20 @@ const NAV_ITEMS: { key: NavTab; label: string }[] = [
   { key: "settings", label: "Settings" },
 ];
 
+/**
+ * `useSearchParams()` requires a Suspense boundary in the App Router — the
+ * listing (and mode) this editor targets is chosen entirely on the Listings
+ * page and carried over as query params, never re-chosen in here.
+ */
 export default function MockupsPage() {
+  return (
+    <Suspense fallback={null}>
+      <MockupsPageInner />
+    </Suspense>
+  );
+}
+
+function MockupsPageInner() {
   const [mockups, setMockups] = useState<MockupItem[]>([]);
   const [designs, setDesigns] = useState<DesignItem[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -308,11 +324,27 @@ export default function MockupsPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const [listings, setListings] = useState<ListingOption[]>([]);
-  const [listingsLoading, setListingsLoading] = useState(true);
-  const [selectedListing, setSelectedListing] = useState<ListingOption | null>(null);
-  const publishId = selectedListing?.listingId ?? null;
-  const [publishMode, setPublishMode] = useState<PublishMode>("copy");
+  // The target listing and mode are chosen once, on the Listings page (its
+  // row actions, or "Create listing" for a blank draft) — never re-chosen
+  // here, so these are read from the URL a single time, not React state.
+  const searchParams = useSearchParams();
+  const targetListing = useMemo<TargetListing | null>(() => {
+    const listingId = Number.parseInt(searchParams.get("listingId") ?? "", 10);
+    if (!Number.isInteger(listingId) || listingId <= 0) return null;
+    return {
+      listingId,
+      title: searchParams.get("title") || `Listing #${listingId}`,
+      thumbnailUrl: searchParams.get("thumbnailUrl"),
+    };
+  }, [searchParams]);
+  const publishMode: PublishMode = useMemo(() => {
+    const mode = searchParams.get("mode");
+    // "copy"/"existing" need a real target — falls back to a blank "new"
+    // draft (matching "Create listing") if one wasn't actually given.
+    if ((mode === "copy" || mode === "existing") && !targetListing) return "new";
+    return mode === "copy" || mode === "existing" ? mode : "new";
+  }, [searchParams, targetListing]);
+  const publishId = targetListing?.listingId ?? null;
   const [overwriteExisting, setOverwriteExisting] = useState(false);
   const [listingForm, setListingForm] = useState<ListingFormValue>(EMPTY_LISTING_FORM);
   const [publishResult, setPublishResult] = useState<PublishResult | null>(null);
@@ -396,35 +428,6 @@ export default function MockupsPage() {
 
   const psdInput = useRef<HTMLInputElement>(null);
   const designInput = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    // Every active listing, not just a page of them — the picker filters
-    // titles itself (see ListingPicker), so it needs the whole shop up front.
-    fetch("/api/etsy/listings?state=active&all=true", { signal: controller.signal })
-      .then((res) => (res.ok ? res.json() : null))
-      .then(
-        (
-          body: {
-            listings?: { listingId: number; title: string; thumbnailUrl: string | null }[];
-          } | null,
-        ) => {
-          if (!body?.listings) return;
-          const mapped = body.listings.map((l) => ({
-            listingId: l.listingId,
-            title: l.title,
-            thumbnailUrl: l.thumbnailUrl,
-          }));
-          setListings(mapped);
-          setSelectedListing((cur) => cur ?? mapped[0] ?? null);
-        },
-      )
-      .catch(() => {
-        /* not connected / no shop — the publish control just stays hidden */
-      })
-      .finally(() => setListingsLoading(false));
-    return () => controller.abort();
-  }, []);
 
   useEffect(() => {
     fetch("/api/etsy/shop")
@@ -838,9 +841,17 @@ export default function MockupsPage() {
   }, [included, designs, jobCount, buildBatchForm]);
 
   const publishToEtsy = useCallback(async () => {
-    if (photoSlots.length === 0 || publishId == null) return;
+    if (photoSlots.length === 0) return;
+    if ((publishMode === "copy" || publishMode === "existing") && publishId == null) {
+      setError("No target listing — go back to Listings and choose one.");
+      return;
+    }
     if (publishMode === "new" && !listingForm.title.trim()) {
       setError("Enter a title for the new draft (Listing information form).");
+      return;
+    }
+    if (publishMode === "new" && publishId == null && listingForm.taxonomyId == null) {
+      setError("Choose a category for the new listing (Details tab).");
       return;
     }
     if (publishMode === "new" && listingForm.readinessStateId == null) {
@@ -879,7 +890,9 @@ export default function MockupsPage() {
       );
       const publishTo: Record<string, unknown> = {
         mode: publishMode,
-        listingId: publishId,
+        // Omitted (not sent as null) for a blank "new" draft — createDraftListing
+        // needs no source listing to borrow anything from.
+        ...(publishId != null ? { listingId: publishId } : {}),
       };
       if (publishMode === "existing") publishTo.overwrite = overwriteExisting;
       if (publishMode !== "existing") {
@@ -1018,16 +1031,26 @@ export default function MockupsPage() {
   /** A new physical listing can't be created without one — Etsy rejects the draft otherwise. */
   const needsReadinessState = publishMode === "new" && listingForm.readinessStateId == null;
 
+  /** One-line description of what Publish will do — mode and target are both fixed, chosen back on the Listings page. */
+  const modeCaption = (() => {
+    if (publishMode === "existing") return `Adding to "${targetListing?.title}"`;
+    if (publishMode === "copy") return `Copy of "${targetListing?.title}"`;
+    return targetListing
+      ? `New draft, category & shipping borrowed from "${targetListing.title}"`
+      : "New draft, created from scratch";
+  })();
+
   return (
     <div className="min-h-screen bg-zinc-50 font-sans dark:bg-black">
       <header className="sticky top-0 z-20 border-b border-black/10 bg-zinc-50/95 px-6 py-3 backdrop-blur dark:border-white/15 dark:bg-black/95">
         <div className="mx-auto flex w-full max-w-7xl flex-wrap items-center gap-3">
           <Link
-            href="/"
+            href="/listings"
             className="text-sm text-zinc-500 transition-colors hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
           >
-            ← Back
+            ← Back to listings
           </Link>
+          {targetListing && <ListingThumb url={targetListing.thumbnailUrl} size={32} />}
           <div className="min-w-0">
             <p className="truncate text-xs text-zinc-500">{shopName ?? "Your shop"}</p>
             <p className="truncate text-sm font-semibold text-black dark:text-zinc-50">
@@ -1035,76 +1058,48 @@ export default function MockupsPage() {
             </p>
           </div>
 
-          {(listingsLoading || listings.length > 0) && (
-            <div className="ml-auto flex flex-wrap items-center gap-2">
-              {(
-                [
-                  ["copy", "Copy → to a copy"],
-                  ["new", "New draft → to it"],
-                  ["existing", "Add to selected listing"],
-                ] as const
-              ).map(([m, lbl]) => (
-                <button
-                  key={m}
-                  type="button"
-                  onClick={() => setPublishMode(m)}
-                  className={`h-8 rounded-full px-3 text-xs font-medium ${
-                    publishMode === m
-                      ? "bg-black text-white dark:bg-white dark:text-black"
-                      : "border border-black/10 text-zinc-600 dark:border-white/15 dark:text-zinc-400"
-                  }`}
-                >
-                  {lbl}
-                </button>
-              ))}
-              <ListingPicker
-                listings={listings}
-                loading={listingsLoading}
-                value={selectedListing}
-                onChange={setSelectedListing}
-                disabled={!!busy}
-              />
-              <button
-                type="button"
-                onClick={publishToEtsy}
-                disabled={!!busy || publishCount === 0 || publishId == null || needsReadinessState}
-                className="h-9 rounded-full border border-[#f56400] px-4 text-sm font-medium text-[#f56400] transition-colors hover:bg-[#f56400]/10 disabled:opacity-40"
-              >
-                {publishMode === "existing"
-                  ? `Add (${publishCount})`
-                  : `Create draft & upload (${publishCount})`}
-              </button>
-            </div>
-          )}
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            <span className="max-w-xs truncate text-xs text-zinc-500 dark:text-zinc-400">
+              {modeCaption}
+            </span>
+            <button
+              type="button"
+              onClick={publishToEtsy}
+              disabled={!!busy || publishCount === 0 || needsReadinessState}
+              className="h-9 rounded-full border border-[#f56400] px-4 text-sm font-medium text-[#f56400] transition-colors hover:bg-[#f56400]/10 disabled:opacity-40"
+            >
+              {publishMode === "existing"
+                ? `Add (${publishCount})`
+                : `Create draft & upload (${publishCount})`}
+            </button>
+          </div>
         </div>
 
-        {(listingsLoading || listings.length > 0) && (
-          <div className="mx-auto mt-2 w-full max-w-7xl space-y-1">
-            {publishMode === "existing" && (
-              <label className="flex items-center gap-1.5 text-xs text-zinc-600 dark:text-zinc-400">
-                <input
-                  type="checkbox"
-                  checked={overwriteExisting}
-                  onChange={(e) => setOverwriteExisting(e.target.checked)}
-                  className="accent-[#f56400]"
-                />
-                replace existing images (in rank order)
-              </label>
-            )}
-            {needsReadinessState && (
-              <p className="text-xs font-medium text-[#f56400]">
-                Choose a processing profile on the Shipping tab before creating this draft.
-              </p>
-            )}
-            <p className="text-xs text-zinc-500">
-              {publishMode === "existing"
-                ? overwriteExisting
-                  ? "The selected listing's first images will be replaced with these renders."
-                  : `Images are added to the selected listing (anything past the ${MAX_LISTING_IMAGES}-image limit is skipped). No images are deleted.`
-                : "A new draft listing is created and images are uploaded to it. The live listing is never touched."}
+        <div className="mx-auto mt-2 w-full max-w-7xl space-y-1">
+          {publishMode === "existing" && (
+            <label className="flex items-center gap-1.5 text-xs text-zinc-600 dark:text-zinc-400">
+              <input
+                type="checkbox"
+                checked={overwriteExisting}
+                onChange={(e) => setOverwriteExisting(e.target.checked)}
+                className="accent-[#f56400]"
+              />
+              replace existing images (in rank order)
+            </label>
+          )}
+          {needsReadinessState && (
+            <p className="text-xs font-medium text-[#f56400]">
+              Choose a processing profile on the Shipping tab before creating this draft.
             </p>
-          </div>
-        )}
+          )}
+          <p className="text-xs text-zinc-500">
+            {publishMode === "existing"
+              ? overwriteExisting
+                ? "The selected listing's first images will be replaced with these renders."
+                : `Images are added to the selected listing (anything past the ${MAX_LISTING_IMAGES}-image limit is skipped). No images are deleted.`
+              : "A new draft listing is created and images are uploaded to it. The live listing is never touched."}
+          </p>
+        </div>
       </header>
 
       <div className="mx-auto w-full max-w-7xl px-6 py-8">
@@ -1880,109 +1875,3 @@ function ListingThumb({ url, size }: { url: string | null; size: number }) {
   );
 }
 
-/**
- * Visual listing picker: a closed button showing the current pick, opening a
- * dropdown where each row is a large thumbnail + the first 40 characters of
- * the title (a plain `<select>` can't render images in its options).
- *
- * `listings` is the WHOLE shop (see the `all=true` fetch in the page
- * component) — filtering is a plain, literal, case-insensitive title
- * substring match done right here, not Etsy's own shop search (which ranks
- * by relevance across title/tags/materials/description and readily returns
- * listings whose title never contains what you typed).
- */
-function ListingPicker({
-  listings,
-  loading,
-  value,
-  onChange,
-  disabled,
-}: {
-  listings: ListingOption[];
-  loading: boolean;
-  value: ListingOption | null;
-  onChange: (listing: ListingOption) => void;
-  disabled?: boolean;
-}) {
-  const [open, setOpen] = useState(false);
-  const [query, setQuery] = useState("");
-  const rootRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    function onOutside(e: PointerEvent) {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
-    }
-    document.addEventListener("pointerdown", onOutside);
-    return () => document.removeEventListener("pointerdown", onOutside);
-  }, [open]);
-
-  const rows = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return listings;
-    return listings.filter((l) => l.title.toLowerCase().includes(q));
-  }, [listings, query]);
-
-  return (
-    <div ref={rootRef} className="relative">
-      <button
-        type="button"
-        disabled={disabled}
-        onClick={() => setOpen((o) => !o)}
-        className="flex h-11 items-center gap-2 rounded-lg border border-black/10 bg-white pr-3 pl-1.5 text-left text-sm disabled:opacity-50 dark:border-white/15 dark:bg-zinc-950"
-      >
-        <ListingThumb url={value?.thumbnailUrl ?? null} size={32} />
-        <span className="max-w-[200px] truncate">
-          {value ? shortTitle(value.title) : loading ? "Loading listings…" : "Select a listing"}
-        </span>
-        <span className="text-zinc-400">▾</span>
-      </button>
-
-      {open && (
-        <div className="absolute z-10 mt-1 w-80 overflow-hidden rounded-lg border border-black/10 bg-white shadow-lg dark:border-white/15 dark:bg-zinc-950">
-          <div className="border-b border-black/10 p-2 dark:border-white/15">
-            <input
-              type="text"
-              autoFocus
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search by title…"
-              className="h-8 w-full rounded-md border border-black/10 bg-white px-2 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-900"
-            />
-          </div>
-          <ul className="max-h-72 overflow-y-auto py-1">
-            {loading && (
-              <li className="px-2 py-3 text-center text-xs text-zinc-500">
-                Loading listings…
-              </li>
-            )}
-            {!loading && rows.length === 0 && (
-              <li className="px-2 py-3 text-center text-xs text-zinc-500">
-                {query.trim() ? "No matching listings." : "No listings."}
-              </li>
-            )}
-            {!loading &&
-              rows.map((l) => (
-                <li key={l.listingId}>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onChange(l);
-                      setOpen(false);
-                      setQuery("");
-                    }}
-                    className={`flex w-full items-center gap-3 px-2 py-2 text-left text-sm hover:bg-black/[.04] dark:hover:bg-white/[.06] ${
-                      l.listingId === value?.listingId ? "bg-[#f56400]/10" : ""
-                    }`}
-                  >
-                    <ListingThumb url={l.thumbnailUrl} size={48} />
-                    <span className="flex-1 truncate">{shortTitle(l.title)}</span>
-                  </button>
-                </li>
-              ))}
-          </ul>
-        </div>
-      )}
-    </div>
-  );
-}

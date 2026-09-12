@@ -101,15 +101,18 @@ interface PersonalizationQuestionSpec {
 }
 interface PublishSpec {
   /**
-   * "existing" — append to `listingId` (never replaces unless `overwrite`).
-   * "copy"     — new draft seeded from `listingId`, upload there.
-   * "new"      — new draft (borrows only category/shipping from `listingId`),
-   *              fields from `newListing`, upload there.
+   * "existing" — append to `listingId` (never replaces unless `overwrite`). Requires `listingId`.
+   * "copy"     — new draft seeded from `listingId`, upload there. Requires `listingId`.
+   * "new"      — new draft from `newListing`, upload there. `listingId` is
+   *              optional here: when given, category/shipping/return-policy
+   *              are borrowed from it as fallbacks; when omitted (a listing
+   *              created from scratch, copying nothing), those fall back to
+   *              `newListing`'s own fields only, or are left unset.
    * A live listing is never modified except in "existing" mode, and even then
    * images are only added unless the caller explicitly sets `overwrite`.
    */
   mode?: "existing" | "copy" | "new";
-  listingId: number;
+  listingId?: number;
   startRank?: number;
   /** "existing" mode only. Replace the image at each rank. Default false. */
   overwrite?: boolean;
@@ -718,16 +721,36 @@ export async function POST(request: Request) {
   // ---- publish branch: render, then push to Etsy ----
   const publish = payload.publishTo;
   if (publish && typeof publish === "object") {
-    if (!Number.isInteger(publish.listingId) || publish.listingId <= 0) {
+    const mode = publish.mode === "copy" || publish.mode === "new" ? publish.mode : "existing";
+    const hasListingId = Number.isInteger(publish.listingId) && (publish.listingId as number) > 0;
+    if (!hasListingId && (mode === "existing" || mode === "copy")) {
+      return NextResponse.json(
+        { error: `publishTo.listingId is required for mode "${mode}".` },
+        { status: 400 },
+      );
+    }
+    if (publish.listingId != null && !hasListingId) {
       return NextResponse.json(
         { error: "publishTo.listingId must be a positive integer." },
         { status: 400 },
       );
     }
-    const mode = publish.mode === "copy" || publish.mode === "new" ? publish.mode : "existing";
+    const sourceListingId = hasListingId ? (publish.listingId as number) : null;
     if (mode === "new" && !publish.newListing?.title?.trim()) {
       return NextResponse.json(
         { error: "publishTo.newListing.title is required for a new listing." },
+        { status: 400 },
+      );
+    }
+    // A brand-new listing with no source to borrow a category from must
+    // supply its own — createDraftListing requires taxonomy_id outright.
+    if (
+      mode === "new" &&
+      sourceListingId == null &&
+      !(Number.isInteger(publish.newListing?.taxonomyId) && (publish.newListing!.taxonomyId as number) > 0)
+    ) {
+      return NextResponse.json(
+        { error: "Choose a category for the new listing (Details tab)." },
         { status: 400 },
       );
     }
@@ -778,7 +801,9 @@ export async function POST(request: Request) {
     const skipped = order.length - capped.length;
 
     let shopId: number;
-    let targetListingId = publish.listingId;
+    // "existing" always has sourceListingId (validated above); "copy"/"new"
+    // overwrite this with the freshly created draft's id just below.
+    let targetListingId = sourceListingId ?? 0;
     let createdDraft = false;
     const failed: { name: string; error: string }[] = [];
     // Set only in "new" mode when the form sent a variation grid — the single-SKU
@@ -789,29 +814,35 @@ export async function POST(request: Request) {
     try {
       shopId = await getShopId();
       if (mode !== "existing") {
-        const src = await getListingStructure(publish.listingId);
+        // Absent for a listing created from scratch (mode "new", no source to
+        // copy anything from) — "copy" always has one (validated above).
+        const src = sourceListingId != null ? await getListingStructure(sourceListingId) : null;
         const nl = publish.newListing ?? {};
         const quantity =
           mode === "new" && Number.isInteger(nl.quantity) && (nl.quantity as number) > 0
             ? (nl.quantity as number)
-            : src.quantity;
+            : (src?.quantity ?? 1);
         const price =
-          mode === "new" && typeof nl.price === "number" && nl.price > 0 ? nl.price : src.price;
+          mode === "new" && typeof nl.price === "number" && nl.price > 0
+            ? nl.price
+            : (src?.price ?? 1);
         const taxonomyId =
           mode === "new" && Number.isInteger(nl.taxonomyId) && (nl.taxonomyId as number) > 0
             ? (nl.taxonomyId as number)
-            : src.taxonomyId;
+            // Guaranteed positive here: either borrowed from a source, or
+            // pre-validated above for the no-source "new" case.
+            : (src?.taxonomyId ?? 0);
         const readinessStateId =
           mode === "new" && Number.isInteger(nl.readinessStateId) && (nl.readinessStateId as number) > 0
             ? (nl.readinessStateId as number)
-            : src.readinessStateId;
+            : (src?.readinessStateId ?? null);
 
         targetListingId = await createDraftListing(shopId, {
           title:
             mode === "copy"
-              ? publish.copyTitle?.trim() || `${src.title} (copy)`
+              ? publish.copyTitle?.trim() || `${src!.title} (copy)`
               : (nl.title as string).trim(),
-          description: mode === "copy" ? src.description : nl.description || (nl.title as string),
+          description: mode === "copy" ? src!.description : nl.description || (nl.title as string),
           quantity,
           price,
           // Validated above whenever mode !== "existing" — this call only
@@ -821,15 +852,17 @@ export async function POST(request: Request) {
           whenMade: howItsMade!.whenMade,
           productionPartnerIds: howItsMade!.productionPartnerIds,
           taxonomyId,
-          shippingProfileId: src.shippingProfileId,
-          returnPolicyId: src.returnPolicyId,
+          // Neither is required by createDraftListing — a from-scratch draft
+          // simply has none set until the user picks them in Etsy's own editor.
+          shippingProfileId: src?.shippingProfileId ?? null,
+          returnPolicyId: src?.returnPolicyId ?? null,
           readinessStateId,
           shopSectionId:
             mode === "new" && typeof nl.shopSectionId === "number" && nl.shopSectionId > 0
               ? nl.shopSectionId
               : null,
-          tags: mode === "copy" ? src.tags : mode === "new" ? sanitizeTags(nl.tags) : [],
-          materials: mode === "copy" ? src.materials : [],
+          tags: mode === "copy" ? src!.tags : mode === "new" ? sanitizeTags(nl.tags) : [],
+          materials: mode === "copy" ? src!.materials : [],
         });
         createdDraft = true;
 
@@ -1066,7 +1099,7 @@ export async function POST(request: Request) {
     return NextResponse.json(
       {
         mode,
-        sourceListingId: publish.listingId,
+        sourceListingId,
         listingId: targetListingId,
         createdDraft,
         shopId,
