@@ -1107,6 +1107,7 @@ export default function MockupsPage() {
               value={listingForm}
               onChange={setListingForm}
               activeTab={isListingFormTab(activeTab) ? activeTab : null}
+              onGoToTab={setActiveTab}
             />
           </div>
         </div>

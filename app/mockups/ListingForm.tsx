@@ -24,8 +24,16 @@ export interface ListingFormVariation {
   propertyId: number;
   name: string;
   isCustom: boolean;
+  /**
+   * A stable id per option, assigned once when the option is added and never
+   * recomputed from its position — combination rows (variationRows /
+   * variationRowEnabled) are keyed by these, so renaming or reordering an
+   * option never scrambles or drops its already-entered values. Only
+   * deleting an option (removing its id from this array) does.
+   */
   valueIds: number[];
   values: string[];
+  linksPhotos: boolean;
 }
 
 export type VariationToggleKey = "price" | "readiness" | "quantity" | "sku";
@@ -194,10 +202,13 @@ export default function ListingForm({
   value,
   onChange,
   activeTab,
+  onGoToTab,
 }: {
   value: ListingFormValue;
   onChange: (next: ListingFormValue) => void;
   activeTab: ListingFormTab | null;
+  /** Lets a sub-panel (e.g. the Variations modal) send the user to another tab, such as Details to pick a category. */
+  onGoToTab?: (tab: ListingFormTab) => void;
 }) {
   const patch = (partial: Partial<ListingFormValue>) => onChange({ ...value, ...partial });
 
@@ -259,6 +270,7 @@ export default function ListingForm({
   // ---- category properties (depend on the chosen category) ----
   const [properties, setProperties] = useState<TaxonomyProperty[]>([]);
   const [propertiesLoading, setPropertiesLoading] = useState(false);
+  const [propertiesError, setPropertiesError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!value.taxonomyId) {
@@ -266,17 +278,29 @@ export default function ListingForm({
       // reset elsewhere in this app's pickers.
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setProperties([]);
+      setPropertiesError(null);
       return;
     }
     const controller = new AbortController();
     setPropertiesLoading(true);
+    setPropertiesError(null);
     fetch(`/api/etsy/taxonomy/${value.taxonomyId}/properties`, { signal: controller.signal })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((body: { properties?: TaxonomyProperty[] } | null) => {
+      .then(async (res) => {
+        const body = (await res.json().catch(() => null)) as
+          | { properties?: TaxonomyProperty[]; error?: string }
+          | null;
+        // Left in deliberately — check the browser console to confirm
+        // taxonomy_id is set and see what getPropertiesByTaxonomyId returned.
+        console.log(`[ListingForm] GET taxonomy/${value.taxonomyId}/properties ->`, res.status, body);
+        if (!res.ok) {
+          throw new Error(res.status === 429 ? RATE_LIMIT_MESSAGE : body?.error || `Request failed (${res.status})`);
+        }
         setProperties(body?.properties ?? []);
       })
-      .catch(() => {
-        if (!controller.signal.aborted) setProperties([]);
+      .catch((err) => {
+        if (controller.signal.aborted) return;
+        setProperties([]);
+        setPropertiesError(err instanceof Error ? err.message : "Could not load category properties.");
       })
       .finally(() => setPropertiesLoading(false));
     return () => controller.abort();
@@ -531,6 +555,7 @@ export default function ListingForm({
           {propertiesLoading && (
             <p className="text-xs text-zinc-500">Loading category properties…</p>
           )}
+          {propertiesError && <p className="text-xs text-red-600">{propertiesError}</p>}
 
           {!propertiesLoading && attributeProperties.length > 0 && (
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -620,9 +645,12 @@ export default function ListingForm({
       {activeTab === "variations" && (
         <VariationsSection
           variationProperties={variationProperties}
+          propertiesLoading={propertiesLoading}
+          propertiesError={propertiesError}
           value={value}
           patch={patch}
           sectionHeadingCls={sectionHeadingCls}
+          onGoToTab={onGoToTab}
         />
       )}
 
@@ -829,14 +857,20 @@ interface VariationsDraft {
 /** Summary shown on the main form — everything else lives in the "Manage variations" modal. */
 function VariationsSection({
   variationProperties,
+  propertiesLoading,
+  propertiesError,
   value,
   patch,
   sectionHeadingCls,
+  onGoToTab,
 }: {
   variationProperties: TaxonomyProperty[];
+  propertiesLoading: boolean;
+  propertiesError: string | null;
   value: ListingFormValue;
   patch: (partial: Partial<ListingFormValue>) => void;
   sectionHeadingCls: string;
+  onGoToTab?: (tab: ListingFormTab) => void;
 }) {
   const [modalOpen, setModalOpen] = useState(false);
   const totalCombinations = totalCombinationsFor(value.variations);
@@ -865,7 +899,10 @@ function VariationsSection({
             variationRows: value.variationRows,
             variationRowEnabled: value.variationRowEnabled,
           }}
+          hasCategory={value.taxonomyId != null}
           variationProperties={variationProperties}
+          propertiesLoading={propertiesLoading}
+          propertiesError={propertiesError}
           basePrice={value.price}
           baseQuantity={value.quantity}
           onCancel={() => setModalOpen(false)}
@@ -873,6 +910,14 @@ function VariationsSection({
             patch(draft);
             setModalOpen(false);
           }}
+          onGoToDetails={
+            onGoToTab
+              ? () => {
+                  onGoToTab("details");
+                  setModalOpen(false);
+                }
+              : undefined
+          }
         />
       )}
     </section>
@@ -886,8 +931,10 @@ interface VariationDraft {
   /** Etsy source only, when the property has scales (e.g. shoe sizing US/UK/EU). */
   scaleId: number | null;
   name: string;
+  /** Stable per-option ids — see {@link ListingFormVariation.valueIds}. */
   valueIds: number[];
   values: string[];
+  linksPhotos: boolean;
 }
 const EMPTY_VARIATION_DRAFT: VariationDraft = {
   source: "etsy",
@@ -896,6 +943,7 @@ const EMPTY_VARIATION_DRAFT: VariationDraft = {
   name: "",
   valueIds: [],
   values: [],
+  linksPhotos: false,
 };
 
 type ModalStep =
@@ -911,18 +959,28 @@ type ModalStep =
  */
 function VariationsModal({
   initial,
+  hasCategory,
   variationProperties,
+  propertiesLoading,
+  propertiesError,
   basePrice,
   baseQuantity,
   onCancel,
   onSave,
+  onGoToDetails,
 }: {
   initial: VariationsDraft;
+  /** Whether a category (taxonomy_id) has been chosen yet — without one, Etsy has no properties to offer. */
+  hasCategory: boolean;
   variationProperties: TaxonomyProperty[];
+  propertiesLoading: boolean;
+  propertiesError: string | null;
   basePrice: string;
   baseQuantity: string;
   onCancel: () => void;
   onSave: (draft: VariationsDraft) => void;
+  /** Sends the user to the Details tab to pick a category, closing this modal. Omitted -> no link is shown. */
+  onGoToDetails?: () => void;
 }) {
   const [draft, setDraft] = useState<VariationsDraft>(initial);
   const [step, setStep] = useState<ModalStep>({ kind: "list" });
@@ -943,11 +1001,27 @@ function VariationsModal({
     const v = draft.variations[i];
     setEditingIndex(i);
     if (v.isCustom) {
-      setVariationDraft({ source: "custom", propertyId: null, scaleId: null, name: v.name, valueIds: v.valueIds, values: v.values });
+      setVariationDraft({
+        source: "custom",
+        propertyId: null,
+        scaleId: null,
+        name: v.name,
+        valueIds: v.valueIds,
+        values: v.values,
+        linksPhotos: v.linksPhotos,
+      });
       setStep({ kind: "custom" });
     } else {
       const property = variationProperties.find((p) => p.propertyId === v.propertyId);
-      setVariationDraft({ source: "etsy", propertyId: v.propertyId, scaleId: null, name: v.name, valueIds: v.valueIds, values: v.values });
+      setVariationDraft({
+        source: "etsy",
+        propertyId: v.propertyId,
+        scaleId: null,
+        name: v.name,
+        valueIds: v.valueIds,
+        values: v.values,
+        linksPhotos: v.linksPhotos,
+      });
       // Falls back to the "Create your own" step if the property vanished (e.g. the category changed) —
       // the values already picked are preserved either way.
       setStep(property ? { kind: "pickValues", property } : { kind: "custom" });
@@ -961,6 +1035,7 @@ function VariationsModal({
       name: p.displayName,
       valueIds: [],
       values: [],
+      linksPhotos: false,
     });
     setStep({ kind: "pickValues", property: p });
   }
@@ -982,13 +1057,18 @@ function VariationsModal({
             isCustom: false,
             valueIds: variationDraft.valueIds,
             values: variationDraft.values,
+            linksPhotos: variationDraft.linksPhotos,
           }
         : {
             propertyId: nextCustomPropertyId(draft.variations, editingIndex),
             name: variationDraft.name.trim(),
             isCustom: true,
-            valueIds: variationDraft.values.map((_, i) => i + 1),
+            // Stable ids assigned by CustomOptionsInput as options are added —
+            // never recomputed from position, so a rename or reorder can't
+            // scramble which combination row an option's data belongs to.
+            valueIds: variationDraft.valueIds,
             values: variationDraft.values,
+            linksPhotos: variationDraft.linksPhotos,
           };
     const nextVariations = [...draft.variations];
     if (editingIndex != null) nextVariations[editingIndex] = variation;
@@ -1114,30 +1194,52 @@ function VariationsModal({
                 <li>Buyers can filter their search by Etsy&apos;s listed options.</li>
                 <li>Custom options are not filterable.</li>
               </ul>
-              <ul className="max-h-72 divide-y divide-black/5 overflow-y-auto rounded-lg border border-black/10 dark:divide-white/10 dark:border-white/15">
-                {variationProperties
-                  .filter((p) => !usedPropertyIds.includes(p.propertyId))
-                  .map((p) => (
-                    <li key={p.propertyId}>
+
+              {!hasCategory && (
+                <p className="text-xs text-zinc-500">
+                  Choose a category first — Etsy&apos;s variation options depend on it.{" "}
+                  {onGoToDetails ? (
+                    <button type="button" onClick={onGoToDetails} className="font-medium text-[#f56400] hover:underline">
+                      Go to Details
+                    </button>
+                  ) : (
+                    "Go to the Details tab."
+                  )}
+                </p>
+              )}
+              {hasCategory && propertiesLoading && (
+                <p className="text-xs text-zinc-500">Loading category properties…</p>
+              )}
+              {hasCategory && propertiesError && <p className="text-xs text-red-600">{propertiesError}</p>}
+              {hasCategory && !propertiesLoading && !propertiesError && variationProperties.length === 0 && (
+                <p className="text-xs text-zinc-500">No Etsy variation properties for this category.</p>
+              )}
+
+              {variationProperties.filter((p) => !usedPropertyIds.includes(p.propertyId)).length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  {variationProperties
+                    .filter((p) => !usedPropertyIds.includes(p.propertyId))
+                    .map((p) => (
                       <button
+                        key={p.propertyId}
                         type="button"
                         onClick={() => pickProperty(p)}
-                        className="block w-full px-3 py-2 text-left text-sm hover:bg-black/[.04] dark:hover:bg-white/[.06]"
+                        className="rounded-full border border-black/10 px-3 py-1.5 text-sm hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
                       >
                         {p.displayName}
                       </button>
-                    </li>
-                  ))}
-                <li>
-                  <button
-                    type="button"
-                    onClick={pickCustom}
-                    className="block w-full px-3 py-2 text-left text-sm font-medium text-[#f56400] hover:bg-black/[.04] dark:hover:bg-white/[.06]"
-                  >
-                    Create your own
-                  </button>
-                </li>
-              </ul>
+                    ))}
+                </div>
+              )}
+
+              <button
+                type="button"
+                onClick={pickCustom}
+                className="block text-sm font-medium text-[#f56400] hover:underline"
+              >
+                + Create your own
+              </button>
+
               <button
                 type="button"
                 onClick={cancelValueStep}
@@ -1162,33 +1264,73 @@ function VariationsModal({
 
           {/* ---- STEP 3b: create your own ---- */}
           {step.kind === "custom" && (
-            <div className="space-y-2">
-              <input
-                type="text"
-                value={variationDraft.name}
-                onChange={(e) => setVariationDraft((d) => ({ ...d, name: e.target.value }))}
-                placeholder="Variation name (e.g. Paper type)"
-                className="h-9 w-full rounded-lg border border-black/10 bg-white px-2 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
-              />
-              <CustomOptionsInput
-                values={variationDraft.values}
-                onChange={(values) => setVariationDraft((d) => ({ ...d, values }))}
-              />
-              <div className="flex gap-2 pt-1">
+            <div className="space-y-4">
+              <h4 className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">Custom variation</h4>
+
+              <label className="block text-sm">
+                <span className="text-xs text-zinc-500">Name *</span>
+                <input
+                  type="text"
+                  required
+                  value={variationDraft.name}
+                  onChange={(e) => setVariationDraft((d) => ({ ...d, name: e.target.value }))}
+                  placeholder="e.g. Paper type"
+                  className="mt-1 h-9 w-full rounded-lg border border-black/10 bg-white px-2 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
+                />
+              </label>
+
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={variationDraft.linksPhotos}
+                  onChange={(e) => setVariationDraft((d) => ({ ...d, linksPhotos: e.target.checked }))}
+                  className="accent-[#f56400]"
+                />
+                Link photos to this variation
+              </label>
+
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <h5 className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">Options</h5>
+                  <span className="rounded-full bg-black/[.06] px-2 py-0.5 text-xs font-medium text-zinc-600 dark:bg-white/10 dark:text-zinc-300">
+                    {variationDraft.values.length}
+                  </span>
+                </div>
+                <p className="text-xs text-zinc-500">
+                  Buyers choose from these options. Etsy&apos;s own options give your listing peak
+                  discoverability — custom options are not filterable.
+                </p>
+                <CustomOptionsInput
+                  options={variationDraft.values.map((text, i) => ({ id: variationDraft.valueIds[i], text }))}
+                  onChange={(options) =>
+                    setVariationDraft((d) => ({
+                      ...d,
+                      valueIds: options.map((o) => o.id),
+                      values: options.map((o) => o.text),
+                    }))
+                  }
+                />
+              </div>
+
+              <div className="flex justify-between pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (editingIndex != null) removeVariation(editingIndex);
+                    setStep({ kind: "list" });
+                    setEditingIndex(null);
+                  }}
+                  className="h-8 rounded-lg border border-black/10 px-3 text-xs text-red-600 hover:bg-red-50 dark:border-white/15 dark:hover:bg-red-950/30"
+                >
+                  Delete variation
+                </button>
                 <button
                   type="button"
                   disabled={variationDraft.name.trim() === "" || variationDraft.values.length === 0}
                   onClick={commitVariation}
                   className="h-8 rounded-lg bg-[#f56400] px-3 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
                 >
-                  {editingIndex != null ? "Save" : "Add variation"}
-                </button>
-                <button
-                  type="button"
-                  onClick={cancelValueStep}
-                  className="h-8 rounded-lg border border-black/10 px-3 text-xs hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
-                >
-                  Cancel
+                  Done
                 </button>
               </div>
             </div>
@@ -1299,23 +1441,26 @@ function VariationsModal({
           )}
         </div>
 
-        <div className="flex justify-end gap-2 border-t border-black/10 px-4 py-3 dark:border-white/15">
-          <button
-            type="button"
-            onClick={onCancel}
-            className="h-9 rounded-lg border border-black/10 px-4 text-sm font-medium hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={() => onSave(draft)}
-            disabled={!!violation}
-            className="h-9 rounded-lg bg-[#f56400] px-4 text-sm font-medium text-white hover:bg-[#d95700] disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            Save
-          </button>
-        </div>
+        {/* The property/value/custom picker steps have their own inline Cancel — this footer is only for the list step. */}
+        {step.kind === "list" && (
+          <div className="flex justify-end gap-2 border-t border-black/10 px-4 py-3 dark:border-white/15">
+            <button
+              type="button"
+              onClick={onCancel}
+              className="h-9 rounded-lg border border-black/10 px-4 text-sm font-medium hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => onSave(draft)}
+              disabled={!!violation}
+              className="h-9 rounded-lg bg-[#f56400] px-4 text-sm font-medium text-white hover:bg-[#d95700] disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Save
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1542,46 +1687,153 @@ function VariationValuePicker({
   );
 }
 
-/** Chip input for hand-typed custom variation options — same interaction as the Tags field above. */
-function CustomOptionsInput({ values, onChange }: { values: string[]; onChange: (values: string[]) => void }) {
+interface CustomOption {
+  /** Assigned once when the option is added, never recomputed from position — see {@link ListingFormVariation.valueIds}. */
+  id: number;
+  text: string;
+}
+
+/**
+ * Options editor for a custom variation — full-width rows in display order
+ * (the order shown here is what buyers see), each with a drag handle,
+ * inline-editable text, and delete. Renaming or reordering an option keeps
+ * its id (and therefore every combination value already entered against
+ * it); only deleting one drops its id for good.
+ */
+function CustomOptionsInput({
+  options,
+  onChange,
+}: {
+  options: CustomOption[];
+  onChange: (options: CustomOption[]) => void;
+}) {
   const [draft, setDraft] = useState("");
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editingText, setEditingText] = useState("");
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+
   function add() {
     const t = draft.trim();
     if (!t) return;
-    if (values.some((v) => v.toLowerCase() === t.toLowerCase())) {
+    if (options.some((o) => o.text.toLowerCase() === t.toLowerCase())) {
       setDraft("");
       return;
     }
-    onChange([...values, t]);
+    const nextId = Math.max(0, ...options.map((o) => o.id)) + 1;
+    onChange([...options, { id: nextId, text: t }]);
     setDraft("");
   }
-  function remove(t: string) {
-    onChange(values.filter((v) => v !== t));
+  function remove(id: number) {
+    onChange(options.filter((o) => o.id !== id));
   }
+  function move(from: number, to: number) {
+    if (from === to || to < 0 || to >= options.length) return;
+    const next = [...options];
+    const [item] = next.splice(from, 1);
+    next.splice(to, 0, item);
+    onChange(next);
+  }
+  function startRename(o: CustomOption) {
+    setEditingId(o.id);
+    setEditingText(o.text);
+  }
+  function commitRename() {
+    const t = editingText.trim();
+    if (editingId != null && t) {
+      onChange(options.map((o) => (o.id === editingId ? { ...o, text: t } : o)));
+    }
+    setEditingId(null);
+  }
+
   return (
-    <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-black/10 p-1.5 dark:border-white/15">
-      {values.map((v) => (
-        <span key={v} className="flex items-center gap-1 rounded-full bg-black/[.06] px-2 py-0.5 text-xs dark:bg-white/10">
-          {v}
-          <button type="button" onClick={() => remove(v)} aria-label={`Remove ${v} option`} className="text-zinc-500 hover:text-red-600">
-            ×
-          </button>
-        </span>
-      ))}
-      <input
-        type="text"
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === ",") {
-            e.preventDefault();
-            add();
-          }
-        }}
-        onBlur={add}
-        placeholder={values.length === 0 ? "Type an option, press Enter…" : ""}
-        className="min-w-[100px] flex-1 border-none bg-transparent px-1 py-0.5 text-sm outline-none"
-      />
+    <div className="space-y-2">
+      <div className="flex gap-2">
+        <input
+          type="text"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              add();
+            }
+          }}
+          placeholder="Enter an option…"
+          className="h-9 flex-1 rounded-lg border border-black/10 bg-white px-2 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
+        />
+        <button
+          type="button"
+          onClick={add}
+          disabled={!draft.trim()}
+          className="h-9 rounded-lg border border-black/10 px-3 text-sm font-medium hover:bg-black/[.04] disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/15 dark:hover:bg-white/[.06]"
+        >
+          Add
+        </button>
+      </div>
+
+      <div className="space-y-1">
+        {options.map((o, i) => (
+          <div
+            key={o.id}
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.effectAllowed = "move";
+              e.dataTransfer.setData("text/plain", String(i));
+              setDragIndex(i);
+            }}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={(e) => {
+              e.preventDefault();
+              const from = Number(e.dataTransfer.getData("text/plain"));
+              if (Number.isFinite(from)) move(from, i);
+              setDragIndex(null);
+            }}
+            onDragEnd={() => setDragIndex(null)}
+            className={`flex items-center gap-2 rounded-lg border border-black/10 px-2 py-1.5 dark:border-white/15 ${
+              dragIndex === i ? "opacity-50" : ""
+            }`}
+          >
+            <span className="cursor-grab select-none text-zinc-400" aria-hidden="true">
+              ⠿
+            </span>
+            {editingId === o.id ? (
+              <input
+                autoFocus
+                type="text"
+                value={editingText}
+                onChange={(e) => setEditingText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    commitRename();
+                  }
+                  if (e.key === "Escape") setEditingId(null);
+                }}
+                onBlur={commitRename}
+                className="h-7 flex-1 rounded border border-black/10 bg-white px-1.5 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-900"
+              />
+            ) : (
+              <span className="flex-1 truncate text-sm">{o.text}</span>
+            )}
+            <button
+              type="button"
+              onClick={() => startRename(o)}
+              aria-label={`Rename ${o.text}`}
+              className="shrink-0 text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200"
+            >
+              ✎
+            </button>
+            <button
+              type="button"
+              onClick={() => remove(o.id)}
+              aria-label={`Delete ${o.text} option`}
+              className="shrink-0 text-zinc-500 hover:text-red-600"
+            >
+              🗑
+            </button>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
