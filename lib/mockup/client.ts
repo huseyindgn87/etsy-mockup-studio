@@ -75,3 +75,10 @@ export function rasterToCanvas(r: Raster, canvas: HTMLCanvasElement): void {
     0,
   );
 }
+
+/** Encode a raster as a `data:` URL — a lightweight, off-DOM thumbnail for grids/lists. */
+export function rasterToDataUrl(r: Raster, mime = "image/jpeg", quality = 0.72): string {
+  const canvas = document.createElement("canvas");
+  rasterToCanvas(r, canvas);
+  return canvas.toDataURL(mime, quality);
+}

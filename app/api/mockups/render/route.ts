@@ -10,10 +10,11 @@ import {
   updateVariationImages,
 } from "@/lib/etsy/listing-create";
 import { uploadListingImage } from "@/lib/etsy/listing-images";
+import { MAX_LISTING_IMAGES } from "@/lib/etsy/listing-image-limits";
 import { uploadListingVideo } from "@/lib/etsy/listing-video";
 import { EtsyApiError, getShopId } from "@/lib/etsy/listings";
 import { MAX_COMBINATIONS_HARD_CAP } from "@/lib/etsy/variation-limits";
-import { checkVideoFileBasics } from "@/lib/etsy/video-limits";
+import { MAX_LISTING_VIDEOS, checkVideoFileBasics } from "@/lib/etsy/video-limits";
 import { getRenderPool } from "@/lib/mockup/render-pool";
 import type { RenderJobInput } from "@/lib/mockup/render-types";
 import {
@@ -32,7 +33,6 @@ const MAX_TOTAL_BYTES = 400 * 1024 * 1024;
 const MAX_FILES = 400;
 const MAX_JOBS = 500;
 const MAX_DIMENSION = 8000;
-const MAX_LISTING_IMAGES = 10; // Etsy's per-listing image cap
 const DEFAULT_TARGET_MB: [number, number] = [1.2, 1.7];
 
 interface OverlaySpec {
@@ -56,6 +56,18 @@ interface JobSpec {
   design?: number | null;
   areaDesigns?: (number | null)[];
   name?: string;
+  /** Sent as this image's `alt_text` on upload — see `MAX_ALT_TEXT_LENGTH`. */
+  altText?: string;
+}
+/** A user-supplied photo (the `ownImage` file at the same index) — uploaded as-is, no compositing. */
+interface OwnImageSpec {
+  name?: string;
+  altText?: string;
+}
+/** One entry in the client's chosen upload order — see `payload.imageOrder`. */
+interface ImageOrderEntry {
+  kind: "job" | "own";
+  index: number;
 }
 interface PublishSpec {
   /**
@@ -71,7 +83,6 @@ interface PublishSpec {
   startRank?: number;
   /** "existing" mode only. Replace the image at each rank. Default false. */
   overwrite?: boolean;
-  altText?: string;
   copyTitle?: string;
   newListing?: {
     title?: string;
@@ -122,11 +133,25 @@ interface RenderPayload {
   mockups?: MockupSpec[];
   designs?: { name?: string }[];
   jobs?: JobSpec[];
+  /** User-uploaded photos (the `ownImage` files, addressed by index) — publish-only. */
+  ownImages?: OwnImageSpec[];
+  /**
+   * The final upload order across rendered jobs and `ownImages`, publish-only.
+   * Omitted -> every job in order, then every own image in order (unchanged
+   * behavior for callers that don't send it).
+   */
+  imageOrder?: ImageOrderEntry[];
   /** When set, upload the renders to this Etsy listing instead of zipping. */
   publishTo?: PublishSpec;
 }
 
 const FORBIDDEN_NAME_CHARS = '/\\:*?"<>|';
+
+/** Longest run of trailing `[a-z0-9]` after a dot, lowercased — "jpg" when there is none. */
+function extOf(filename: string): string {
+  const m = /\.([a-z0-9]+)$/i.exec(filename);
+  return m ? m[1].toLowerCase() : "jpg";
+}
 
 /** Strip path separators and control characters from a would-be filename. */
 function sanitize(s: string): string {
@@ -318,18 +343,40 @@ function sanitizeVariations(raw: unknown): CleanVariations | null {
 }
 
 /**
+ * Validate a client-supplied upload order against the job/own-image arrays
+ * actually provided. Malformed or out-of-range entries are dropped
+ * individually — the caller falls back to the default order when nothing
+ * survives.
+ */
+function sanitizeImageOrder(raw: unknown, jobCount: number, ownCount: number): ImageOrderEntry[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ImageOrderEntry[] = [];
+  for (const e of raw) {
+    if (!e || typeof e !== "object") continue;
+    const kind = (e as { kind?: unknown }).kind;
+    const index = (e as { index?: unknown }).index;
+    if (kind === "job" && isIndex(index, jobCount)) out.push({ kind: "job", index });
+    else if (kind === "own" && isIndex(index, ownCount)) out.push({ kind: "own", index });
+  }
+  return out;
+}
+
+/**
  * Batch-render every job and stream the results back as a ZIP.
  *
  * `POST /api/mockups/render` — `multipart/form-data`:
- *   - `mockup`  (file, repeated)  composites, addressed by index
- *   - `design`  (file, repeated)  designs, addressed by index
- *   - `overlay` (file, repeated)  overlay images, addressed by index
- *   - `video`   (file, optional)  one listing video — only used with `publishTo`,
- *                                 uploaded once the target listing exists, same
- *                                 as the rendered images. Format/size are
- *                                 re-checked server-side (see `video-limits.ts`);
- *                                 the client is expected to have already
- *                                 checked format/size/duration before sending it.
+ *   - `mockup`   (file, repeated)  composites, addressed by index
+ *   - `design`   (file, repeated)  designs, addressed by index
+ *   - `overlay`  (file, repeated)  overlay images, addressed by index
+ *   - `ownImage` (file, repeated)  user-uploaded photos, addressed by index —
+ *                                  publish-only, uploaded as-is (no compositing)
+ *   - `video`    (file, repeated, up to `MAX_LISTING_VIDEOS`) listing videos —
+ *                                  only used with `publishTo`, uploaded once the
+ *                                  target listing exists, same as the rendered
+ *                                  images. Format/size are re-checked server-side
+ *                                  (see `video-limits.ts`); the client is expected
+ *                                  to have already checked format/size/duration
+ *                                  before sending them.
  *   - `payload` (json string):
  *       {
  *         format?: "jpeg" | "png",           // default "jpeg"
@@ -338,7 +385,9 @@ function sanitizeVariations(raw: unknown): CleanVariations | null {
  *         zipName?: "mockups.zip",
  *         mockups: [{ name, width?, height?, calibration, overlays?: [{ file, x, y, blend, alpha, clip, name }] }],
  *         designs: [{ name }],
- *         jobs:    [{ mockup, design?, areaDesigns?, name? }]
+ *         jobs:    [{ mockup, design?, areaDesigns?, name?, altText? }],
+ *         ownImages?: [{ name?, altText? }],     // aligned with `ownImage` files
+ *         imageOrder?: [{ kind: "job"|"own", index }], // publish-only; default: every job, then every own image
  *       }
  *
  * Each job runs on the `worker_threads` render pool (the shared `lib/mockup`
@@ -369,20 +418,29 @@ export async function POST(request: Request) {
   const mockupFiles = form.getAll("mockup").filter((f): f is File => f instanceof File);
   const designFiles = form.getAll("design").filter((f): f is File => f instanceof File);
   const overlayFiles = form.getAll("overlay").filter((f): f is File => f instanceof File);
-  const videoFileRaw = form.get("video");
-  const videoFile = videoFileRaw instanceof File && videoFileRaw.size > 0 ? videoFileRaw : null;
-  if (videoFile) {
+  const ownImageFiles = form.getAll("ownImage").filter((f): f is File => f instanceof File);
+  const videoFiles = form
+    .getAll("video")
+    .filter((f): f is File => f instanceof File && f.size > 0)
+    .slice(0, MAX_LISTING_VIDEOS);
+  for (const videoFile of videoFiles) {
     const videoError = checkVideoFileBasics(videoFile);
     if (videoError) return NextResponse.json({ error: videoError }, { status: 400 });
   }
 
-  if (mockupFiles.length === 0) {
-    return NextResponse.json({ error: "At least one `mockup` file is required." }, { status: 400 });
+  if (mockupFiles.length === 0 && ownImageFiles.length === 0) {
+    return NextResponse.json(
+      { error: "At least one `mockup` or `ownImage` file is required." },
+      { status: 400 },
+    );
   }
-  if (mockupFiles.length + designFiles.length + overlayFiles.length > MAX_FILES) {
+  if (
+    mockupFiles.length + designFiles.length + overlayFiles.length + ownImageFiles.length >
+    MAX_FILES
+  ) {
     return NextResponse.json({ error: `Too many files (max ${MAX_FILES}).` }, { status: 413 });
   }
-  const totalBytes = [...mockupFiles, ...designFiles, ...overlayFiles].reduce(
+  const totalBytes = [...mockupFiles, ...designFiles, ...overlayFiles, ...ownImageFiles].reduce(
     (a, f) => a + f.size,
     0,
   );
@@ -400,6 +458,7 @@ export async function POST(request: Request) {
   const mockups = Array.isArray(payload.mockups) ? payload.mockups : [];
   const designs = Array.isArray(payload.designs) ? payload.designs : [];
   const jobs = Array.isArray(payload.jobs) ? payload.jobs : [];
+  const ownImages = Array.isArray(payload.ownImages) ? payload.ownImages : [];
 
   if (mockups.length !== mockupFiles.length) {
     return NextResponse.json(
@@ -413,7 +472,15 @@ export async function POST(request: Request) {
       { status: 400 },
     );
   }
-  if (jobs.length === 0) {
+  if (ownImages.length !== ownImageFiles.length) {
+    return NextResponse.json(
+      { error: "`payload.ownImages` length must match the number of `ownImage` files." },
+      { status: 400 },
+    );
+  }
+  // A zip/download request always needs at least one job. A publish request
+  // may consist entirely of user-uploaded photos with no rendered mockups.
+  if (jobs.length === 0 && !(ownImages.length > 0 && payload.publishTo)) {
     return NextResponse.json({ error: "`payload.jobs` is empty." }, { status: 400 });
   }
   if (jobs.length > MAX_JOBS) {
@@ -543,8 +610,19 @@ export async function POST(request: Request) {
     const overwrite = mode === "existing" && publish.overwrite === true;
     const contentType = format === "png" ? "image/png" : "image/jpeg";
 
-    const capped = jobs.slice(0, MAX_LISTING_IMAGES);
-    const skipped = jobs.length - capped.length;
+    // Final upload order across rendered jobs and user-uploaded photos.
+    // Explicit `imageOrder` wins when the client sent one (drag-reordered
+    // grid); otherwise every job in order, then every own image in order.
+    const sanitizedOrder = sanitizeImageOrder(payload.imageOrder, jobs.length, ownImages.length);
+    const order: ImageOrderEntry[] =
+      sanitizedOrder.length > 0
+        ? sanitizedOrder
+        : [
+            ...jobs.map((_, i) => ({ kind: "job" as const, index: i })),
+            ...ownImages.map((_, i) => ({ kind: "own" as const, index: i })),
+          ];
+    const capped = order.slice(0, MAX_LISTING_IMAGES);
+    const skipped = order.length - capped.length;
 
     let shopId: number;
     let targetListingId = publish.listingId;
@@ -679,9 +757,10 @@ export async function POST(request: Request) {
     }
 
     // The listing (existing, copied, or freshly drafted) now exists — upload
-    // the video the same way as the rendered images below. A failure here
+    // each video the same way as the rendered images below. A failure here
     // doesn't block image upload; it's reported alongside any other failure.
-    if (videoFile) {
+    for (let i = 0; i < videoFiles.length; i++) {
+      const videoFile = videoFiles[i];
       try {
         await uploadListingVideo({
           shopId,
@@ -691,52 +770,96 @@ export async function POST(request: Request) {
           contentType: videoFile.type || "application/octet-stream",
         });
       } catch (err) {
-        failed.push({ name: "Video", error: err instanceof Error ? err.message : "could not be uploaded" });
+        failed.push({
+          name: videoFiles.length > 1 ? `Video ${i + 1}` : "Video",
+          error: err instanceof Error ? err.message : "could not be uploaded",
+        });
       }
     }
 
-    // Render all in parallel on the pool; upload sequentially so Etsy ranks
-    // stay contiguous (rank N needs N-1 images already present).
-    const rendered = await Promise.all(capped.map((j) => pool.run(buildInput(j))));
+    // Render every job the final order references, in parallel on the pool
+    // (own images need no rendering). Upload sequentially, in order, so Etsy
+    // ranks stay contiguous — rank is assigned by successful-upload count, so
+    // one failure never leaves a gap for the ones that follow it.
+    const jobIndexesToRender = [
+      ...new Set(capped.filter((e) => e.kind === "job").map((e) => e.index)),
+    ];
+    const renderedByJobIndex = new Map(
+      await Promise.all(
+        jobIndexesToRender.map(
+          async (idx) => [idx, await pool.run(buildInput(jobs[idx]))] as const,
+        ),
+      ),
+    );
+    const ownBufs = await Promise.all(ownImageFiles.map((f) => f.arrayBuffer()));
 
     const uploaded: {
       name: string;
       rank: number;
       listingImageId: number;
       url: string | null;
-      jobIndex: number;
+      jobIndex?: number;
     }[] = [];
 
-    for (let i = 0; i < capped.length; i++) {
-      const j = capped[i];
-      const res = rendered[i];
-      if (!res.ok) {
-        failed.push({ name: label(j), error: res.error });
-        continue;
-      }
-      try {
-        const img = await uploadListingImage({
-          shopId,
-          listingId: targetListingId,
-          bytes: new Uint8Array(res.bytes),
-          filename: uniqueName(baseName(j), res.ext),
-          contentType,
-          rank: startRank + i,
-          overwrite,
-          altText: publish.altText,
-        });
-        uploaded.push({
-          name: label(j),
-          rank: img.rank,
-          listingImageId: img.listingImageId,
-          url: img.url,
-          jobIndex: i,
-        });
-      } catch (err) {
-        failed.push({
-          name: label(j),
-          error: err instanceof Error ? err.message : "upload failed",
-        });
+    for (const entry of capped) {
+      if (entry.kind === "job") {
+        const j = jobs[entry.index];
+        const res = renderedByJobIndex.get(entry.index);
+        if (!res || !res.ok) {
+          failed.push({ name: label(j), error: res ? res.error : "render failed" });
+          continue;
+        }
+        try {
+          const img = await uploadListingImage({
+            shopId,
+            listingId: targetListingId,
+            bytes: new Uint8Array(res.bytes),
+            filename: uniqueName(baseName(j), res.ext),
+            contentType,
+            rank: startRank + uploaded.length,
+            overwrite,
+            altText: j.altText,
+          });
+          uploaded.push({
+            name: label(j),
+            rank: img.rank,
+            listingImageId: img.listingImageId,
+            url: img.url,
+            jobIndex: entry.index,
+          });
+        } catch (err) {
+          failed.push({
+            name: label(j),
+            error: err instanceof Error ? err.message : "upload failed",
+          });
+        }
+      } else {
+        const file = ownImageFiles[entry.index];
+        const spec = ownImages[entry.index];
+        const name = spec?.name?.trim() || file.name || `photo-${entry.index + 1}`;
+        try {
+          const img = await uploadListingImage({
+            shopId,
+            listingId: targetListingId,
+            bytes: new Uint8Array(ownBufs[entry.index]),
+            filename: uniqueName(sanitize(name), extOf(file.name)),
+            contentType: file.type || "image/jpeg",
+            rank: startRank + uploaded.length,
+            overwrite,
+            altText: spec?.altText,
+          });
+          uploaded.push({
+            name,
+            rank: img.rank,
+            listingImageId: img.listingImageId,
+            url: img.url,
+          });
+        } catch (err) {
+          failed.push({
+            name,
+            error: err instanceof Error ? err.message : "upload failed",
+          });
+        }
       }
     }
 

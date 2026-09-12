@@ -1,12 +1,14 @@
 /**
  * Etsy's own listing-video requirements (help.etsy.com/hc/en-us/articles/
  * 360053206073-How-to-Add-Listing-Videos, confirmed against the live page):
- * most common formats, max 100 MB, 3-15 seconds long, no audio (Etsy strips
- * it on upload). Checked client-side before upload so a bad file never
- * reaches Etsy's API; the server re-checks format/size as a defense-in-depth
- * measure since duration can't be read without decoding the file.
+ * up to 2 videos per listing, most common formats, max 100 MB each, 3-15
+ * seconds long, no audio (Etsy strips it on upload). Checked client-side
+ * before upload so a bad file never reaches Etsy's API; the server re-checks
+ * format/size as a defense-in-depth measure since duration can't be read
+ * without decoding the file.
  */
 
+export const MAX_LISTING_VIDEOS = 2;
 export const MAX_VIDEO_SIZE_BYTES = 100 * 1024 * 1024;
 export const MIN_VIDEO_DURATION_SECONDS = 3;
 export const MAX_VIDEO_DURATION_SECONDS = 15;

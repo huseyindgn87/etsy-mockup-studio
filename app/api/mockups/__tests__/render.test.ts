@@ -26,6 +26,8 @@ const uploadCalls: {
   contentType: string;
   listingId: number;
   overwrite?: boolean;
+  altText?: string;
+  filename?: string;
 }[] = [];
 vi.mock("@/lib/etsy/listing-images", () => ({
   uploadListingImage: vi.fn(
@@ -34,12 +36,16 @@ vi.mock("@/lib/etsy/listing-images", () => ({
       contentType: string;
       listingId: number;
       overwrite?: boolean;
+      altText?: string;
+      filename?: string;
     }) => {
       uploadCalls.push({
         rank: p.rank,
         contentType: p.contentType,
         listingId: p.listingId,
         overwrite: p.overwrite,
+        altText: p.altText,
+        filename: p.filename,
       });
       return { listingImageId: 9000 + (p.rank ?? 0), rank: p.rank ?? 1, url: null };
     },
@@ -294,6 +300,185 @@ describe("POST /api/mockups/render", () => {
     expect(uploadCalls.every((c) => c.contentType === "image/jpeg")).toBe(true);
     // never replaces images unless explicitly asked
     expect(uploadCalls.every((c) => c.overwrite === false)).toBe(true);
+  }, 30_000);
+
+  test("publishTo sends each job's own altText, not a shared value", async () => {
+    uploadCalls.length = 0;
+    const mock = await png(120, 100, [90, 100, 110]);
+    const design = await png(50, 50, [10, 200, 10]);
+
+    const res = await POST(
+      form(
+        {
+          publishTo: { listingId: 777 },
+          mockups: [{ name: "tee", width: 120, height: 100, calibration: {} }],
+          designs: [{ name: "a" }, { name: "b" }],
+          jobs: [
+            { mockup: 0, design: 0, altText: "Front view on a hanger" },
+            { mockup: 0, design: 1 },
+          ],
+        },
+        [
+          { field: "mockup", buf: mock, name: "m.png" },
+          { field: "design", buf: design, name: "a.png" },
+          { field: "design", buf: design, name: "b.png" },
+        ],
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { uploaded: unknown[] };
+    expect(body.uploaded).toHaveLength(2);
+    expect(uploadCalls.map((c) => c.altText)).toEqual(["Front view on a hanger", undefined]);
+  }, 30_000);
+
+  test("publishTo uploads ownImage files as-is, with their own altText", async () => {
+    uploadCalls.length = 0;
+    const mock = await png(120, 100, [90, 100, 110]);
+    const design = await png(50, 50, [10, 200, 10]);
+    const own = Buffer.from("not a real jpeg, just bytes");
+
+    const res = await POST(
+      form(
+        {
+          publishTo: { listingId: 777 },
+          mockups: [{ name: "tee", width: 120, height: 100, calibration: {} }],
+          designs: [{ name: "a" }],
+          jobs: [{ mockup: 0, design: 0 }],
+          ownImages: [{ name: "studio-shot", altText: "Studio photo on a model" }],
+        },
+        [
+          { field: "mockup", buf: mock, name: "m.png" },
+          { field: "design", buf: design, name: "a.png" },
+          { field: "ownImage", buf: own, name: "studio.jpg", type: "image/jpeg" },
+        ],
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { uploaded: { name: string; rank: number }[] };
+    expect(body.uploaded).toHaveLength(2);
+    // default order: rendered jobs first, then own images
+    expect(body.uploaded.map((u) => u.name)).toEqual(["a -> tee", "studio-shot"]);
+    expect(uploadCalls.map((c) => c.altText)).toEqual([undefined, "Studio photo on a model"]);
+    expect(uploadCalls.map((c) => c.rank)).toEqual([1, 2]);
+  }, 30_000);
+
+  test("publishTo honors an explicit imageOrder, interleaving own images before rendered ones", async () => {
+    uploadCalls.length = 0;
+    const mock = await png(120, 100, [90, 100, 110]);
+    const design = await png(50, 50, [10, 200, 10]);
+    const own = Buffer.from("not a real jpeg, just bytes");
+
+    const res = await POST(
+      form(
+        {
+          publishTo: { listingId: 777 },
+          mockups: [{ name: "tee", width: 120, height: 100, calibration: {} }],
+          designs: [{ name: "a" }],
+          jobs: [{ mockup: 0, design: 0, altText: "Rendered mockup" }],
+          ownImages: [{ altText: "Own photo" }],
+          imageOrder: [
+            { kind: "own", index: 0 },
+            { kind: "job", index: 0 },
+          ],
+        },
+        [
+          { field: "mockup", buf: mock, name: "m.png" },
+          { field: "design", buf: design, name: "a.png" },
+          { field: "ownImage", buf: own, name: "own.jpg", type: "image/jpeg" },
+        ],
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { uploaded: { name: string; rank: number }[] };
+    expect(body.uploaded.map((u) => u.rank)).toEqual([1, 2]);
+    expect(uploadCalls.map((c) => c.altText)).toEqual(["Own photo", "Rendered mockup"]);
+  }, 30_000);
+
+  test("publishTo works with only ownImages and no mockups", async () => {
+    uploadCalls.length = 0;
+    const own = Buffer.from("not a real jpeg, just bytes");
+
+    const res = await POST(
+      form(
+        {
+          publishTo: { listingId: 777 },
+          mockups: [],
+          designs: [],
+          jobs: [],
+          ownImages: [{ altText: "Just my own photo" }],
+        },
+        [{ field: "ownImage", buf: own, name: "own.jpg", type: "image/jpeg" }],
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { uploaded: unknown[]; failed: unknown[] };
+    expect(body.failed).toEqual([]);
+    expect(body.uploaded).toHaveLength(1);
+    expect(uploadCalls[0].altText).toBe("Just my own photo");
+  }, 30_000);
+
+  test("publishTo uploads up to two videos, each independently", async () => {
+    uploadCalls.length = 0;
+    videoCalls.length = 0;
+    videoShouldFail = false;
+    const mock = await png(120, 100, [90, 100, 110]);
+    const design = await png(50, 50, [10, 200, 10]);
+    const clipA = Buffer.from("not a real video, just bytes A");
+    const clipB = Buffer.from("not a real video, just bytes B");
+
+    const res = await POST(
+      form(
+        {
+          publishTo: { listingId: 777 },
+          mockups: [{ name: "tee", width: 120, height: 100, calibration: {} }],
+          designs: [{ name: "a" }],
+          jobs: [{ mockup: 0, design: 0 }],
+        },
+        [
+          { field: "mockup", buf: mock, name: "m.png" },
+          { field: "design", buf: design, name: "a.png" },
+          { field: "video", buf: clipA, name: "one.mp4", type: "video/mp4" },
+          { field: "video", buf: clipB, name: "two.mp4", type: "video/mp4" },
+        ],
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { failed: unknown[] };
+    expect(body.failed).toEqual([]);
+    expect(videoCalls.map((c) => c.filename)).toEqual(["one.mp4", "two.mp4"]);
+  }, 30_000);
+
+  test("publishTo caps videos at two even when three are sent", async () => {
+    uploadCalls.length = 0;
+    videoCalls.length = 0;
+    videoShouldFail = false;
+    const mock = await png(80, 80, [0, 0, 0]);
+    const clip = Buffer.from("not a real video, just bytes");
+
+    const res = await POST(
+      form(
+        {
+          publishTo: { listingId: 777 },
+          mockups: [{ name: "tee", calibration: {} }],
+          designs: [],
+          jobs: [{ mockup: 0 }],
+        },
+        [
+          { field: "mockup", buf: mock, name: "m.png" },
+          { field: "video", buf: clip, name: "one.mp4", type: "video/mp4" },
+          { field: "video", buf: clip, name: "two.mp4", type: "video/mp4" },
+          { field: "video", buf: clip, name: "three.mp4", type: "video/mp4" },
+        ],
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    expect(videoCalls).toHaveLength(2);
   }, 30_000);
 
   test("publishTo with a video uploads it once the listing exists, alongside the images", async () => {

@@ -5,8 +5,9 @@ import { EtsyApiError } from "@/lib/etsy/listings";
  * Upload a video to an Etsy listing (API v3).
  *
  * `POST /v3/application/shops/{shop_id}/listings/{listing_id}/videos` —
- * multipart/form-data, `listings_w` scope. Etsy allows up to 2 videos per
- * listing; this app only ever sends one.
+ * multipart/form-data, `listings_w` scope. Etsy allows up to
+ * `MAX_LISTING_VIDEOS` videos per listing (see `video-limits.ts`); callers
+ * upload each one with its own call.
  */
 
 export interface UploadedListingVideo {

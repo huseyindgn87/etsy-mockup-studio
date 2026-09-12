@@ -1,13 +1,15 @@
 import { etsyFetch } from "@/lib/etsy/auth";
 import { EtsyApiError } from "@/lib/etsy/listings";
+import { MAX_ALT_TEXT_LENGTH } from "@/lib/etsy/listing-image-limits";
 
 /**
  * Upload a rendered image to an Etsy listing (API v3).
  *
  * `POST /v3/application/shops/{shop_id}/listings/{listing_id}/images` —
- * multipart/form-data, `listings_w` scope. Etsy allows at most 10 images per
- * listing; `rank` must stay within `current_count + 1`, so callers upload
- * sequentially from rank 1.
+ * multipart/form-data, `listings_w` scope. Etsy allows at most
+ * `MAX_LISTING_IMAGES` images per listing (see `listing-image-limits.ts`);
+ * `rank` must stay within `current_count + 1`, so callers upload sequentially
+ * from rank 1.
  */
 
 export interface UploadedListingImage {
@@ -42,7 +44,7 @@ export async function uploadListingImage(params: {
   );
   if (params.rank != null) form.append("rank", String(Math.trunc(params.rank)));
   if (params.overwrite) form.append("overwrite", "true");
-  if (params.altText) form.append("alt_text", params.altText.slice(0, 500));
+  if (params.altText) form.append("alt_text", params.altText.slice(0, MAX_ALT_TEXT_LENGTH));
 
   const res = await etsyFetch(
     `/shops/${params.shopId}/listings/${params.listingId}/images`,
