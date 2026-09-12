@@ -3,8 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   MAX_OPTIONS_PER_VARIATION,
-  MAX_PRICED_ROWS,
-  MAX_VARIATION_COMBINATIONS,
+  MAX_VARIATIONS,
+  maxCombinationsFor,
 } from "@/lib/etsy/variation-limits";
 
 /** The shape this form edits — read by the page when publishing `mode: "new"`. */
@@ -15,8 +15,8 @@ export interface ListingFormProperty {
   scaleId?: number | null;
 }
 
-/** Etsy's two reserved "Custom Variation" property slots — no taxonomy entry, user-named. */
-const CUSTOM_PROPERTY_IDS = [513, 514] as const;
+/** Etsy's three reserved "Custom Variation" property slots — no taxonomy entry, user-named. */
+const CUSTOM_PROPERTY_IDS = [513, 514, 516] as const;
 
 /** One variation dimension (colour, size, or a user-typed custom one). */
 export interface ListingFormVariation {
@@ -75,7 +75,7 @@ export interface ListingFormValue {
   sku: string;
   /** Etsy's processing-profile id — required on every physical listing. */
   readinessStateId: number | null;
-  /** Up to 2, in display order (first/second). */
+  /** Up to 3, in display order. */
   variations: ListingFormVariation[];
   variationToggles: Record<VariationToggleKey, VariationToggleState>;
   /**
@@ -116,8 +116,6 @@ export const EMPTY_LISTING_FORM: ListingFormValue = {
 const MAX_TAGS = 13;
 const MAX_TAG_LENGTH = 20;
 const MAX_TITLE_LENGTH = 140;
-/** Etsy itself caps a listing at 2 variations. */
-const MAX_VARIATIONS = 2;
 
 interface TaxonomyNode {
   id: number;
@@ -130,6 +128,10 @@ interface FlatTaxonomyNode {
   id: number;
   path: string;
 }
+interface TaxonomyPropertyScale {
+  scaleId: number;
+  displayName: string;
+}
 interface TaxonomyProperty {
   propertyId: number;
   name: string;
@@ -141,7 +143,9 @@ interface TaxonomyProperty {
   supportsAttributes: boolean;
   /** Usable as an inventory variation (the Variations section). */
   supportsVariations: boolean;
-  possibleValues: { valueId: number | null; name: string }[];
+  /** Alternate unit systems for this property's values (e.g. US/UK/EU sizing) — empty when it has none. */
+  scales: TaxonomyPropertyScale[];
+  possibleValues: { valueId: number | null; name: string; scaleId: number | null }[];
 }
 interface ShopSectionOption {
   shopSectionId: number;
@@ -681,8 +685,7 @@ const MAX_PROPERTY_ROWS = 50;
  * 500+-option one look identical: fixed-height scrolling list, a search box
  * above it, checkboxes for the options, a summary line below. Single-select
  * properties still use a checkbox (not a radio) for visual consistency, but
- * checking one clears any other selection for that property. Also reused
- * (always in multi-select form) by the Variations editor below.
+ * checking one clears any other selection for that property.
  */
 function PropertyPicker({
   property,
@@ -758,11 +761,14 @@ function PropertyPicker({
 }
 
 // ---------------------------------------------------------------------------
-// Variations — modelled on Etsy's own "Manage variations" screen, but on one
-// screen (no stacked modals): a card list (name, option chips, edit/delete),
-// an inline add/edit panel (Etsy property vs. hand-typed custom), four
-// on/off fields ("varies by" first/second/both), a live combination count,
-// and — on "Apply" — a table with only the enabled columns, bulk-fillable.
+// Variations — mirrors Etsy's own "Manage variations" modal: an empty state,
+// a property picker (an Etsy taxonomy property or "Create your own"), a
+// value picker (a scale selector when the property has one, predefined
+// values as checkboxes, plus free-text additions), a variation list with
+// per-field bindings, and — on "Apply" — the combination grid with per-row
+// visibility and bulk actions. Only a one-line summary shows on the main
+// form; everything else lives in the modal, and edits only take effect on
+// "Save" (a local draft copy, discarded on "Cancel").
 // ---------------------------------------------------------------------------
 
 interface VariationCombo {
@@ -793,7 +799,7 @@ function fullComboKey(combo: VariationCombo): string {
   return combo.valueIds.join(":");
 }
 
-/** 513 for the first custom variation added, 514 for the second. */
+/** 513/514 for the first two custom variations, 516 for a third. */
 function nextCustomPropertyId(variations: ListingFormVariation[], editingIndex: number | null): number {
   const used = new Set(
     variations.filter((_, i) => i !== editingIndex).filter((v) => v.isCustom).map((v) => v.propertyId),
@@ -806,6 +812,21 @@ function reindexAppliesTo(appliesTo: number[], removedIndex: number): number[] {
   return appliesTo.filter((i) => i !== removedIndex).map((i) => (i > removedIndex ? i - 1 : i));
 }
 
+/** The total option-combination count for a set of variations (0 when there are none). */
+function totalCombinationsFor(variations: ListingFormVariation[]): number {
+  if (variations.length === 0) return 0;
+  return variations.reduce((acc, v) => acc * Math.max(v.valueIds.length, 1), 1);
+}
+
+/** The four variation-related fields, edited together as one local draft while the modal is open. */
+interface VariationsDraft {
+  variations: ListingFormVariation[];
+  variationToggles: Record<VariationToggleKey, VariationToggleState>;
+  variationRows: Record<VariationToggleKey, Record<string, string>>;
+  variationRowEnabled: Record<string, boolean>;
+}
+
+/** Summary shown on the main form — everything else lives in the "Manage variations" modal. */
 function VariationsSection({
   variationProperties,
   value,
@@ -817,99 +838,206 @@ function VariationsSection({
   patch: (partial: Partial<ListingFormValue>) => void;
   sectionHeadingCls: string;
 }) {
-  const [editorOpen, setEditorOpen] = useState(false);
+  const [modalOpen, setModalOpen] = useState(false);
+  const totalCombinations = totalCombinationsFor(value.variations);
+
+  return (
+    <section className="space-y-3">
+      <h3 className={sectionHeadingCls}>Variations</h3>
+      <p className="text-sm text-zinc-600 dark:text-zinc-400">
+        {value.variations.length === 0
+          ? "No variations yet."
+          : `${value.variations.length} variation${value.variations.length > 1 ? "s" : ""}, ${totalCombinations} combinations.`}
+      </p>
+      <button
+        type="button"
+        onClick={() => setModalOpen(true)}
+        className="h-9 rounded-lg border border-dashed border-black/20 px-3 text-sm text-zinc-600 hover:bg-black/[.04] dark:border-white/25 dark:text-zinc-300 dark:hover:bg-white/[.06]"
+      >
+        Manage variations
+      </button>
+
+      {modalOpen && (
+        <VariationsModal
+          initial={{
+            variations: value.variations,
+            variationToggles: value.variationToggles,
+            variationRows: value.variationRows,
+            variationRowEnabled: value.variationRowEnabled,
+          }}
+          variationProperties={variationProperties}
+          basePrice={value.price}
+          baseQuantity={value.quantity}
+          onCancel={() => setModalOpen(false)}
+          onSave={(draft) => {
+            patch(draft);
+            setModalOpen(false);
+          }}
+        />
+      )}
+    </section>
+  );
+}
+
+interface VariationDraft {
+  source: "etsy" | "custom";
+  /** Etsy source only. */
+  propertyId: number | null;
+  /** Etsy source only, when the property has scales (e.g. shoe sizing US/UK/EU). */
+  scaleId: number | null;
+  name: string;
+  valueIds: number[];
+  values: string[];
+}
+const EMPTY_VARIATION_DRAFT: VariationDraft = {
+  source: "etsy",
+  propertyId: null,
+  scaleId: null,
+  name: "",
+  valueIds: [],
+  values: [],
+};
+
+type ModalStep =
+  | { kind: "list" }
+  | { kind: "pickProperty" }
+  | { kind: "pickValues"; property: TaxonomyProperty }
+  | { kind: "custom" };
+
+/**
+ * "Manage variations" — the modal itself. Operates on a local draft copy of
+ * the four variation-related form fields; nothing reaches the shared
+ * `ListingFormValue` until "Save". "Cancel" discards the draft.
+ */
+function VariationsModal({
+  initial,
+  variationProperties,
+  basePrice,
+  baseQuantity,
+  onCancel,
+  onSave,
+}: {
+  initial: VariationsDraft;
+  variationProperties: TaxonomyProperty[];
+  basePrice: string;
+  baseQuantity: string;
+  onCancel: () => void;
+  onSave: (draft: VariationsDraft) => void;
+}) {
+  const [draft, setDraft] = useState<VariationsDraft>(initial);
+  const [step, setStep] = useState<ModalStep>({ kind: "list" });
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
-  const [draft, setDraft] = useState<VariationDraft>(EMPTY_DRAFT);
+  const [variationDraft, setVariationDraft] = useState<VariationDraft>(EMPTY_VARIATION_DRAFT);
   const [applied, setApplied] = useState(false);
 
-  function openAdd() {
+  function patchDraft(partial: Partial<VariationsDraft>) {
+    setDraft((d) => ({ ...d, ...partial }));
+  }
+
+  function openAddFlow() {
     setEditingIndex(null);
-    setDraft(EMPTY_DRAFT);
-    setEditorOpen(true);
+    setVariationDraft(EMPTY_VARIATION_DRAFT);
+    setStep({ kind: "pickProperty" });
   }
-  function openEdit(i: number) {
-    const v = value.variations[i];
+  function openEditFlow(i: number) {
+    const v = draft.variations[i];
     setEditingIndex(i);
-    setDraft({
-      source: v.isCustom ? "custom" : "etsy",
-      propertyId: v.isCustom ? null : v.propertyId,
-      name: v.name,
-      valueIds: v.valueIds,
-      values: v.values,
-    });
-    setEditorOpen(true);
+    if (v.isCustom) {
+      setVariationDraft({ source: "custom", propertyId: null, scaleId: null, name: v.name, valueIds: v.valueIds, values: v.values });
+      setStep({ kind: "custom" });
+    } else {
+      const property = variationProperties.find((p) => p.propertyId === v.propertyId);
+      setVariationDraft({ source: "etsy", propertyId: v.propertyId, scaleId: null, name: v.name, valueIds: v.valueIds, values: v.values });
+      // Falls back to the "Create your own" step if the property vanished (e.g. the category changed) —
+      // the values already picked are preserved either way.
+      setStep(property ? { kind: "pickValues", property } : { kind: "custom" });
+    }
   }
-  function closeEditor() {
-    setEditorOpen(false);
+  function pickProperty(p: TaxonomyProperty) {
+    setVariationDraft({
+      source: "etsy",
+      propertyId: p.propertyId,
+      scaleId: p.scales[0]?.scaleId ?? null,
+      name: p.displayName,
+      valueIds: [],
+      values: [],
+    });
+    setStep({ kind: "pickValues", property: p });
+  }
+  function pickCustom() {
+    setVariationDraft({ ...EMPTY_VARIATION_DRAFT, source: "custom" });
+    setStep({ kind: "custom" });
+  }
+  function cancelValueStep() {
+    setStep({ kind: "list" });
     setEditingIndex(null);
   }
 
-  function commitEditor() {
+  function commitVariation() {
     const variation: ListingFormVariation =
-      draft.source === "etsy"
+      variationDraft.source === "etsy"
         ? {
-            propertyId: draft.propertyId as number,
-            name: draft.name,
+            propertyId: variationDraft.propertyId as number,
+            name: variationDraft.name,
             isCustom: false,
-            valueIds: draft.valueIds,
-            values: draft.values,
+            valueIds: variationDraft.valueIds,
+            values: variationDraft.values,
           }
         : {
-            propertyId: nextCustomPropertyId(value.variations, editingIndex),
-            name: draft.name.trim(),
+            propertyId: nextCustomPropertyId(draft.variations, editingIndex),
+            name: variationDraft.name.trim(),
             isCustom: true,
-            valueIds: draft.values.map((_, i) => i + 1),
-            values: draft.values,
+            valueIds: variationDraft.values.map((_, i) => i + 1),
+            values: variationDraft.values,
           };
-    const nextVariations = [...value.variations];
+    const nextVariations = [...draft.variations];
     if (editingIndex != null) nextVariations[editingIndex] = variation;
     else nextVariations.push(variation);
-    patch({ variations: nextVariations });
+    patchDraft({ variations: nextVariations });
     setApplied(false);
-    closeEditor();
+    setStep({ kind: "list" });
+    setEditingIndex(null);
   }
 
   function removeVariation(i: number) {
-    const nextVariations = value.variations.filter((_, idx) => idx !== i);
-    const nextToggles = { ...value.variationToggles };
+    const nextVariations = draft.variations.filter((_, idx) => idx !== i);
+    const nextToggles = { ...draft.variationToggles };
     for (const key of Object.keys(nextToggles) as VariationToggleKey[]) {
       const t = nextToggles[key];
       const appliesTo = reindexAppliesTo(t.appliesTo, i);
       nextToggles[key] = { enabled: t.enabled && appliesTo.length > 0, appliesTo };
     }
-    patch({ variations: nextVariations, variationToggles: nextToggles });
-    if (editingIndex === i) closeEditor();
+    patchDraft({ variations: nextVariations, variationToggles: nextToggles });
     setApplied(false);
   }
 
   // Analytical counts — cheap even when the real combinations count is too
   // large to materialize, so the limit checks below never need the full grid.
-  const oversizedVariation = value.variations.find((v) => v.values.length > MAX_OPTIONS_PER_VARIATION) ?? null;
-  const totalCombinations =
-    value.variations.length === 0
-      ? 0
-      : value.variations.reduce((acc, v) => acc * Math.max(v.valueIds.length, 1), 1);
-  const distinctCountFor = (appliesTo: number[]): number =>
-    appliesTo.reduce((acc, i) => acc * Math.max(value.variations[i]?.valueIds.length ?? 1, 1), 1);
-  const pricedRows = Math.max(
-    1,
-    ...(["price", "quantity", "sku"] as const)
-      .filter((k) => value.variationToggles[k].enabled)
-      .map((k) => distinctCountFor(value.variationToggles[k].appliesTo)),
-  );
+  const oversizedVariation = draft.variations.find((v) => v.values.length > MAX_OPTIONS_PER_VARIATION) ?? null;
+  const totalCombinations = totalCombinationsFor(draft.variations);
+  // Etsy drops the usual combination cap to 400 the moment ANY *_on_property
+  // field (price/quantity/SKU/processing-profile) is bound to every
+  // configured variation type.
+  const anyFieldBoundToAllVariations = (["price", "quantity", "sku", "readiness"] as const).some((k) => {
+    const t = draft.variationToggles[k];
+    return t.enabled && draft.variations.length > 0 && new Set(t.appliesTo).size >= draft.variations.length;
+  });
+  const combinationsCap = maxCombinationsFor(draft.variations.length, anyFieldBoundToAllVariations);
 
   const violation: string | null = oversizedVariation
     ? `"${oversizedVariation.name}" has ${oversizedVariation.values.length} options — Etsy allows at most ${MAX_OPTIONS_PER_VARIATION} per variation type.`
-    : totalCombinations > MAX_VARIATION_COMBINATIONS
-      ? `${totalCombinations} combinations exceeds Etsy's limit of ${MAX_VARIATION_COMBINATIONS} per listing.`
-      : pricedRows > MAX_PRICED_ROWS
-        ? `${pricedRows} priced rows exceeds Etsy's limit of ${MAX_PRICED_ROWS} unique price/SKU/quantity values.`
-        : null;
+    : totalCombinations > combinationsCap
+      ? `${totalCombinations} combinations exceeds Etsy's limit of ${combinationsCap}${
+          anyFieldBoundToAllVariations
+            ? " (a price/quantity/SKU/processing-profile field varies by every option, which drops the limit to 400)"
+            : ""
+        }.`
+      : null;
 
   const combos = useMemo<VariationCombo[]>(() => {
-    if (value.variations.length === 0 || violation) return [];
+    if (draft.variations.length === 0 || violation) return [];
     let acc: VariationCombo[] = [{ valueIds: [], values: [] }];
-    for (const v of value.variations) {
+    for (const v of draft.variations) {
       const next: VariationCombo[] = [];
       for (const a of acc) {
         for (let i = 0; i < v.valueIds.length; i++) {
@@ -919,156 +1047,277 @@ function VariationsSection({
       acc = next;
     }
     return acc;
-  }, [value.variations, violation]);
+  }, [draft.variations, violation]);
 
   function setToggle(key: VariationToggleKey, partial: Partial<VariationToggleState>) {
-    patch({
-      variationToggles: { ...value.variationToggles, [key]: { ...value.variationToggles[key], ...partial } },
+    patchDraft({
+      variationToggles: { ...draft.variationToggles, [key]: { ...draft.variationToggles[key], ...partial } },
     });
   }
   function patchCell(key: VariationToggleKey, cellKey: string, val: string) {
-    patch({
-      variationRows: { ...value.variationRows, [key]: { ...value.variationRows[key], [cellKey]: val } },
+    patchDraft({
+      variationRows: { ...draft.variationRows, [key]: { ...draft.variationRows[key], [cellKey]: val } },
     });
   }
   function applyBulkFill(key: VariationToggleKey, val: string) {
     if (!val.trim()) return;
-    const keys = new Set(combos.map((c) => comboKeyFor(value.variationToggles[key].appliesTo, c)));
-    const nextCol = { ...value.variationRows[key] };
+    const keys = new Set(combos.map((c) => comboKeyFor(draft.variationToggles[key].appliesTo, c)));
+    const nextCol = { ...draft.variationRows[key] };
     for (const k of keys) nextCol[k] = val;
-    patch({ variationRows: { ...value.variationRows, [key]: nextCol } });
+    patchDraft({ variationRows: { ...draft.variationRows, [key]: nextCol } });
   }
-
-  const disabledCount = combos.filter((c) => value.variationRowEnabled[fullComboKey(c)] === false).length;
-
   function setRowsEnabled(keys: string[], enabled: boolean) {
-    const next = { ...value.variationRowEnabled };
+    const next = { ...draft.variationRowEnabled };
     for (const k of keys) {
       if (enabled) delete next[k];
       else next[k] = false;
     }
-    patch({ variationRowEnabled: next });
+    patchDraft({ variationRowEnabled: next });
   }
+  const disabledCount = combos.filter((c) => draft.variationRowEnabled[fullComboKey(c)] === false).length;
 
-  const usedPropertyIds = value.variations.filter((_, i) => i !== editingIndex).map((v) => v.propertyId);
+  const usedPropertyIds = draft.variations.filter((_, i) => i !== editingIndex).map((v) => v.propertyId);
 
   return (
-    <section className="space-y-3">
-      <h3 className={sectionHeadingCls}>Variations</h3>
-
-      {!editorOpen && value.variations.length < MAX_VARIATIONS && (
-        <button
-          type="button"
-          onClick={openAdd}
-          className="h-9 rounded-lg border border-dashed border-black/20 px-3 text-sm text-zinc-600 hover:bg-black/[.04] dark:border-white/25 dark:text-zinc-300 dark:hover:bg-white/[.06]"
-        >
-          Manage variations
-        </button>
-      )}
-
-      {value.variations.length > 0 && (
-        <div className="space-y-2">
-          {value.variations.map((v, i) => (
-            <VariationCard key={i} variation={v} onEdit={() => openEdit(i)} onDelete={() => removeVariation(i)} />
-          ))}
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Manage variations"
+        className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-xl border border-black/10 bg-white shadow-xl dark:border-white/15 dark:bg-zinc-950"
+      >
+        <div className="border-b border-black/10 px-4 py-3 dark:border-white/15">
+          <h3 className="text-base font-bold text-zinc-900 dark:text-zinc-50">Manage variations</h3>
         </div>
-      )}
 
-      {editorOpen && (
-        <VariationEditorPanel
-          draft={draft}
-          setDraft={setDraft}
-          isEditing={editingIndex != null}
-          variationProperties={variationProperties.filter((p) => !usedPropertyIds.includes(p.propertyId))}
-          onCancel={closeEditor}
-          onCommit={commitEditor}
-        />
-      )}
+        <div className="flex-1 overflow-y-auto p-4">
+          {/* ---- STEP 1: empty state ---- */}
+          {step.kind === "list" && draft.variations.length === 0 && (
+            <div className="flex items-center justify-center py-10">
+              <button
+                type="button"
+                onClick={openAddFlow}
+                className="h-9 rounded-lg bg-[#f56400] px-4 text-sm font-medium text-white hover:bg-[#d95700]"
+              >
+                Add variation
+              </button>
+            </div>
+          )}
 
-      {value.variations.length > 0 && (
-        <div className="mt-4 space-y-2 rounded-lg border border-black/10 p-3 dark:border-white/15">
-          {VARIATION_TOGGLES.map(({ key, label }) => {
-            const t = value.variationToggles[key];
-            return (
-              <div key={key} className="flex flex-wrap items-center gap-2">
-                <label className="flex items-center gap-1.5 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={t.enabled}
-                    onChange={(e) => {
-                      const enabled = e.target.checked;
-                      setToggle(key, {
-                        enabled,
-                        appliesTo:
-                          enabled && t.appliesTo.length === 0
-                            ? value.variations.map((_, i) => i)
-                            : t.appliesTo,
-                      });
-                    }}
-                    className="accent-[#f56400]"
-                  />
-                  {label}
-                </label>
-                {t.enabled && value.variations.length > 1 && (
-                  <select
-                    value={t.appliesTo.length === 2 ? "both" : String(t.appliesTo[0] ?? 0)}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      setToggle(key, { appliesTo: v === "both" ? [0, 1] : [Number(v)] });
-                    }}
-                    className="h-7 rounded-md border border-black/10 bg-white px-1.5 text-xs outline-none dark:border-white/15 dark:bg-zinc-900"
+          {/* ---- STEP 2: property picker ---- */}
+          {step.kind === "pickProperty" && (
+            <div className="space-y-3">
+              <h4 className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+                Add up to {MAX_VARIATIONS} variations for your item
+              </h4>
+              <ul className="list-disc space-y-1 pl-5 text-xs text-zinc-500">
+                <li>Buyers can filter their search by Etsy&apos;s listed options.</li>
+                <li>Custom options are not filterable.</li>
+              </ul>
+              <ul className="max-h-72 divide-y divide-black/5 overflow-y-auto rounded-lg border border-black/10 dark:divide-white/10 dark:border-white/15">
+                {variationProperties
+                  .filter((p) => !usedPropertyIds.includes(p.propertyId))
+                  .map((p) => (
+                    <li key={p.propertyId}>
+                      <button
+                        type="button"
+                        onClick={() => pickProperty(p)}
+                        className="block w-full px-3 py-2 text-left text-sm hover:bg-black/[.04] dark:hover:bg-white/[.06]"
+                      >
+                        {p.displayName}
+                      </button>
+                    </li>
+                  ))}
+                <li>
+                  <button
+                    type="button"
+                    onClick={pickCustom}
+                    className="block w-full px-3 py-2 text-left text-sm font-medium text-[#f56400] hover:bg-black/[.04] dark:hover:bg-white/[.06]"
                   >
-                    <option value="0">{value.variations[0].name}</option>
-                    <option value="1">{value.variations[1].name}</option>
-                    <option value="both">
-                      {value.variations[0].name} and {value.variations[1].name}
-                    </option>
-                  </select>
-                )}
-                {key === "readiness" && t.enabled && (
-                  <span className="text-xs text-zinc-500">
-                    (optional Etsy processing profile ID — left blank, Etsy assigns one itself)
-                  </span>
-                )}
+                    Create your own
+                  </button>
+                </li>
+              </ul>
+              <button
+                type="button"
+                onClick={cancelValueStep}
+                className="h-8 rounded-lg border border-black/10 px-3 text-xs hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+
+          {/* ---- STEP 3a: values for a real Etsy property ---- */}
+          {step.kind === "pickValues" && (
+            <VariationValuePicker
+              property={step.property}
+              draft={variationDraft}
+              setDraft={setVariationDraft}
+              isEditing={editingIndex != null}
+              onCancel={cancelValueStep}
+              onCommit={commitVariation}
+            />
+          )}
+
+          {/* ---- STEP 3b: create your own ---- */}
+          {step.kind === "custom" && (
+            <div className="space-y-2">
+              <input
+                type="text"
+                value={variationDraft.name}
+                onChange={(e) => setVariationDraft((d) => ({ ...d, name: e.target.value }))}
+                placeholder="Variation name (e.g. Paper type)"
+                className="h-9 w-full rounded-lg border border-black/10 bg-white px-2 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
+              />
+              <CustomOptionsInput
+                values={variationDraft.values}
+                onChange={(values) => setVariationDraft((d) => ({ ...d, values }))}
+              />
+              <div className="flex gap-2 pt-1">
+                <button
+                  type="button"
+                  disabled={variationDraft.name.trim() === "" || variationDraft.values.length === 0}
+                  onClick={commitVariation}
+                  className="h-8 rounded-lg bg-[#f56400] px-3 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {editingIndex != null ? "Save" : "Add variation"}
+                </button>
+                <button
+                  type="button"
+                  onClick={cancelValueStep}
+                  className="h-8 rounded-lg border border-black/10 px-3 text-xs hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
+                >
+                  Cancel
+                </button>
               </div>
-            );
-          })}
+            </div>
+          )}
 
-          <p className={`text-xs ${totalCombinations > MAX_VARIATION_COMBINATIONS ? "font-medium text-red-600" : "text-zinc-500"}`}>
-            {totalCombinations} combinations (max {MAX_VARIATION_COMBINATIONS}).
-          </p>
-          <p className={`text-xs ${pricedRows > MAX_PRICED_ROWS ? "font-medium text-red-600" : "text-zinc-500"}`}>
-            {pricedRows} priced rows (max {MAX_PRICED_ROWS}).
-          </p>
-          <p className="text-xs text-zinc-500">{disabledCount} rows disabled.</p>
-          {violation && <p className="text-xs font-medium text-red-600">{violation}</p>}
+          {/* ---- STEP 4 + 5: variation list, bindings, and the combination grid ---- */}
+          {step.kind === "list" && draft.variations.length > 0 && (
+            <div className="space-y-4">
+              <div className="space-y-2">
+                {draft.variations.map((v, i) => (
+                  <VariationCard key={i} variation={v} onEdit={() => openEditFlow(i)} onDelete={() => removeVariation(i)} />
+                ))}
+              </div>
 
+              {draft.variations.length < MAX_VARIATIONS && (
+                <button
+                  type="button"
+                  onClick={openAddFlow}
+                  className="h-9 rounded-lg border border-dashed border-black/20 px-3 text-sm text-zinc-600 hover:bg-black/[.04] dark:border-white/25 dark:text-zinc-300 dark:hover:bg-white/[.06]"
+                >
+                  Add variation
+                </button>
+              )}
+
+              <div className="space-y-2 rounded-lg border border-black/10 p-3 dark:border-white/15">
+                {VARIATION_TOGGLES.map(({ key, label }) => {
+                  const t = draft.variationToggles[key];
+                  return (
+                    <div key={key} className="flex flex-wrap items-center gap-2">
+                      <label className="flex items-center gap-1.5 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={t.enabled}
+                          onChange={(e) => {
+                            const enabled = e.target.checked;
+                            setToggle(key, {
+                              enabled,
+                              appliesTo:
+                                enabled && t.appliesTo.length === 0
+                                  ? draft.variations.map((_, i) => i)
+                                  : t.appliesTo,
+                            });
+                          }}
+                          className="accent-[#f56400]"
+                        />
+                        {label}
+                      </label>
+                      {t.enabled && draft.variations.length > 1 && (
+                        <div className="flex flex-wrap items-center gap-2">
+                          {draft.variations.map((v, i) => (
+                            <label key={i} className="flex items-center gap-1 text-xs text-zinc-600 dark:text-zinc-400">
+                              <input
+                                type="checkbox"
+                                checked={t.appliesTo.includes(i)}
+                                onChange={(e) => {
+                                  const next = e.target.checked
+                                    ? [...t.appliesTo, i]
+                                    : t.appliesTo.filter((x) => x !== i);
+                                  if (next.length > 0) setToggle(key, { appliesTo: next });
+                                }}
+                                className="accent-[#f56400]"
+                              />
+                              {v.name}
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                      {key === "readiness" && t.enabled && (
+                        <span className="text-xs text-zinc-500">
+                          (optional Etsy processing profile ID — left blank, Etsy assigns one itself)
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+
+                <p className={`text-xs ${totalCombinations > combinationsCap ? "font-medium text-red-600" : "text-zinc-500"}`}>
+                  {totalCombinations} combinations (max {combinationsCap}).
+                </p>
+                <p className="text-xs text-zinc-500">{disabledCount} rows disabled.</p>
+                {violation && <p className="text-xs font-medium text-red-600">{violation}</p>}
+
+                <button
+                  type="button"
+                  onClick={() => setApplied(true)}
+                  disabled={!!violation}
+                  className="h-8 rounded-lg bg-[#f56400] px-3 text-xs font-medium text-white hover:bg-[#d95700] disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Apply
+                </button>
+              </div>
+
+              {applied && combos.length > 0 && (
+                <VariationTable
+                  combos={combos}
+                  variations={draft.variations}
+                  toggles={draft.variationToggles}
+                  rows={draft.variationRows}
+                  patchCell={patchCell}
+                  applyBulkFill={applyBulkFill}
+                  basePrice={basePrice}
+                  baseQuantity={baseQuantity}
+                  rowEnabled={draft.variationRowEnabled}
+                  setRowsEnabled={setRowsEnabled}
+                />
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="flex justify-end gap-2 border-t border-black/10 px-4 py-3 dark:border-white/15">
           <button
             type="button"
-            onClick={() => setApplied(true)}
-            disabled={!!violation}
-            className="h-8 rounded-lg bg-[#f56400] px-3 text-xs font-medium text-white hover:bg-[#d95700] disabled:cursor-not-allowed disabled:opacity-40"
+            onClick={onCancel}
+            className="h-9 rounded-lg border border-black/10 px-4 text-sm font-medium hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
           >
-            Apply
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => onSave(draft)}
+            disabled={!!violation}
+            className="h-9 rounded-lg bg-[#f56400] px-4 text-sm font-medium text-white hover:bg-[#d95700] disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Save
           </button>
         </div>
-      )}
-
-      {applied && combos.length > 0 && (
-        <VariationTable
-          combos={combos}
-          variations={value.variations}
-          toggles={value.variationToggles}
-          rows={value.variationRows}
-          patchCell={patchCell}
-          applyBulkFill={applyBulkFill}
-          basePrice={value.price}
-          baseQuantity={value.quantity}
-          rowEnabled={value.variationRowEnabled}
-          setRowsEnabled={setRowsEnabled}
-        />
-      )}
-    </section>
+      </div>
+    </div>
   );
 }
 
@@ -1121,131 +1370,165 @@ function VariationCard({
   );
 }
 
-interface VariationDraft {
-  source: "etsy" | "custom";
-  /** Etsy source only. */
-  propertyId: number | null;
-  name: string;
-  valueIds: number[];
-  values: string[];
-}
-const EMPTY_DRAFT: VariationDraft = { source: "etsy", propertyId: null, name: "", valueIds: [], values: [] };
-
-/** Inline (not a modal) add/edit panel — Etsy source picks values from {@link PropertyPicker}; custom is hand-typed. */
-function VariationEditorPanel({
+/**
+ * STEP 3a: values for a real Etsy taxonomy property — a scale selector when
+ * the property has more than one (e.g. US/UK/EU shoe sizing), Etsy's
+ * predefined values as checkboxes (scoped to the chosen scale), and a
+ * free-text row for values Etsy doesn't list. Free-text additions get a
+ * synthetic negative id (unique, never collides with a real value id) so
+ * they can live in the same `valueIds` array; the payload builder later
+ * turns a negative id into `value_id: null` for Etsy.
+ */
+function VariationValuePicker({
+  property,
   draft,
   setDraft,
   isEditing,
-  variationProperties,
   onCancel,
   onCommit,
 }: {
+  property: TaxonomyProperty;
   draft: VariationDraft;
   setDraft: (updater: (d: VariationDraft) => VariationDraft) => void;
   isEditing: boolean;
-  variationProperties: TaxonomyProperty[];
   onCancel: () => void;
   onCommit: () => void;
 }) {
-  const selectedProp = variationProperties.find((p) => p.propertyId === draft.propertyId) ?? null;
-  const canCommit =
-    draft.source === "etsy"
-      ? draft.propertyId != null && draft.valueIds.length > 0
-      : draft.name.trim() !== "" && draft.values.length > 0;
+  const [query, setQuery] = useState("");
+  const [customDraft, setCustomDraft] = useState("");
 
-  function toggleDraftValue(pv: { valueId: number | null; name: string }) {
-    if (pv.valueId == null || !selectedProp) return;
-    const nextIdSet = new Set(draft.valueIds);
-    if (nextIdSet.has(pv.valueId)) nextIdSet.delete(pv.valueId);
-    else nextIdSet.add(pv.valueId);
-    const nextIds: number[] = [];
-    const nextValues: string[] = [];
-    for (const cand of selectedProp.possibleValues) {
-      if (cand.valueId != null && nextIdSet.has(cand.valueId)) {
-        nextIds.push(cand.valueId);
-        nextValues.push(cand.name);
+  const scaleId = draft.scaleId ?? property.scales[0]?.scaleId ?? null;
+  const candidates =
+    property.scales.length > 0 ? property.possibleValues.filter((v) => v.scaleId === scaleId) : property.possibleValues;
+
+  const rows = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const filtered = q ? candidates.filter((v) => v.name.toLowerCase().includes(q)) : candidates;
+    return filtered.slice(0, MAX_PROPERTY_ROWS);
+  }, [candidates, query]);
+
+  function toggleValue(pv: { valueId: number | null; name: string }) {
+    if (pv.valueId == null) return;
+    setDraft((d) => {
+      const idx = d.valueIds.indexOf(pv.valueId as number);
+      if (idx >= 0) {
+        return { ...d, valueIds: d.valueIds.filter((_, i) => i !== idx), values: d.values.filter((_, i) => i !== idx) };
       }
-    }
-    setDraft((d) => ({ ...d, valueIds: nextIds, values: nextValues }));
+      return { ...d, valueIds: [...d.valueIds, pv.valueId as number], values: [...d.values, pv.name] };
+    });
   }
 
-  const tabCls = (active: boolean) =>
-    `rounded-full px-3 py-1 text-xs ${
-      active
-        ? "bg-[#f56400] text-white"
-        : "border border-black/10 hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
-    }`;
+  function addCustomValue() {
+    const name = customDraft.trim();
+    if (!name) return;
+    setDraft((d) => {
+      if (d.values.some((v) => v.toLowerCase() === name.toLowerCase())) return d;
+      const nextId = Math.min(0, ...d.valueIds) - 1; // synthetic, negative — never collides with a real (positive) value id
+      return { ...d, valueIds: [...d.valueIds, nextId], values: [...d.values, name] };
+    });
+    setCustomDraft("");
+  }
+  function removeValue(i: number) {
+    setDraft((d) => ({ ...d, valueIds: d.valueIds.filter((_, idx) => idx !== i), values: d.values.filter((_, idx) => idx !== i) }));
+  }
+
+  const canCommit = draft.valueIds.length > 0;
 
   return (
-    <div className="mt-2 rounded-lg border border-dashed border-black/20 p-3 dark:border-white/25">
-      <div className="flex gap-1.5">
-        <button type="button" onClick={() => setDraft(() => ({ ...EMPTY_DRAFT, source: "etsy" }))} className={tabCls(draft.source === "etsy")}>
-          Default
-        </button>
-        <button type="button" onClick={() => setDraft(() => ({ ...EMPTY_DRAFT, source: "custom" }))} className={tabCls(draft.source === "custom")}>
-          Custom
-        </button>
-      </div>
+    <div className="space-y-3">
+      <h4 className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">{property.displayName}</h4>
 
-      {draft.source === "etsy" ? (
-        <div className="mt-3">
-          {variationProperties.length === 0 ? (
-            <p className="text-xs text-zinc-500">
-              No Etsy variation property for this category (or no category chosen yet) — use
-              &quot;Custom&quot; instead.
-            </p>
-          ) : (
-            <>
-              <select
-                value={draft.propertyId ?? ""}
-                onChange={(e) => {
-                  const id = e.target.value ? Number(e.target.value) : null;
-                  const p = variationProperties.find((x) => x.propertyId === id);
-                  setDraft(() => ({ source: "etsy", propertyId: id, name: p?.displayName ?? "", valueIds: [], values: [] }));
-                }}
-                className="h-9 w-full rounded-lg border border-black/10 bg-white px-2 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
-              >
-                <option value="">Select a property…</option>
-                {variationProperties.map((p) => (
-                  <option key={p.propertyId} value={p.propertyId}>
-                    {p.displayName}
-                  </option>
-                ))}
-              </select>
-
-              {selectedProp && (
-                <div className="mt-2">
-                  <PropertyPicker
-                    property={selectedProp}
-                    selected={{ name: selectedProp.displayName, valueIds: draft.valueIds, values: draft.values }}
-                    onToggle={(_, pv) => toggleDraftValue(pv)}
-                  />
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      ) : (
-        <div className="mt-3 space-y-2">
-          <input
-            type="text"
-            value={draft.name}
-            onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
-            placeholder="Variation name (e.g. Paper type)"
-            className="h-9 w-full rounded-lg border border-black/10 bg-white px-2 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
-          />
-          <CustomOptionsInput values={draft.values} onChange={(values) => setDraft((d) => ({ ...d, values }))} />
-        </div>
+      {property.scales.length > 0 && (
+        <label className="block text-sm">
+          <span className="text-xs text-zinc-500">Scale</span>
+          <select
+            value={scaleId ?? ""}
+            onChange={(e) => setDraft((d) => ({ ...d, scaleId: Number(e.target.value), valueIds: [], values: [] }))}
+            className="mt-1 h-9 w-full rounded-lg border border-black/10 bg-white px-2 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
+          >
+            {property.scales.map((s) => (
+              <option key={s.scaleId} value={s.scaleId}>
+                {s.displayName}
+              </option>
+            ))}
+          </select>
+        </label>
       )}
 
-      <div className="mt-3 flex gap-2">
+      <div className="overflow-hidden rounded-lg border border-black/10 dark:border-white/15">
+        <div className="border-b border-black/10 p-1.5 dark:border-white/15">
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search…"
+            className="h-7 w-full rounded-md bg-transparent px-1.5 text-xs outline-none"
+          />
+        </div>
+        <div className="h-40 overflow-y-auto p-1">
+          {rows.length === 0 && <p className="px-2 py-3 text-center text-xs text-zinc-400">No results.</p>}
+          {rows.map((pv) => {
+            const checked = pv.valueId != null && draft.valueIds.includes(pv.valueId);
+            return (
+              <label
+                key={pv.valueId ?? pv.name}
+                className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-xs hover:bg-black/[.04] dark:hover:bg-white/[.06]"
+              >
+                <input type="checkbox" checked={checked} onChange={() => toggleValue(pv)} className="accent-[#f56400]" />
+                {pv.name}
+              </label>
+            );
+          })}
+        </div>
+      </div>
+
+      <div>
+        <span className="text-xs text-zinc-500">Add a custom value (not filterable by buyers)</span>
+        <div className="mt-1 flex flex-wrap items-center gap-1.5 rounded-lg border border-black/10 p-1.5 dark:border-white/15">
+          {draft.values.map((v, i) =>
+            draft.valueIds[i] < 0 ? (
+              <span key={i} className="flex items-center gap-1 rounded-full bg-black/[.06] px-2 py-0.5 text-xs dark:bg-white/10">
+                {v}
+                <button
+                  type="button"
+                  onClick={() => removeValue(i)}
+                  aria-label={`Remove ${v}`}
+                  className="text-zinc-500 hover:text-red-600"
+                >
+                  ×
+                </button>
+              </span>
+            ) : null,
+          )}
+          <input
+            type="text"
+            value={customDraft}
+            onChange={(e) => setCustomDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === ",") {
+                e.preventDefault();
+                addCustomValue();
+              }
+            }}
+            onBlur={addCustomValue}
+            placeholder="Type a value, press Enter…"
+            className="min-w-[100px] flex-1 border-none bg-transparent px-1 py-0.5 text-sm outline-none"
+          />
+        </div>
+      </div>
+
+      <p className="truncate text-xs text-zinc-600 dark:text-zinc-400">
+        <span className="font-medium">Selected:</span> {draft.values.length ? draft.values.join(", ") : "—"}
+      </p>
+
+      <div className="flex gap-2">
         <button
           type="button"
           disabled={!canCommit}
           onClick={onCommit}
           className="h-8 rounded-lg bg-[#f56400] px-3 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
         >
-          {isEditing ? "Save" : "Add"}
+          {isEditing ? "Save" : "Add variation"}
         </button>
         <button
           type="button"

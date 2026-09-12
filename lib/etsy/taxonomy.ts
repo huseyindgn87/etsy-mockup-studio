@@ -68,6 +68,13 @@ export async function getSellerTaxonomyTree(): Promise<TaxonomyNode[]> {
 export interface TaxonomyPropertyValue {
   valueId: number | null;
   name: string;
+  /** Which scale this value belongs to, when the property has more than one (e.g. US/UK/EU shoe sizes). */
+  scaleId: number | null;
+}
+
+export interface TaxonomyPropertyScale {
+  scaleId: number;
+  displayName: string;
 }
 
 export interface TaxonomyProperty {
@@ -81,6 +88,9 @@ export interface TaxonomyProperty {
   supportsAttributes: boolean;
   /** Usable as an inventory variation (the "Variations" section). */
   supportsVariations: boolean;
+  /** Alternate unit systems for this property's values (e.g. US/UK/EU sizing) — empty when the property has none. */
+  scales: TaxonomyPropertyScale[];
+  /** Every value across every scale; filter by `scaleId` once one is chosen. */
   possibleValues: TaxonomyPropertyValue[];
 }
 
@@ -93,7 +103,8 @@ interface RawTaxonomyProperty {
   supports_variations?: boolean;
   is_multivalued?: boolean;
   max_values_allowed?: number | null;
-  possible_values?: { value_id: number | null; name: string }[];
+  scales?: { scale_id: number; display_name: string }[];
+  possible_values?: { value_id: number | null; name: string; scale_id?: number | null }[];
 }
 
 const propertiesCache = new TtlCache<number, TaxonomyProperty[]>(TAXONOMY_CACHE_MS);
@@ -124,9 +135,11 @@ export async function getTaxonomyProperties(taxonomyId: number): Promise<Taxonom
         maxValuesAllowed: p.max_values_allowed ?? null,
         supportsAttributes: !!p.supports_attributes,
         supportsVariations: !!p.supports_variations,
+        scales: (p.scales ?? []).map((s) => ({ scaleId: s.scale_id, displayName: s.display_name })),
         possibleValues: (p.possible_values ?? []).map((v) => ({
           valueId: v.value_id,
           name: v.name,
+          scaleId: v.scale_id ?? null,
         })),
       }));
   });

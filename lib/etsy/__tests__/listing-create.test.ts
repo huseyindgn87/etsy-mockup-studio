@@ -230,7 +230,7 @@ describe("updateListingInventory", () => {
     });
 
     const [path, init] = etsyFetch.mock.calls[0];
-    expect(path).toBe("/listings/555/inventory");
+    expect(path).toBe("/listings/555/inventory?max_variations_supported=3");
     expect(init?.method).toBe("PUT");
     const body = JSON.parse(init?.body as string);
     expect(body.products).toHaveLength(2);

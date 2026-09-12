@@ -6,7 +6,7 @@ import { blobToRaster, dataUrlToBlob } from "@/lib/mockup/client";
 import { quadList } from "@/lib/mockup/geometry";
 import type { Calibration, Overlay, Quad, Raster } from "@/lib/mockup/types";
 import { normalizeBlendMode } from "@/lib/mockup/validate";
-import { MAX_VARIATION_COMBINATIONS } from "@/lib/etsy/variation-limits";
+import { MAX_COMBINATIONS_HARD_CAP } from "@/lib/etsy/variation-limits";
 import ListingForm, {
   EMPTY_LISTING_FORM,
   type ListingFormTab,
@@ -86,7 +86,7 @@ function buildVariationsPayload(
       skuOnProperty: number[];
       readinessStateOnProperty: number[];
       products: {
-        propertyValues: { propertyId: number; name: string; valueIds: number[]; values: string[] }[];
+        propertyValues: { propertyId: number; name: string; valueIds: (number | null)[]; values: string[] }[];
         price?: number;
         quantity?: number;
         sku?: string;
@@ -111,7 +111,7 @@ function buildVariationsPayload(
     }
     combos = next;
   }
-  combos = combos.slice(0, MAX_VARIATION_COMBINATIONS);
+  combos = combos.slice(0, MAX_COMBINATIONS_HARD_CAP);
 
   const read = (key: VariationToggleKey, valueIds: number[]): string | undefined => {
     const toggle = form.variationToggles[key];
@@ -128,7 +128,9 @@ function buildVariationsPayload(
       propertyValues: dims.map((d, i) => ({
         propertyId: d.propertyId,
         name: d.name,
-        valueIds: [c.valueIds[i]],
+        // A negative id is a free-text value added on top of a real Etsy
+        // property (see VariationValuePicker) — Etsy expects value_id:null for those.
+        valueIds: [c.valueIds[i] < 0 ? null : c.valueIds[i]],
         values: [c.values[i]],
       })),
       price: Number.isFinite(rp) && rp > 0 ? rp : undefined,

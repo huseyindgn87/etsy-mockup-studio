@@ -10,7 +10,7 @@ import {
 } from "@/lib/etsy/listing-create";
 import { uploadListingImage } from "@/lib/etsy/listing-images";
 import { EtsyApiError, getShopId } from "@/lib/etsy/listings";
-import { MAX_VARIATION_COMBINATIONS } from "@/lib/etsy/variation-limits";
+import { MAX_COMBINATIONS_HARD_CAP } from "@/lib/etsy/variation-limits";
 import { getRenderPool } from "@/lib/mockup/render-pool";
 import type { RenderJobInput } from "@/lib/mockup/render-types";
 import {
@@ -94,7 +94,7 @@ interface PublishSpec {
       skuOnProperty?: number[];
       readinessStateOnProperty?: number[];
       products: {
-        propertyValues: { propertyId: number; name?: string; valueIds: number[]; values: string[] }[];
+        propertyValues: { propertyId: number; name?: string; valueIds: (number | null)[]; values: string[] }[];
         price?: number;
         quantity?: number;
         sku?: string;
@@ -194,7 +194,7 @@ function sanitizeProperties(raw: unknown): PropertyEntry[] {
 }
 
 interface CleanVariationProduct {
-  propertyValues: { propertyId: number; name: string; valueIds: number[]; values: string[] }[];
+  propertyValues: { propertyId: number; name: string; valueIds: (number | null)[]; values: string[] }[];
   price?: number;
   quantity?: number;
   sku?: string;
@@ -223,7 +223,7 @@ const positiveIntArray = (v: unknown): number[] =>
 function sanitizeVariations(raw: unknown): CleanVariations | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
-  const rawProducts = Array.isArray(r.products) ? r.products.slice(0, MAX_VARIATION_COMBINATIONS) : [];
+  const rawProducts = Array.isArray(r.products) ? r.products.slice(0, MAX_COMBINATIONS_HARD_CAP) : [];
 
   const products: CleanVariationProduct[] = [];
   for (const p of rawProducts) {
@@ -249,7 +249,8 @@ function sanitizeVariations(raw: unknown): CleanVariations | null {
         !Array.isArray(values) ||
         valueIds.length === 0 ||
         valueIds.length !== values.length ||
-        !valueIds.every((v) => Number.isInteger(v) && v > 0) ||
+        // null is a free-text value on an otherwise-real Etsy property (see VariationValuePicker).
+        !valueIds.every((v) => v === null || (Number.isInteger(v) && v > 0)) ||
         !values.every((v) => typeof v === "string")
       ) {
         ok = false;
@@ -258,7 +259,7 @@ function sanitizeVariations(raw: unknown): CleanVariations | null {
       propertyValues.push({
         propertyId: propertyId as number,
         name: typeof name === "string" && name ? name : `property #${propertyId as number}`,
-        valueIds: valueIds as number[],
+        valueIds: valueIds as (number | null)[],
         values: values as string[],
       });
     }

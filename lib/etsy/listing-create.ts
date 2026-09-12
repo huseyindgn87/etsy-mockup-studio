@@ -202,8 +202,8 @@ export async function setListingInventorySku(
 
 export interface InventoryProductInput {
   sku?: string;
-  /** One entry per variation property this product is a combination of. */
-  propertyValues: { propertyId: number; name: string; valueIds: number[]; values: string[] }[];
+  /** One entry per variation property this product is a combination of. A null id is a free-text value on an otherwise-real Etsy property. */
+  propertyValues: { propertyId: number; name: string; valueIds: (number | null)[]; values: string[] }[];
   price: number;
   quantity: number;
   /** Etsy auto-assigns one when omitted. */
@@ -229,13 +229,16 @@ export interface UpdateInventoryInput {
  * One `products` entry per property-value combination (Etsy has no separate
  * "create variations" call; this endpoint always replaces the whole list, be
  * it the single default product or a full variation grid).
+ *
+ * `max_variations_supported=3` is required to write a 3rd variation type —
+ * harmless to always send since 1-2 variation listings ignore it.
  */
 export async function updateListingInventory(
   listingId: number,
   input: UpdateInventoryInput,
 ): Promise<void> {
   await readJson(
-    await etsyFetch(`/listings/${listingId}/inventory`, {
+    await etsyFetch(`/listings/${listingId}/inventory?max_variations_supported=3`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

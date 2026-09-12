@@ -67,14 +67,22 @@ describe("getTaxonomyProperties", () => {
               { value_id: 2, name: "Red" },
             ],
           },
-          // variations-only (no supports_attributes) -> still kept, just flagged differently
+          // variations-only (no supports_attributes) -> still kept, just flagged differently.
+          // Also has scales (US/UK) — each possible value tags which one it belongs to.
           {
             property_id: 300,
             name: "size",
             display_name: "Size",
             supports_attributes: false,
             supports_variations: true,
-            possible_values: [{ value_id: 9, name: "M" }],
+            scales: [
+              { scale_id: 1, display_name: "US" },
+              { scale_id: 2, display_name: "UK" },
+            ],
+            possible_values: [
+              { value_id: 9, name: "9", scale_id: 1 },
+              { value_id: 42, name: "8.5", scale_id: 2 },
+            ],
           },
           // no possible_values -> excluded (nothing to select)
           {
@@ -99,9 +107,10 @@ describe("getTaxonomyProperties", () => {
         maxValuesAllowed: 2,
         supportsAttributes: true,
         supportsVariations: true,
+        scales: [],
         possibleValues: [
-          { valueId: 1, name: "Black" },
-          { valueId: 2, name: "Red" },
+          { valueId: 1, name: "Black", scaleId: null },
+          { valueId: 2, name: "Red", scaleId: null },
         ],
       },
       {
@@ -113,7 +122,14 @@ describe("getTaxonomyProperties", () => {
         maxValuesAllowed: null,
         supportsAttributes: false,
         supportsVariations: true,
-        possibleValues: [{ valueId: 9, name: "M" }],
+        scales: [
+          { scaleId: 1, displayName: "US" },
+          { scaleId: 2, displayName: "UK" },
+        ],
+        possibleValues: [
+          { valueId: 9, name: "9", scaleId: 1 },
+          { valueId: 42, name: "8.5", scaleId: 2 },
+        ],
       },
     ]);
 
