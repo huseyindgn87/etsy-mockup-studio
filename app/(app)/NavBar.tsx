@@ -4,10 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 
-const NAV_LINKS = [
-  { href: "/listings", label: "Listings" },
-  { href: "/mockups", label: "Mockups" },
-] as const;
+const NAV_LINKS = [{ href: "/listings", label: "Listings" }] as const;
 
 function isActive(pathname: string, href: string): boolean {
   return pathname === href || pathname.startsWith(`${href}/`);

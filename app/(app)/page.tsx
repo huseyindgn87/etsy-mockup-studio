@@ -1,5 +1,5 @@
-import Link from "next/link";
 import { getEtsySession } from "@/lib/etsy/auth";
+import ShopButton from "./ShopButton";
 
 export const dynamic = "force-dynamic";
 
@@ -61,18 +61,7 @@ export default async function Home({
                   {new Date(session.expiresAt).toLocaleTimeString()}
                 </span>
               </div>
-              <Link
-                href="/listings"
-                className="inline-flex h-10 items-center justify-center rounded-full bg-[#f56400] px-5 text-sm font-medium text-white transition-colors hover:bg-[#d95700]"
-              >
-                View my listings
-              </Link>
-              <Link
-                href="/mockups"
-                className="inline-flex h-10 items-center justify-center rounded-full border border-black/[.08] px-5 text-sm font-medium transition-colors hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-white/[.06]"
-              >
-                Mockup studio
-              </Link>
+              <ShopButton />
               <form action="/api/auth/etsy/logout" method="post">
                 <button
                   type="submit"

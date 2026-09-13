@@ -34,7 +34,10 @@ import ListingForm, {
   type ListingFormValue,
   type VariationToggleKey,
 } from "./ListingForm";
+import ListingPreviewModal, { type PreviewMediaItem } from "./ListingPreviewModal";
 import MockupCanvas from "./MockupCanvas";
+import TemplatePicker from "./TemplatePicker";
+import type { TemplateListItem } from "@/lib/mockup/template-types";
 
 /** Longest edge of the browser-side preview rasters (the server renders full-res). */
 const PREVIEW_MAX = 1400;
@@ -218,6 +221,40 @@ const slotIdFor = (ref: ImageSlotRef) => (ref.kind === "job" ? `job:${ref.key}` 
 /** The joined value ids a field's `appliesTo`-scoped subset of one combination — matches `ListingForm`'s own key. */
 function comboKeyFor(appliesTo: number[], valueIds: number[]): string {
   return appliesTo.map((i) => valueIds[i]).join(":");
+}
+
+/**
+ * The listing's price, or its range across variation combinations, for the
+ * preview modal — "$X.XX" for a single price, "$X.XX+" (Etsy's own
+ * convention) once price varies by variation and combos land on more than
+ * one value.
+ */
+function formatPreviewPrice(form: ListingFormValue): string {
+  const basePrice = Number.parseFloat(form.price);
+  const priceToggle = form.variationToggles.price;
+  const variesByPrice = priceToggle.enabled && priceToggle.appliesTo.length > 0 && form.variations.length > 0;
+
+  if (!variesByPrice) {
+    return Number.isFinite(basePrice) && basePrice > 0 ? `$${basePrice.toFixed(2)}` : "$0.00";
+  }
+
+  let combos: number[][] = [[]];
+  for (const dim of form.variations) {
+    const next: number[][] = [];
+    for (const c of combos) for (const id of dim.valueIds) next.push([...c, id]);
+    combos = next;
+  }
+
+  const prices = combos.map((valueIds) => {
+    const cellKey = comboKeyFor(priceToggle.appliesTo, valueIds);
+    const cell = Number.parseFloat(form.variationRows.price[cellKey] ?? "");
+    return Number.isFinite(cell) && cell > 0 ? cell : basePrice;
+  }).filter((p): p is number => Number.isFinite(p) && p > 0);
+
+  if (prices.length === 0) return "$0.00";
+  const min = Math.min(...prices);
+  const max = Math.max(...prices);
+  return min === max ? `$${min.toFixed(2)}` : `$${min.toFixed(2)}+`;
 }
 
 /**
@@ -430,6 +467,8 @@ function MockupsPageInner() {
   const [listingForm, setListingForm] = useState<ListingFormValue>(EMPTY_LISTING_FORM);
   const [publishResult, setPublishResult] = useState<PublishResult | null>(null);
   const [cornerMode, setCornerMode] = useState<"free" | "ratio">("free");
+  const [showTemplatePicker, setShowTemplatePicker] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
   const [activeTab, setActiveTab] = useState<NavTab>("photos");
   const [shopName, setShopName] = useState<string | null>(null);
   const [videos, setVideos] = useState<(File | null)[]>(() => Array(MAX_LISTING_VIDEOS).fill(null));
@@ -617,6 +656,76 @@ function MockupsPageInner() {
     }
     setBusy(null);
   }, [mockups.length]);
+
+  /**
+   * Adds a curated library or user-uploaded template (see `TemplatePicker`) as
+   * a mockup — same `MockupItem` shape a parsed PSD builds, just with no
+   * overlays and a calibration seeded from the template's own saved quad.
+   * `contentHash` is `template:{filename}` (filenames are globally unique
+   * across both library and user templates) so "Save calibration" persists
+   * per-session tweaks the same way a PSD's does, without touching the
+   * template's own saved quad.
+   */
+  const addFromTemplate = useCallback(
+    async (template: TemplateListItem) => {
+      if (mockups.length >= MAX_DRAFT_PSDS) {
+        setError(`A draft can hold at most ${MAX_DRAFT_PSDS} PSDs.`);
+        return;
+      }
+      setError(null);
+      setShowTemplatePicker(false);
+      setBusy("Loading template…");
+      try {
+        const res = await fetch(template.imageUrl);
+        if (!res.ok) throw new Error("Could not load the template image.");
+        const blob = await res.blob();
+        const ext = blob.type === "image/png" ? "png" : "jpg";
+        const file = new File([blob], `${template.name || "template"}.${ext}`, {
+          type: blob.type || "image/jpeg",
+        });
+        const fullRaster = await blobToRaster(blob);
+        const scale = Math.min(1, PREVIEW_MAX / Math.max(fullRaster.width, fullRaster.height));
+        const mockRaster = scale === 1 ? fullRaster : await blobToRaster(blob, { scale });
+        const calibration: Calibration = {
+          qs: [template.quad],
+          q: template.quad,
+          ai: 0,
+          shade: 15,
+          disp: 10,
+          dispR: 12,
+          zoom: 100,
+          rot: 0,
+          b1: 0,
+          b2: 0,
+          w1: 255,
+          w2: 255,
+        };
+        const item: MockupItem = {
+          id: uid(),
+          name: template.name || stripExt(file.name),
+          file,
+          psdW: fullRaster.width,
+          psdH: fullRaster.height,
+          contentHash: `template:${template.filename}`,
+          previewScale: scale,
+          mockRaster,
+          overlays: [],
+          areaNames: [],
+          calibration,
+          hasSavedCalibration: template.calibrated,
+          include: true,
+          tone: null,
+        };
+        setMockups((prev) => [...prev, item]);
+        setActiveId(item.id);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Could not add the template.");
+      } finally {
+        setBusy(null);
+      }
+    },
+    [mockups.length],
+  );
 
   const addDesigns = useCallback(async (files: File[]) => {
     const imgs = files.filter((f) => f.type.startsWith("image/"));
@@ -816,6 +925,25 @@ function MockupsPageInner() {
   );
   const publishCount = Math.min(photoSlots.length, MAX_LISTING_IMAGES);
   const enlargedSlot = photoSlots.find((s) => s.slotId === enlargedSlotId) ?? null;
+
+  // Photos + videos, in the same rail order the preview modal shows them —
+  // only built while the modal is open, so opening it is what creates the
+  // (otherwise-unrevoked) video object URLs, not every render.
+  const previewMedia = useMemo<PreviewMediaItem[]>(() => {
+    if (!showPreview) return [];
+    const photos: PreviewMediaItem[] = photoSlots.map((s) => ({
+      id: s.slotId,
+      kind: "photo",
+      url: s.thumbnailUrl,
+      label: s.label,
+    }));
+    const vids: PreviewMediaItem[] = videos
+      .map((v, i): PreviewMediaItem | null =>
+        v ? { id: `video:${i}`, kind: "video", url: URL.createObjectURL(v), label: `Video ${i + 1}` } : null,
+      )
+      .filter((x): x is PreviewMediaItem => x != null);
+    return [...photos, ...vids];
+  }, [showPreview, photoSlots, videos]);
 
   // ---- restore a saved draft named in the URL (?draftId=...), once ----
   useEffect(() => {
@@ -1491,6 +1619,13 @@ function MockupsPageInner() {
             >
               Save draft
             </button>
+            <button
+              type="button"
+              onClick={() => setShowPreview(true)}
+              className="h-9 rounded-full border border-black/10 px-4 text-sm font-medium transition-colors hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
+            >
+              Preview
+            </button>
             <span className="max-w-xs truncate text-xs text-zinc-500 dark:text-zinc-400">
               {modeCaption}
             </span>
@@ -1633,6 +1768,13 @@ function MockupsPageInner() {
                       inputRef={psdInput}
                       onFiles={addPsds}
                     />
+                    <button
+                      type="button"
+                      onClick={() => setShowTemplatePicker(true)}
+                      className="h-9 w-full rounded-lg border border-dashed border-black/20 text-sm text-zinc-600 transition-colors hover:bg-black/[.04] dark:border-white/25 dark:text-zinc-300 dark:hover:bg-white/[.06]"
+                    >
+                      Add from template library
+                    </button>
                     {mockups.length > 0 && (
                       <ul className="space-y-1">
                         {mockups.map((m, i) => (
@@ -1882,6 +2024,21 @@ function MockupsPageInner() {
           </div>
         </div>
       </div>
+
+      {showTemplatePicker && (
+        <TemplatePicker onClose={() => setShowTemplatePicker(false)} onSelect={addFromTemplate} />
+      )}
+
+      {showPreview && (
+        <ListingPreviewModal
+          title={listingForm.title}
+          description={listingForm.description}
+          priceLabel={formatPreviewPrice(listingForm)}
+          variations={listingForm.variations.map((v) => ({ name: v.name, values: v.values }))}
+          media={previewMedia}
+          onClose={() => setShowPreview(false)}
+        />
+      )}
 
       {enlargedSlot && (
         <PhotoEnlargeModal
