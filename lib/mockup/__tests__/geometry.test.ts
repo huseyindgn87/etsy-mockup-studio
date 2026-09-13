@@ -150,6 +150,20 @@ test("scaleQuadFromCorner shrinking toward the anchor halves the quad", () => {
   expect(r[3]).toEqual([0, 0.5]);
 });
 
+test("scaleQuadFromCorner with anchorMode center pivots on the centroid, not the opposite corner", () => {
+  // FULL's centroid is [0.5, 0.5]; dragging corner 2 ([1,1]) out to [1.5,1.5]
+  // doubles the distance from the centre, so every corner scales 2x from it.
+  const r = scaleQuadFromCorner(FULL, 2, [1.5, 1.5], "center");
+  expect(r[2][0]).toBeCloseTo(1.5, 6);
+  expect(r[2][1]).toBeCloseTo(1.5, 6);
+  expect(r[0][0]).toBeCloseTo(-0.5, 6); // opposite corner moved too — not a fixed anchor
+  expect(r[0][1]).toBeCloseTo(-0.5, 6);
+  expect(r[1][0]).toBeCloseTo(1.5, 6);
+  expect(r[1][1]).toBeCloseTo(-0.5, 6);
+  expect(r[3][0]).toBeCloseTo(-0.5, 6);
+  expect(r[3][1]).toBeCloseTo(1.5, 6);
+});
+
 test("translateQuad shifts every corner by the same delta", () => {
   const r = translateQuad(FULL, 0.1, -0.2);
   expect(r).toEqual([

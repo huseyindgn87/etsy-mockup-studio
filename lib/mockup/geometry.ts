@@ -106,12 +106,19 @@ export function moveCornerFree(startQuad: Quad, corner: number, pointer: Pt): Qu
 }
 
 /**
- * Ratio-preserving corner drag: scale the whole quad uniformly about the
- * diagonally opposite corner, so the shape (and its aspect ratio) never
- * distorts — only its size changes.
+ * Ratio-preserving corner drag: scale the whole quad uniformly about an
+ * anchor point, so the shape (and its aspect ratio) never distorts — only
+ * its size changes. `anchorMode` "opposite" (default) pivots on the
+ * diagonally opposite corner (Photoshop free-transform); "center" pivots on
+ * the quad's centroid (Photoshop free-transform + Alt/Option).
  */
-export function scaleQuadFromCorner(startQuad: Quad, corner: number, pointer: Pt): Quad {
-  const anchor = startQuad[(corner + 2) % 4];
+export function scaleQuadFromCorner(
+  startQuad: Quad,
+  corner: number,
+  pointer: Pt,
+  anchorMode: "opposite" | "center" = "opposite",
+): Quad {
+  const anchor = anchorMode === "center" ? quadCentroid(startQuad) : startQuad[(corner + 2) % 4];
   const from = dist(anchor, startQuad[corner]);
   const to = dist(anchor, pointer);
   const scale = from > 1e-6 ? Math.min(8, Math.max(0.05, to / from)) : 1;

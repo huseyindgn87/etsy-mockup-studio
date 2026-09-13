@@ -67,3 +67,26 @@ model ListingDraft {
   @@index([etsyUserId, updatedAt])
   @@map("listing_drafts")
 }
+
+/// A curated mockup template — a flat JPEG/PNG under `public/templates/`, not a
+/// user upload (see AGENTS.md: users only ever upload their design PNG). Keyed
+/// by filename rather than content hash, since these are maintainer-managed
+/// files, not user uploads that get renamed/re-exported.
+///
+/// `quad` is the print-area corners the compositor warps a design onto — the
+/// `Quad` shape from lib/mockup/types.ts, validated with `toQuad` before it is
+/// ever written. Set from the calibration screen at /admin/templates; a
+/// template with no row here just renders with `DEFAULT_QUAD` until saved.
+model MockupTemplate {
+  id          String   @id @default(cuid())
+  filename    String   @unique
+  name        String
+  productType String
+  colour      String
+  dpiHint     Int      @default(300)
+  quad        Json
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("mockup_templates")
+}
