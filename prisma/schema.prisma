@@ -34,11 +34,13 @@ model User {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
-  accounts     Account[]
-  sessions     Session[]
-  drafts       ListingDraft[]
-  calibrations MockupCalibration[]
-  templates    MockupTemplate[]
+  accounts        Account[]
+  sessions        Session[]
+  drafts          ListingDraft[]
+  calibrations    MockupCalibration[]
+  templates       MockupTemplate[]
+  shopConnections EtsyShopConnection[]
+  listings        Listing[]
 
   @@map("users")
 }
@@ -187,4 +189,73 @@ model MockupTemplate {
 
   @@index([ownerId])
   @@map("mockup_templates")
+}
+
+/// One Etsy shop the signed-in `User` has connected via OAuth. A user can
+/// connect more than one — each gets its own row here — so they can switch
+/// between shops without losing the others' connection (see the listings
+/// page's "Switch shop" refresh control). `etsyUserId` is the numeric Etsy
+/// user id (the prefix of every access token, see lib/etsy/oauth.ts's
+/// `userIdFromToken`) — comparing it against the live session cookie's
+/// `userId` is how the app knows which connection is "active" right now
+/// without an extra Etsy API call. `refreshToken` is encrypted at rest with
+/// the same AES-256-GCM scheme as the session cookie (lib/etsy/token-crypto.ts),
+/// keyed by `ETSY_OAUTH_SESSION_SECRET` — rotated every time it's used
+/// (Etsy issues a new refresh token on every refresh grant).
+model EtsyShopConnection {
+  id              String    @id @default(cuid())
+  userId          String
+  etsyUserId      String
+  shopId          String
+  shopName        String
+  shopIconUrl     String?
+  refreshToken    String
+  /// Set after the first successful listings sync for this shop; null means
+  /// the listings page has never been populated from Etsy yet.
+  lastSyncedAt    DateTime?
+  lastConnectedAt DateTime  @default(now())
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, shopId])
+  @@index([userId])
+  @@map("etsy_shop_connections")
+}
+
+/// A DB-backed cache of one shop's Etsy listings, kept in sync by the
+/// listings page's on-demand "Refresh" action (lib/etsy/listing-sync.ts) —
+/// Etsy itself is always the source of truth, this table just lets the
+/// listings page render instantly instead of live-querying Etsy on every
+/// view. Scoped by `userId` + `shopId` (a user can have rows for more than
+/// one connected shop, see `EtsyShopConnection`); unique per Etsy
+/// `listingId` within that scope so a refresh can upsert by id.
+/// `removedAt` is set (never deleted) when a refresh no longer finds the
+/// listing on Etsy in any state — keeps the row's history instead of
+/// silently dropping it, and lets a listing that reappears be revived by
+/// clearing it back to null on the next matching upsert.
+model Listing {
+  id            String    @id @default(cuid())
+  userId        String
+  shopId        String
+  listingId     String
+  title         String
+  state         String
+  url           String
+  quantity      Int
+  price         String?
+  thumbnailUrl  String?
+  endingAt      DateTime?
+  shopSectionId Int?
+  sku           String?
+  removedAt     DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, shopId, listingId])
+  @@index([userId, shopId, state])
+  @@map("listings")
 }

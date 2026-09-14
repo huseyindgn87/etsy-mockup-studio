@@ -1,5 +1,6 @@
 import { etsyFetch } from "@/lib/etsy/auth";
 import { TtlCache } from "@/lib/etsy/cache";
+import { ETSY_ENDPOINTS, getEtsyConfig } from "@/lib/etsy/config";
 
 /**
  * Read helpers for the connected user's Etsy shop listings (API v3).
@@ -119,13 +120,13 @@ export async function readEtsyResponse(
   return parsed;
 }
 
-interface EtsyPrice {
+export interface EtsyPrice {
   amount: number;
   divisor: number;
   currency_code: string;
 }
 
-interface EtsyListingImage {
+export interface EtsyListingImage {
   url_570xN?: string;
   url_fullxfull?: string;
   url_340x270?: string;
@@ -133,7 +134,7 @@ interface EtsyListingImage {
   url_75x75?: string;
 }
 
-interface EtsyRawListing {
+export interface EtsyRawListing {
   listing_id: number;
   title: string;
   state: string;
@@ -145,7 +146,7 @@ interface EtsyRawListing {
   shop_section_id?: number | null;
 }
 
-interface EtsyListingsResponse {
+export interface EtsyListingsResponse {
   count: number;
   results: EtsyRawListing[];
 }
@@ -188,6 +189,49 @@ export async function getShopName(): Promise<string> {
   });
 }
 
+export interface ShopInfo {
+  etsyUserId: string;
+  shopId: string;
+  shopName: string;
+  shopIconUrl: string | null;
+}
+
+/**
+ * Look up the shop tied to a raw access token, calling Etsy directly with
+ * that token rather than the stored session cookie. Needed at two points
+ * that happen *before* a cookie session exists to read from: the OAuth
+ * callback (recording a new `EtsyShopConnection`) and a shop switch
+ * (confirming which shop a freshly-minted token set belongs to).
+ */
+export async function fetchShopInfoForToken(accessToken: string): Promise<ShopInfo> {
+  const { clientId, sharedSecret } = getEtsyConfig();
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    "x-api-key": sharedSecret ? `${clientId}:${sharedSecret}` : clientId,
+  };
+
+  const meRes = await fetch(`${ETSY_ENDPOINTS.apiBase}/users/me`, { headers, cache: "no-store" });
+  const me = (await readEtsyResponse(meRes, "GET /users/me")) as EtsyMeResponse;
+  if (!me.shop_id) {
+    throw new EtsyApiError("This Etsy account is not linked to a shop yet.", 404);
+  }
+
+  const shopRes = await fetch(`${ETSY_ENDPOINTS.apiBase}/shops/${me.shop_id}`, {
+    headers,
+    cache: "no-store",
+  });
+  const shop = (await readEtsyResponse(shopRes, "GET /shops/:id")) as EtsyShopResponse & {
+    icon_url_fullxfull?: string;
+  };
+
+  return {
+    etsyUserId: String(me.user_id),
+    shopId: String(me.shop_id),
+    shopName: shop.shop_name,
+    shopIconUrl: shop.icon_url_fullxfull ?? null,
+  };
+}
+
 const HTML_ENTITIES: Record<string, string> = {
   amp: "&",
   lt: "<",
@@ -217,7 +261,7 @@ export function decodeHtmlEntities(s: string): string {
   });
 }
 
-function formatPrice(price?: EtsyPrice): string | null {
+export function formatPrice(price?: EtsyPrice): string | null {
   if (!price || typeof price.amount !== "number" || !price.divisor) return null;
   const value = price.amount / price.divisor;
   try {
@@ -230,7 +274,7 @@ function formatPrice(price?: EtsyPrice): string | null {
   }
 }
 
-function pickThumbnail(images?: EtsyListingImage[]): string | null {
+export function pickThumbnail(images?: EtsyListingImage[]): string | null {
   const first = images?.[0];
   if (!first) return null;
   return (
@@ -265,7 +309,7 @@ function mapListing(raw: EtsyRawListing): EtsyListing {
 /** Etsy's cap on `listing_ids` per `/listings/batch/inventory` call. */
 const SKU_BATCH_LIMIT = 100;
 
-interface EtsyInventoryBatchResponse {
+export interface EtsyInventoryBatchResponse {
   count: number;
   results?: Array<{ listing_id: number; skus?: string[] }>;
 }

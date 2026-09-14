@@ -1,9 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { Copy, Merge, Pencil, Trash2 } from "lucide-react";
+import { Copy, Merge, Pencil, RefreshCw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { DraftSummary } from "@/lib/drafts/types";
+import RefreshShopModal from "./RefreshShopModal";
 
 interface Listing {
   listingId: number;
@@ -24,6 +25,7 @@ interface ListingsPage {
   limit: number;
   offset: number;
   listings: Listing[];
+  neverSynced?: boolean;
 }
 
 interface SectionOption {
@@ -94,6 +96,10 @@ export default function ListingsPage() {
   const [draftsLoading, setDraftsLoading] = useState(false);
   const [draftsError, setDraftsError] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Listing | null>(null);
+  const [refreshOpen, setRefreshOpen] = useState(false);
+  // Bumped after a successful shop refresh to force the counts + listings
+  // effects below to re-fetch from the (now updated) DB-backed cache.
+  const [dataVersion, setDataVersion] = useState(0);
 
   const loadDrafts = useCallback(async () => {
     setDraftsLoading(true);
@@ -135,7 +141,7 @@ export default function ListingsPage() {
       .catch(() => {
         /* sidebar counts just stay as "…" */
       });
-  }, []);
+  }, [dataVersion]);
 
   useEffect(() => {
     fetch("/api/etsy/sections")
@@ -197,7 +203,10 @@ export default function ListingsPage() {
         if (!signal.aborted) setLoading(false);
       }
     },
-    [state, sectionId, offset],
+    // `dataVersion` isn't read in the body — it's here purely to bust this
+    // callback's identity after a shop refresh, so the effect below re-runs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state, sectionId, offset, dataVersion],
   );
 
   useEffect(() => {
@@ -208,6 +217,10 @@ export default function ListingsPage() {
     load(controller.signal);
     return () => controller.abort();
   }, [load]);
+
+  function handleRefreshed() {
+    setDataVersion((v) => v + 1);
+  }
 
   function selectState(next: ListingState) {
     setViewingDrafts(false);
@@ -270,7 +283,19 @@ export default function ListingsPage() {
             + Create listing
           </Link>
 
-          <nav className="mt-6 space-y-0.5">
+          <div className="mt-6 flex items-center justify-between">
+            <span className="text-xs text-zinc-500">Status</span>
+            <button
+              type="button"
+              title="Refresh shop from Etsy"
+              aria-label="Refresh shop from Etsy"
+              onClick={() => setRefreshOpen(true)}
+              className="rounded-md p-1 text-zinc-500 transition-colors hover:bg-black/[.06] hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/[.1] dark:hover:text-zinc-100"
+            >
+              <RefreshCw size={14} />
+            </button>
+          </div>
+          <nav className="mt-1 space-y-0.5">
             {STATE_TABS.map((tab) => (
               <button
                 key={tab.value}
@@ -442,7 +467,23 @@ export default function ListingsPage() {
                     </tr>
                   ))}
 
-                {!loading && !error && listings.length === 0 && (
+                {!loading && !error && listings.length === 0 && data?.neverSynced && (
+                  <tr>
+                    <td colSpan={6} className="px-4 py-10 text-center text-sm text-zinc-500">
+                      This shop hasn&apos;t been synced from Etsy yet.{" "}
+                      <button
+                        type="button"
+                        onClick={() => setRefreshOpen(true)}
+                        className="font-medium text-primary underline underline-offset-2"
+                      >
+                        Refresh now
+                      </button>{" "}
+                      to load your listings.
+                    </td>
+                  </tr>
+                )}
+
+                {!loading && !error && listings.length === 0 && !data?.neverSynced && (
                   <tr>
                     <td colSpan={6} className="px-4 py-10 text-center text-sm text-zinc-500">
                       No {STATE_TABS.find((t) => t.value === state)?.label.toLowerCase()} listings
@@ -580,6 +621,12 @@ export default function ListingsPage() {
           onConfirm={confirmDelete}
         />
       )}
+
+      <RefreshShopModal
+        open={refreshOpen}
+        onClose={() => setRefreshOpen(false)}
+        onRefreshed={handleRefreshed}
+      />
     </div>
   );
 }

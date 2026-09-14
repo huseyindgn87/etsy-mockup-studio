@@ -2,7 +2,9 @@ import { NextResponse, type NextRequest } from "next/server";
 import { auth } from "@/auth";
 import { sessionCookieOptions } from "@/lib/etsy/auth";
 import { getEtsyConfig } from "@/lib/etsy/config";
+import { fetchShopInfoForToken } from "@/lib/etsy/listings";
 import { exchangeCodeForSession } from "@/lib/etsy/oauth";
+import { upsertShopConnection } from "@/lib/etsy/shop-connections";
 import {
   sealSession,
   SESSION_COOKIE,
@@ -51,6 +53,16 @@ export async function GET(req: NextRequest) {
 
   try {
     const tokens = await exchangeCodeForSession(code, verifier);
+    const shopInfo = await fetchShopInfoForToken(tokens.accessToken);
+    await upsertShopConnection({
+      userId: appSession.user.id,
+      etsyUserId: shopInfo.etsyUserId,
+      shopId: shopInfo.shopId,
+      shopName: shopInfo.shopName,
+      shopIconUrl: shopInfo.shopIconUrl,
+      refreshToken: tokens.refreshToken,
+    });
+
     const session: EtsySession = { ...tokens, ownerUserId: appSession.user.id };
     const { sessionSecret } = getEtsyConfig();
 
