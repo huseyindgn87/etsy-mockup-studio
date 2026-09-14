@@ -3,8 +3,9 @@
  * `ListingDraft`). Server-only — pulls in Prisma and the R2 client; never
  * import from a "use client" file.
  *
- * Every read/write here is scoped to the calling Etsy user — a draft is only
- * ever visible to the shop that saved it.
+ * Every read/write here is scoped to the signed-in app `User` (not the Etsy
+ * account, which can be disconnected/reconnected independently) — a draft is
+ * only ever visible to the account that saved it.
  */
 
 import type { ListingDraft, Prisma } from "@prisma/client";
@@ -13,17 +14,17 @@ import { deletePrefix, draftPrefix } from "@/lib/storage/r2";
 import { DRAFT_TTL_DAYS } from "./constants";
 import type { DraftSummary } from "./types";
 
-export async function createDraft(etsyUserId: string): Promise<{ id: string }> {
+export async function createDraft(userId: string): Promise<{ id: string }> {
   const row = await prisma.listingDraft.create({
-    data: { etsyUserId, title: "", formData: {}, photosData: {} },
+    data: { userId, title: "", formData: {}, photosData: {} },
     select: { id: true },
   });
   return row;
 }
 
-export async function listDrafts(etsyUserId: string): Promise<DraftSummary[]> {
+export async function listDrafts(userId: string): Promise<DraftSummary[]> {
   const rows = await prisma.listingDraft.findMany({
-    where: { etsyUserId },
+    where: { userId },
     orderBy: { updatedAt: "desc" },
     select: { id: true, title: true, hasThumbnail: true, updatedAt: true },
   });
@@ -36,9 +37,9 @@ export async function listDrafts(etsyUserId: string): Promise<DraftSummary[]> {
 }
 
 /** `null` when the draft doesn't exist or belongs to a different user. */
-export async function getDraftRow(etsyUserId: string, id: string): Promise<ListingDraft | null> {
+export async function getDraftRow(userId: string, id: string): Promise<ListingDraft | null> {
   const row = await prisma.listingDraft.findUnique({ where: { id } });
-  if (!row || row.etsyUserId !== etsyUserId) return null;
+  if (!row || row.userId !== userId) return null;
   return row;
 }
 
@@ -53,18 +54,18 @@ export interface DraftPatch {
 
 /** `null` when the draft doesn't exist or belongs to a different user. */
 export async function saveDraft(
-  etsyUserId: string,
+  userId: string,
   id: string,
   patch: DraftPatch,
 ): Promise<ListingDraft | null> {
-  const owned = await getDraftRow(etsyUserId, id);
+  const owned = await getDraftRow(userId, id);
   if (!owned) return null;
   return prisma.listingDraft.update({ where: { id }, data: patch });
 }
 
 /** `true` on success, `false` when the draft didn't exist or belonged to someone else. */
-export async function deleteDraft(etsyUserId: string, id: string): Promise<boolean> {
-  const owned = await getDraftRow(etsyUserId, id);
+export async function deleteDraft(userId: string, id: string): Promise<boolean> {
+  const owned = await getDraftRow(userId, id);
   if (!owned) return false;
   // R2 cleanup is best-effort — an orphaned object is cheap; a draft the user
   // asked to delete but that a storage hiccup (or no R2 configured yet) leaves

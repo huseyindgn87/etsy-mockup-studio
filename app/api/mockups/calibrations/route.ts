@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { getEtsySession } from "@/lib/etsy/auth";
+import { auth } from "@/auth";
 import { getSavedCalibration, saveCalibration } from "@/lib/mockup/calibration-store";
 
 export const runtime = "nodejs";
@@ -13,9 +13,9 @@ const HASH_RE = /^[a-f0-9]{16,128}$/i;
  * when none is saved yet.
  */
 export async function GET(request: NextRequest) {
-  const session = await getEtsySession();
-  if (!session) {
-    return NextResponse.json({ error: "Not connected to Etsy." }, { status: 401 });
+  const session = await auth();
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
   }
 
   const contentHash = request.nextUrl.searchParams.get("contentHash");
@@ -26,7 +26,7 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  const calibration = await getSavedCalibration(session.userId, contentHash);
+  const calibration = await getSavedCalibration(session.user.id, contentHash);
   return NextResponse.json({ calibration });
 }
 
@@ -37,9 +37,9 @@ export async function GET(request: NextRequest) {
  * so a malformed client payload never reaches the database as-is.
  */
 export async function PUT(request: Request) {
-  const session = await getEtsySession();
-  if (!session) {
-    return NextResponse.json({ error: "Not connected to Etsy." }, { status: 401 });
+  const session = await auth();
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
   }
 
   let body: { contentHash?: unknown; calibration?: unknown };
@@ -54,6 +54,6 @@ export async function PUT(request: Request) {
     return NextResponse.json({ error: "`contentHash` must be a hex string." }, { status: 400 });
   }
 
-  const calibration = await saveCalibration(session.userId, contentHash, body.calibration);
+  const calibration = await saveCalibration(session.user.id, contentHash, body.calibration);
   return NextResponse.json({ calibration });
 }

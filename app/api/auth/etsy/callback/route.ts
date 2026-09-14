@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { auth } from "@/auth";
 import { sessionCookieOptions } from "@/lib/etsy/auth";
 import { getEtsyConfig } from "@/lib/etsy/config";
 import { exchangeCodeForSession } from "@/lib/etsy/oauth";
@@ -7,6 +8,7 @@ import {
   SESSION_COOKIE,
   STATE_COOKIE,
   VERIFIER_COOKIE,
+  type EtsySession,
 } from "@/lib/etsy/session";
 
 export const dynamic = "force-dynamic";
@@ -42,8 +44,14 @@ export async function GET(req: NextRequest) {
     });
   }
 
+  const appSession = await auth();
+  if (!appSession?.user?.id) {
+    return redirectHome(req, { etsy_error: "You must be signed in to connect an Etsy shop." });
+  }
+
   try {
-    const session = await exchangeCodeForSession(code, verifier);
+    const tokens = await exchangeCodeForSession(code, verifier);
+    const session: EtsySession = { ...tokens, ownerUserId: appSession.user.id };
     const { sessionSecret } = getEtsyConfig();
 
     const res = redirectHome(req, { etsy_connected: "1" });

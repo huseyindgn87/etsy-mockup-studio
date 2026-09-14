@@ -21,13 +21,25 @@ export const VERIFIER_COOKIE = "etsy_pkce_verifier";
 /** Refresh tokens are valid ~90 days; keep the cookie alive that long. */
 export const SESSION_MAX_AGE_SECONDS = 90 * 24 * 60 * 60;
 
-export interface EtsySession {
+/** What Etsy's token endpoint gives us, before it's bound to an app account. */
+export interface EtsyTokenSet {
   accessToken: string;
   refreshToken: string;
   /** Epoch milliseconds when the access token expires. */
   expiresAt: number;
   /** Etsy user id (the numeric prefix of the access token). */
   userId: string;
+}
+
+export interface EtsySession extends EtsyTokenSet {
+  /**
+   * The app `User.id` (see auth.ts) who connected this Etsy account — set at
+   * the OAuth callback from the signed-in app session. `getEtsySession`
+   * refuses to return a session whose `ownerUserId` doesn't match the
+   * caller's current app session, so one browser's Etsy connection can never
+   * leak to a different signed-in app account sharing that browser.
+   */
+  ownerUserId: string;
 }
 
 function keyFrom(secret: string): Buffer {
@@ -75,7 +87,8 @@ export function openSession(
       typeof parsed.accessToken === "string" &&
       typeof parsed.refreshToken === "string" &&
       typeof parsed.expiresAt === "number" &&
-      typeof parsed.userId === "string"
+      typeof parsed.userId === "string" &&
+      typeof parsed.ownerUserId === "string"
     ) {
       return parsed;
     }

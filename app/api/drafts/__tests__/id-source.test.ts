@@ -1,17 +1,14 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
-vi.mock("@/lib/etsy/auth", () => ({
-  getEtsySession: vi.fn(async () => ({
-    userId: "u1",
-    accessToken: "a",
-    refreshToken: "r",
-    expiresAt: Date.now() + 1_000_000,
-  })),
-}));
+// A plain `vi.fn()` (not typed against the real, overloaded `auth` export)
+// sidesteps TS picking the wrong overload (the Proxy-wrapping one) when this
+// mock is later called with `.mockResolvedValue(...)`.
+const { authMock } = vi.hoisted(() => ({ authMock: vi.fn() }));
+vi.mock("@/auth", () => ({ auth: authMock }));
 
 interface Row {
   id: string;
-  etsyUserId: string;
+  userId: string;
   title: string;
   formData: unknown;
   photosData: unknown;
@@ -24,27 +21,26 @@ interface Row {
 const rows = new Map<string, Row>();
 
 vi.mock("@/lib/drafts/store", () => ({
-  getDraftRow: vi.fn(async (etsyUserId: string, id: string) => {
+  getDraftRow: vi.fn(async (userId: string, id: string) => {
     const row = rows.get(id);
-    if (!row || row.etsyUserId !== etsyUserId) return null;
+    if (!row || row.userId !== userId) return null;
     return row;
   }),
-  saveDraft: vi.fn(async (etsyUserId: string, id: string, patch: Partial<Row>) => {
+  saveDraft: vi.fn(async (userId: string, id: string, patch: Partial<Row>) => {
     const row = rows.get(id);
-    if (!row || row.etsyUserId !== etsyUserId) return null;
+    if (!row || row.userId !== userId) return null;
     Object.assign(row, patch, { updatedAt: new Date() });
     return row;
   }),
   deleteDraft: vi.fn(async () => true),
 }));
 
-import { getEtsySession } from "@/lib/etsy/auth";
 import { GET, PUT } from "@/app/api/drafts/[id]/route";
 
 function makeRow(id: string, overrides: Partial<Row> = {}): Row {
   return {
     id,
-    etsyUserId: "u1",
+    userId: "u1",
     title: "",
     formData: {},
     photosData: {},
@@ -70,12 +66,9 @@ const withId = (id: string) => ({ params: Promise.resolve({ id }) });
 
 beforeEach(() => {
   rows.clear();
-  vi.mocked(getEtsySession).mockClear();
-  vi.mocked(getEtsySession).mockResolvedValue({
-    userId: "u1",
-    accessToken: "a",
-    refreshToken: "r",
-    expiresAt: Date.now() + 1_000_000,
+  authMock.mockClear();
+  authMock.mockResolvedValue({
+    user: { id: "u1", email: "seller@example.com" },
   });
 });
 
@@ -125,5 +118,18 @@ describe("GET/PUT /api/drafts/[id] — copy/existing source persistence", () => 
     await PUT(putReq("d1", { formData: { title: "still editing" } }), withId("d1"));
     const get = await GET(getReq("d1"), withId("d1"));
     expect((await get.json()).source).toEqual({ mode: "existing", listingId: 42 });
+  });
+
+  test("GET 401 when not signed in", async () => {
+    authMock.mockResolvedValueOnce(null);
+    rows.set("d1", makeRow("d1"));
+    const res = await GET(getReq("d1"), withId("d1"));
+    expect(res.status).toBe(401);
+  });
+
+  test("GET 404 for another user's draft — never leaks someone else's data", async () => {
+    rows.set("d1", makeRow("d1", { userId: "someone-else" }));
+    const res = await GET(getReq("d1"), withId("d1"));
+    expect(res.status).toBe(404);
   });
 });

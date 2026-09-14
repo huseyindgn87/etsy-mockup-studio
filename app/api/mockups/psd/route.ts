@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
-import { getEtsySession } from "@/lib/etsy/auth";
+import { auth } from "@/auth";
 import { getSavedCalibration } from "@/lib/mockup/calibration-store";
 import { parsePsd, PsdParseError, type PsdParseResult } from "@/lib/mockup/psd";
 import { encodeRasterDataUrl } from "@/lib/mockup/server";
@@ -70,9 +70,9 @@ function suggestCalibration(quads: Quad[]): Calibration {
  * this only decodes.
  */
 export async function POST(request: Request) {
-  const session = await getEtsySession();
-  if (!session) {
-    return NextResponse.json({ error: "Not connected to Etsy." }, { status: 401 });
+  const session = await auth();
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
   }
 
   let file: File;
@@ -127,7 +127,7 @@ export async function POST(request: Request) {
   ]);
 
   const tone = measureTone(parsed.composite, { isMock: true, name: file.name });
-  const savedCalibration = await getSavedCalibration(session.userId, contentHash).catch(
+  const savedCalibration = await getSavedCalibration(session.user.id, contentHash).catch(
     () => null, // a DB hiccup shouldn't block the parse — the UI falls back to suggestedCalibration
   );
 

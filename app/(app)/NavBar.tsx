@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { ChevronLeft } from "lucide-react";
 import type { ReactNode } from "react";
 import ConnectedPill from "./ConnectedPill";
+import UserMenu from "./UserMenu";
 
 const NAV_LINKS = [{ href: "/listings", label: "Listings" }] as const;
 const LOBBY_ROUTE = "/";
@@ -30,16 +31,19 @@ function NavLink({ href, label }: { href: string; label: string }): ReactNode {
 }
 
 interface Props {
+  /** The signed-in app account's email — always present (proxy.ts guarantees
+   * a session before this layout renders). */
+  email: string;
   /** The connected shop's display name, or `null` if it couldn't be read
    * (an Etsy API hiccup) — the nav still renders, just without it. */
   shopName: string | null;
-  /** Present whenever there's a session — used for the Connected status pill. */
-  session: { userId: string; expiresAt: number } | null;
+  /** Present whenever Etsy is connected — used for the Connected status pill. */
+  etsySession: { userId: string; expiresAt: number } | null;
 }
 
-/** Persistent top navigation — shown on every page except the sign-in
- * screen (see `(app)/layout.tsx`, which only mounts this when connected). */
-export default function NavBar({ shopName, session }: Props) {
+/** Persistent top navigation — shown on every page (the app account is
+ * required to reach any of them; see `proxy.ts` and `(app)/layout.tsx`). */
+export default function NavBar({ email, shopName, etsySession }: Props) {
   const pathname = usePathname();
   const isLobby = pathname === LOBBY_ROUTE;
 
@@ -77,15 +81,20 @@ export default function NavBar({ shopName, session }: Props) {
               {shopName}
             </span>
           )}
-          {session && <ConnectedPill userId={session.userId} expiresAt={session.expiresAt} />}
-          <form action="/api/auth/etsy/logout" method="post">
-            <button
-              type="submit"
-              className="h-8 shrink-0 rounded-full border border-surface-border px-2 text-xs font-medium text-text transition-colors hover:bg-white/40 sm:px-3"
-            >
-              Disconnect
-            </button>
-          </form>
+          <UserMenu email={email} />
+          {etsySession && (
+            <ConnectedPill userId={etsySession.userId} expiresAt={etsySession.expiresAt} />
+          )}
+          {etsySession && (
+            <form action="/api/auth/etsy/logout" method="post">
+              <button
+                type="submit"
+                className="h-8 shrink-0 rounded-full border border-surface-border px-2 text-xs font-medium text-text transition-colors hover:bg-white/40 sm:px-3"
+              >
+                Disconnect
+              </button>
+            </form>
+          )}
         </div>
       </div>
     </header>

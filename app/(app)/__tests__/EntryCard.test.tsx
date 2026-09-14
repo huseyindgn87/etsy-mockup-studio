@@ -17,7 +17,7 @@ describe("EntryCard", () => {
       }),
     );
 
-    render(<EntryCard />);
+    render(<EntryCard etsyConnected />);
     await screen.findByRole("link", { name: "GHCollectiveUS" });
 
     expect(screen.queryByText(/Etsy user id/i)).not.toBeInTheDocument();
@@ -25,15 +25,31 @@ describe("EntryCard", () => {
     expect(document.body.textContent).not.toMatch(/\d{2}:\d{2}:\d{2}/);
   });
 
-  it("shows the greeting, the shop button, and a quiet Disconnect link", async () => {
+  it("shows the greeting, the shop button, and a quiet Disconnect link when Etsy is connected", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue({ ok: true, json: async () => ({ shopName: "GHCollectiveUS" }) }),
     );
 
-    render(<EntryCard />);
+    render(<EntryCard etsyConnected />);
     expect(screen.getByRole("heading", { name: "Welcome back" })).toBeInTheDocument();
     await screen.findByRole("link", { name: "GHCollectiveUS" });
     expect(screen.getByRole("button", { name: "Disconnect" })).toBeInTheDocument();
+  });
+
+  it("shows a Connect Etsy shop button, and no shop button or Disconnect, when not connected", () => {
+    render(<EntryCard etsyConnected={false} />);
+
+    expect(screen.getByRole("link", { name: "Connect Etsy shop" })).toHaveAttribute(
+      "href",
+      "/api/auth/etsy/login",
+    );
+    expect(screen.queryByRole("button", { name: "Disconnect" })).not.toBeInTheDocument();
+  });
+
+  it("never renders the app name or legacy connect-your-account copy on the card", () => {
+    render(<EntryCard etsyConnected={false} />);
+    expect(screen.queryByText("Etsy Mockup Studio")).not.toBeInTheDocument();
+    expect(screen.queryByText(/connect your etsy account/i)).not.toBeInTheDocument();
   });
 });

@@ -19,6 +19,16 @@ import type { DraftAssetKind } from "@/lib/drafts/types";
 
 const globalForR2 = globalThis as unknown as { r2Client?: S3Client };
 
+/**
+ * True once every R2 env var is present. Callers that can degrade gracefully
+ * (e.g. a user-template upload) should check this *before* touching
+ * `putObject`/`getObject`/etc. and surface a clear, non-crashing error instead —
+ * the bucket isn't provisioned yet (see AGENTS.md).
+ */
+export function isR2Configured(): boolean {
+  return !!(process.env.R2_ACCOUNT_ID && process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY && process.env.R2_BUCKET);
+}
+
 function client(): S3Client {
   if (globalForR2.r2Client) return globalForR2.r2Client;
   const accountId = process.env.R2_ACCOUNT_ID;
@@ -53,6 +63,11 @@ export function draftAssetKey(draftId: string, kind: DraftAssetKind, itemId: str
 /** Every object under a draft lives here — the prefix `deletePrefix` wipes on draft delete/expiry. */
 export function draftPrefix(draftId: string): string {
   return `drafts/${draftId}/`;
+}
+
+/** Deterministic object key for one user-uploaded mockup template. */
+export function userTemplateKey(ownerId: string, storageName: string): string {
+  return `templates/user/${ownerId}/${storageName}`;
 }
 
 export async function putObject(key: string, body: Buffer, contentType: string): Promise<void> {

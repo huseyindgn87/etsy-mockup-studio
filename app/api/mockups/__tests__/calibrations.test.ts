@@ -1,30 +1,27 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
-vi.mock("@/lib/etsy/auth", () => ({
-  getEtsySession: vi.fn(async () => ({
-    userId: "u1",
-    accessToken: "a",
-    refreshToken: "r",
-    expiresAt: Date.now() + 1_000_000,
-  })),
-}));
+// A plain `vi.fn()` (not typed against the real, overloaded `auth` export)
+// sidesteps TS picking the wrong overload (the Proxy-wrapping one) when this
+// mock is later called with `.mockResolvedValue(...)`.
+const { authMock } = vi.hoisted(() => ({ authMock: vi.fn() }));
+vi.mock("@/auth", () => ({ auth: authMock }));
 
 interface Row {
   id: string;
-  etsyUserId: string;
+  userId: string;
   contentHash: string;
   data: unknown;
 }
 const store = new Map<string, Row>();
-const key = (etsyUserId: string, contentHash: string) => `${etsyUserId}:${contentHash}`;
+const key = (userId: string, contentHash: string) => `${userId}:${contentHash}`;
 
 vi.mock("@/lib/db/prisma", () => ({
   prisma: {
     mockupCalibration: {
       findUnique: vi.fn(
-        async ({ where }: { where: { etsyUserId_contentHash: { etsyUserId: string; contentHash: string } } }) =>
-          store.get(key(where.etsyUserId_contentHash.etsyUserId, where.etsyUserId_contentHash.contentHash)) ?? null,
+        async ({ where }: { where: { userId_contentHash: { userId: string; contentHash: string } } }) =>
+          store.get(key(where.userId_contentHash.userId, where.userId_contentHash.contentHash)) ?? null,
       ),
       upsert: vi.fn(
         async ({
@@ -32,15 +29,15 @@ vi.mock("@/lib/db/prisma", () => ({
           create,
           update,
         }: {
-          where: { etsyUserId_contentHash: { etsyUserId: string; contentHash: string } };
-          create: { etsyUserId: string; contentHash: string; data: unknown };
+          where: { userId_contentHash: { userId: string; contentHash: string } };
+          create: { userId: string; contentHash: string; data: unknown };
           update: { data: unknown };
         }) => {
-          const k = key(where.etsyUserId_contentHash.etsyUserId, where.etsyUserId_contentHash.contentHash);
+          const k = key(where.userId_contentHash.userId, where.userId_contentHash.contentHash);
           const existing = store.get(k);
           const row: Row = existing
             ? { ...existing, data: update.data }
-            : { id: `row-${store.size + 1}`, etsyUserId: create.etsyUserId, contentHash: create.contentHash, data: create.data };
+            : { id: `row-${store.size + 1}`, userId: create.userId, contentHash: create.contentHash, data: create.data };
           store.set(k, row);
           return row;
         },
@@ -49,7 +46,6 @@ vi.mock("@/lib/db/prisma", () => ({
   },
 }));
 
-import { getEtsySession } from "@/lib/etsy/auth";
 import { GET, PUT } from "@/app/api/mockups/calibrations/route";
 
 const HASH = "a".repeat(64);
@@ -70,17 +66,14 @@ function putReq(body: unknown) {
 describe("mockup calibrations API", () => {
   beforeEach(() => {
     store.clear();
-    vi.mocked(getEtsySession).mockClear();
-    vi.mocked(getEtsySession).mockResolvedValue({
-      userId: "u1",
-      accessToken: "a",
-      refreshToken: "r",
-      expiresAt: Date.now() + 1_000_000,
+    authMock.mockClear();
+    authMock.mockResolvedValue({
+      user: { id: "u1", email: "seller@example.com" },
     });
   });
 
-  test("GET 401 when not connected", async () => {
-    vi.mocked(getEtsySession).mockResolvedValueOnce(null);
+  test("GET 401 when not signed in", async () => {
+    authMock.mockResolvedValueOnce(null);
     const res = await GET(getReq(HASH));
     expect(res.status).toBe(401);
   });
@@ -122,9 +115,19 @@ describe("mockup calibrations API", () => {
     expect(res.status).toBe(400);
   });
 
-  test("PUT 401 when not connected", async () => {
-    vi.mocked(getEtsySession).mockResolvedValueOnce(null);
+  test("PUT 401 when not signed in", async () => {
+    authMock.mockResolvedValueOnce(null);
     const res = await PUT(putReq({ contentHash: HASH, calibration: {} }));
     expect(res.status).toBe(401);
+  });
+
+  test("a second user's GET never sees the first user's saved calibration", async () => {
+    await PUT(putReq({ contentHash: HASH, calibration: { shade: 55 } }));
+
+    authMock.mockResolvedValueOnce({
+      user: { id: "u2", email: "other@example.com" },
+    });
+    const res = await GET(getReq(HASH));
+    expect((await res.json()).calibration).toBeNull();
   });
 });

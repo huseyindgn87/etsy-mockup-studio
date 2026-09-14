@@ -1,5 +1,5 @@
 import { ETSY_ENDPOINTS, getEtsyConfig } from "./config";
-import type { EtsySession } from "./session";
+import type { EtsyTokenSet } from "./session";
 
 /** Raw token payload returned by Etsy's token endpoint. */
 interface EtsyTokenResponse {
@@ -37,7 +37,7 @@ function userIdFromToken(accessToken: string): string {
   return accessToken.split(".")[0] ?? "";
 }
 
-function toSession(token: EtsyTokenResponse): EtsySession {
+function toSession(token: EtsyTokenResponse): EtsyTokenSet {
   return {
     accessToken: token.access_token,
     refreshToken: token.refresh_token,
@@ -76,7 +76,7 @@ async function postToken(
 export async function exchangeCodeForSession(
   code: string,
   verifier: string,
-): Promise<EtsySession> {
+): Promise<EtsyTokenSet> {
   const { clientId, redirectUri } = getEtsyConfig();
   const token = await postToken({
     grant_type: "authorization_code",
@@ -91,7 +91,7 @@ export async function exchangeCodeForSession(
 /** Trade a refresh token for a fresh token set. */
 export async function refreshSession(
   refreshToken: string,
-): Promise<EtsySession> {
+): Promise<EtsyTokenSet> {
   const { clientId } = getEtsyConfig();
   const token = await postToken({
     grant_type: "refresh_token",

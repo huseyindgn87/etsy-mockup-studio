@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getEtsySession } from "@/lib/etsy/auth";
+import { auth } from "@/auth";
 import { getDraftRow } from "@/lib/drafts/store";
 import { MAX_DRAFT_PSDS } from "@/lib/drafts/constants";
 import type { DraftAssetKind } from "@/lib/drafts/types";
@@ -37,16 +37,16 @@ export async function PUT(
   request: Request,
   { params }: { params: Promise<{ id: string; kind: string; itemId: string }> },
 ) {
-  const session = await getEtsySession();
-  if (!session) {
-    return NextResponse.json({ error: "Not connected to Etsy." }, { status: 401 });
+  const session = await auth();
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
   }
   const { id, kind: kindRaw, itemId } = await params;
   const kind = parseKindAndId(kindRaw, itemId);
   if (!kind) {
     return NextResponse.json({ error: "Invalid asset kind or id." }, { status: 400 });
   }
-  const draft = await getDraftRow(session.userId, id);
+  const draft = await getDraftRow(session.user.id, id);
   if (!draft) {
     return NextResponse.json({ error: "Draft not found." }, { status: 404 });
   }
@@ -93,16 +93,16 @@ export async function GET(
   _request: Request,
   { params }: { params: Promise<{ id: string; kind: string; itemId: string }> },
 ) {
-  const session = await getEtsySession();
-  if (!session) {
-    return NextResponse.json({ error: "Not connected to Etsy." }, { status: 401 });
+  const session = await auth();
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
   }
   const { id, kind: kindRaw, itemId } = await params;
   const kind = parseKindAndId(kindRaw, itemId);
   if (!kind || kind === "psd") {
     return NextResponse.json({ error: "Invalid asset kind or id." }, { status: 400 });
   }
-  const draft = await getDraftRow(session.userId, id);
+  const draft = await getDraftRow(session.user.id, id);
   if (!draft) {
     return NextResponse.json({ error: "Draft not found." }, { status: 404 });
   }

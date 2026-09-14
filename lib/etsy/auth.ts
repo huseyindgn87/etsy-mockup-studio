@@ -10,16 +10,32 @@ import {
 } from "./session";
 
 /**
- * Read the current Etsy session from the encrypted cookie.
+ * Read the current Etsy session from the encrypted cookie — but only if it
+ * was connected by the app account that's signed in right now. A cookie
+ * whose `ownerUserId` doesn't match (a stale connection from a different app
+ * account on a shared browser, most commonly) is treated as "not connected"
+ * rather than handed back, so one app user can never ride another's Etsy
+ * connection.
  *
  * Safe to call from Server Components. The returned token may be expired —
  * cookies cannot be rewritten during render, so refresh happens in Route
  * Handlers / Server Actions via {@link getAccessToken}.
+ *
+ * `@/auth` is imported dynamically, not at module scope — it constructs a
+ * Prisma client at import time, and this module is imported by plenty of
+ * code (and tests) that never call `getEtsySession` and shouldn't have to
+ * satisfy that dependency just to load.
  */
 export async function getEtsySession(): Promise<EtsySession | null> {
   const { sessionSecret } = getEtsyConfig();
   const store = await cookies();
-  return openSession(store.get(SESSION_COOKIE)?.value, sessionSecret);
+  const session = openSession(store.get(SESSION_COOKIE)?.value, sessionSecret);
+  if (!session) return null;
+
+  const { auth } = await import("@/auth");
+  const appSession = await auth();
+  if (!appSession?.user?.id || appSession.user.id !== session.ownerUserId) return null;
+  return session;
 }
 
 export async function isConnected(): Promise<boolean> {
@@ -42,20 +58,17 @@ export function sessionCookieOptions() {
  * (Route Handlers, Server Actions). Returns null when not connected.
  */
 export async function getAccessToken(): Promise<string | null> {
-  const { sessionSecret } = getEtsyConfig();
-  const store = await cookies();
-  const current = openSession(store.get(SESSION_COOKIE)?.value, sessionSecret);
+  const current = await getEtsySession();
   if (!current) return null;
 
   if (Date.now() < current.expiresAt) return current.accessToken;
 
+  const { sessionSecret } = getEtsyConfig();
+  const store = await cookies();
   const refreshed = await refreshSession(current.refreshToken);
-  store.set(
-    SESSION_COOKIE,
-    sealSession(refreshed, sessionSecret),
-    sessionCookieOptions(),
-  );
-  return refreshed.accessToken;
+  const session: EtsySession = { ...refreshed, ownerUserId: current.ownerUserId };
+  store.set(SESSION_COOKIE, sealSession(session, sessionSecret), sessionCookieOptions());
+  return session.accessToken;
 }
 
 /** Retries on 429 before giving up and returning the (still 429) response to the caller. */

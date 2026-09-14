@@ -40,27 +40,7 @@ export default async function Home({
           </p>
         )}
 
-        {session ? (
-          <EntryCard />
-        ) : (
-          <div className="flex flex-col items-center gap-6 text-center">
-            <div>
-              <h1 className="text-2xl font-semibold tracking-tight text-text">
-                Etsy Mockup Studio
-              </h1>
-              <p className="mt-2 text-sm text-text-muted">
-                Connect your Etsy account to start making mockups for your listings.
-              </p>
-            </div>
-
-            <a
-              href="/api/auth/etsy/login"
-              className="inline-flex h-11 items-center justify-center rounded-full bg-primary px-6 text-sm font-medium text-white transition-colors hover:bg-primary-dark focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2"
-            >
-              Connect Etsy
-            </a>
-          </div>
-        )}
+        <EntryCard etsyConnected={!!session} />
       </main>
     </div>
   );

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
-import { getEtsySession } from "@/lib/etsy/auth";
+import { auth } from "@/auth";
 import { deleteDraft, getDraftRow, saveDraft } from "@/lib/drafts/store";
 import type { DraftMockupMeta, DraftSource } from "@/lib/drafts/types";
 import { coercePhotosData } from "@/lib/drafts/validate";
@@ -70,12 +70,12 @@ async function restoreMockup(draftId: string, meta: DraftMockupMeta) {
  * their raw bytes from (`/api/drafts/[id]/assets/[kind]/[itemId]`).
  */
 export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const session = await getEtsySession();
-  if (!session) {
-    return NextResponse.json({ error: "Not connected to Etsy." }, { status: 401 });
+  const session = await auth();
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
   }
   const { id } = await params;
-  const row = await getDraftRow(session.userId, id);
+  const row = await getDraftRow(session.user.id, id);
   if (!row) {
     return NextResponse.json({ error: "Draft not found." }, { status: 404 });
   }
@@ -139,9 +139,9 @@ function isValidSource(value: unknown): value is DraftSource {
  * the explicit "Save draft" button and autosave.
  */
 export async function PUT(request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const session = await getEtsySession();
-  if (!session) {
-    return NextResponse.json({ error: "Not connected to Etsy." }, { status: 401 });
+  const session = await auth();
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
   }
   const { id } = await params;
 
@@ -171,7 +171,7 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
     }
   }
 
-  const row = await saveDraft(session.userId, id, patch);
+  const row = await saveDraft(session.user.id, id, patch);
   if (!row) {
     return NextResponse.json({ error: "Draft not found." }, { status: 404 });
   }
@@ -180,12 +180,12 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
 
 /** `DELETE /api/drafts/[id]` — deletes the draft and its R2 files. */
 export async function DELETE(_request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const session = await getEtsySession();
-  if (!session) {
-    return NextResponse.json({ error: "Not connected to Etsy." }, { status: 401 });
+  const session = await auth();
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
   }
   const { id } = await params;
-  const ok = await deleteDraft(session.userId, id);
+  const ok = await deleteDraft(session.user.id, id);
   if (!ok) {
     return NextResponse.json({ error: "Draft not found." }, { status: 404 });
   }

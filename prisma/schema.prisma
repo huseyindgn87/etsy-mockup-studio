@@ -16,21 +16,101 @@ datasource db {
   provider = "postgresql"
 }
 
+/// The app account. Password auth only (Auth.js Credentials provider) — we
+/// never ask for or store an Etsy password; `passwordHash` is a bcrypt hash
+/// (cost 12, see lib/auth/password.ts) of the account's own password.
+///
+/// This is the tenant boundary for everything a signed-in user owns: their
+/// Etsy connection (bound into the sealed session cookie, see
+/// lib/etsy/session.ts's `ownerUserId`) and every `ListingDraft` /
+/// `MockupTemplate` / `MockupCalibration` row.
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  passwordHash  String
+  emailVerified DateTime?
+  name          String?
+  image         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  accounts     Account[]
+  sessions     Session[]
+  drafts       ListingDraft[]
+  calibrations MockupCalibration[]
+  templates    MockupTemplate[]
+
+  @@map("users")
+}
+
+/// Auth.js Prisma adapter model — linked-account storage for non-credentials
+/// providers. Unused today (Credentials is the only provider) but required
+/// by the adapter's schema contract, and here for when a social provider is
+/// added later.
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+/// Auth.js Prisma adapter model. Not read on the hot path — sessions use the
+/// JWT strategy (required alongside Credentials), so this table only matters
+/// if a database-session-backed provider is added later.
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+/// Auth.js Prisma adapter model — email verification / password reset
+/// tokens. Not issued yet (no email flow wired up), required by the adapter.
+model VerificationToken {
+  identifier String
+  token      String
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
 /// One saved mockup calibration (print-area corners + sliders), keyed by a
 /// hash of the source PSD's bytes so the same template maps to the same
-/// calibration regardless of filename. Scoped to the Etsy user who saved it.
+/// calibration regardless of filename. Scoped to the signed-in `User` who
+/// saved it — not the Etsy account, which can be disconnected and
+/// reconnected (possibly to a different shop) independently of the app account.
 /// `data` is the `Calibration` shape from lib/mockup/types.ts, validated with
 /// `coerceCalibration` before it is ever written.
 model MockupCalibration {
   id          String   @id @default(cuid())
-  etsyUserId  String
+  userId      String
   contentHash String
   data        Json
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  @@unique([etsyUserId, contentHash])
-  @@index([etsyUserId])
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, contentHash])
+  @@index([userId])
   @@map("mockup_calibrations")
 }
 
@@ -43,9 +123,11 @@ model MockupCalibration {
 /// keyed deterministically as `drafts/{id}/{kind}/{itemId}`, not in this row.
 /// `hasThumbnail` just records whether that thumbnail object exists, so the
 /// drafts list can build its URL without a storage round trip.
+///
+/// Scoped to the signed-in `User`, not the Etsy account — see `MockupCalibration`.
 model ListingDraft {
   id           String   @id @default(cuid())
-  etsyUserId   String
+  userId       String
   title        String   @default("")
   hasThumbnail Boolean  @default(false)
   formData     Json
@@ -64,29 +146,45 @@ model ListingDraft {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  @@index([etsyUserId, updatedAt])
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, updatedAt])
   @@map("listing_drafts")
 }
 
-/// A curated mockup template — a flat JPEG/PNG under `public/templates/`, not a
-/// user upload (see AGENTS.md: users only ever upload their design PNG). Keyed
-/// by filename rather than content hash, since these are maintainer-managed
-/// files, not user uploads that get renamed/re-exported.
+/// A mockup template — either a curated library entry (`source: "library"`,
+/// `ownerId: null`) backed by a flat JPEG/PNG under `public/templates/`, or a
+/// user's own uploaded JPEG/PNG (`source: "user"`, `ownerId` the signed-in
+/// `User` who uploaded it — not their Etsy account, see `MockupCalibration`)
+/// stored in R2 (see lib/storage/r2.ts). Library rows are keyed by their
+/// on-disk filename; user rows get a generated, globally-unique `filename`
+/// used as their R2 object key (lib/mockup/template-store.ts) — it never
+/// collides with a library filename or another user's upload.
 ///
 /// `quad` is the print-area corners the compositor warps a design onto — the
 /// `Quad` shape from lib/mockup/types.ts, validated with `toQuad` before it is
-/// ever written. Set from the calibration screen at /admin/templates; a
-/// template with no row here just renders with `DEFAULT_QUAD` until saved.
+/// ever written. `calibrated` is false until a save (from /admin/templates for
+/// a library row, or the same calibration UI reused for a user's own upload)
+/// sets a deliberate quad; until then the template renders with `DEFAULT_QUAD`.
 model MockupTemplate {
   id          String   @id @default(cuid())
+  /// The signed-in User who uploaded this template, or null for a curated
+  /// library template.
+  ownerId     String?
+  /// "library" (curated, public/templates/) or "user" (uploaded, R2).
+  source      String   @default("library")
   filename    String   @unique
   name        String
   productType String
   colour      String
   dpiHint     Int      @default(300)
   quad        Json
+  calibrated  Boolean  @default(false)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  owner User? @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@index([ownerId])
   @@map("mockup_templates")
 }
