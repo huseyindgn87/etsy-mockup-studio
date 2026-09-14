@@ -482,7 +482,7 @@ export default function ListingForm({
   }
 
   const inputCls =
-    "w-full rounded-lg border border-black/10 bg-white px-3 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950";
+    "w-full rounded-lg border border-black/10 bg-white px-3 text-sm outline-none focus:border-primary dark:border-white/15 dark:bg-zinc-950";
   const sectionHeadingCls = "text-base font-bold text-zinc-900 dark:text-zinc-50";
 
   // Once price varies by at least one variation, it's entered per combination
@@ -616,7 +616,7 @@ export default function ListingForm({
                     value={categoryQuery}
                     onChange={(e) => setCategoryQuery(e.target.value)}
                     placeholder="Search categories… (accessories, jewelry, weddings…)"
-                    className="h-8 w-full rounded-md border border-black/10 bg-white px-2 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-900"
+                    className="h-8 w-full rounded-md border border-black/10 bg-white px-2 text-sm outline-none focus:border-primary dark:border-white/15 dark:bg-zinc-900"
                   />
                 </div>
                 <ul className="max-h-72 overflow-y-auto py-1">
@@ -650,7 +650,7 @@ export default function ListingForm({
                             setCategoryQuery("");
                           }}
                           className={`block w-full px-3 py-2 text-left text-sm hover:bg-black/[.04] dark:hover:bg-white/[.06] ${
-                            n.id === value.taxonomyId ? "bg-[#f56400]/10" : ""
+                            n.id === value.taxonomyId ? "bg-primary/10" : ""
                           }`}
                         >
                           {n.path}
@@ -695,7 +695,7 @@ export default function ListingForm({
                   name="who-made"
                   checked={value.whoMade === opt.value}
                   onChange={() => patch({ whoMade: opt.value })}
-                  className="accent-[#f56400]"
+                  className="accent-primary"
                 />
                 {opt.label}
               </label>
@@ -710,7 +710,7 @@ export default function ListingForm({
                 name="is-supply"
                 checked={!value.isSupply}
                 onChange={() => patch({ isSupply: false })}
-                className="accent-[#f56400]"
+                className="accent-primary"
               />
               A finished product
             </label>
@@ -720,7 +720,7 @@ export default function ListingForm({
                 name="is-supply"
                 checked={value.isSupply}
                 onChange={() => patch({ isSupply: true })}
-                className="accent-[#f56400]"
+                className="accent-primary"
               />
               A supply or tool to make things
             </label>
@@ -777,7 +777,7 @@ export default function ListingForm({
                         type="checkbox"
                         checked={value.productionPartnerIds.includes(p.productionPartnerId)}
                         onChange={() => toggleProductionPartner(p.productionPartnerId)}
-                        className="accent-[#f56400]"
+                        className="accent-primary"
                       />
                       {p.partnerName}
                       {p.location && <span className="text-xs text-zinc-500">· {p.location}</span>}
@@ -802,7 +802,7 @@ export default function ListingForm({
                 <button
                   type="button"
                   onClick={() => onGoToTab("variations")}
-                  className="font-medium text-[#f56400] hover:underline"
+                  className="font-medium text-primary hover:underline"
                 >
                   Variations tab
                 </button>
@@ -954,7 +954,7 @@ export default function ListingForm({
               type="checkbox"
               checked={value.featureListing}
               onChange={(e) => patch({ featureListing: e.target.checked })}
-              className="mt-0.5 accent-[#f56400]"
+              className="mt-0.5 accent-primary"
             />
             <span>
               Feature this listing
@@ -969,7 +969,7 @@ export default function ListingForm({
               type="checkbox"
               checked={value.promoteWithAds}
               onChange={(e) => patch({ promoteWithAds: e.target.checked })}
-              className="mt-0.5 accent-[#f56400]"
+              className="mt-0.5 accent-primary"
             />
             <span>
               Etsy Ads
@@ -992,7 +992,7 @@ export default function ListingForm({
                   name="renewal-option"
                   checked={value.autoRenew}
                   onChange={() => patch({ autoRenew: true })}
-                  className="accent-[#f56400]"
+                  className="accent-primary"
                 />
                 Automatic
               </label>
@@ -1002,7 +1002,7 @@ export default function ListingForm({
                   name="renewal-option"
                   checked={!value.autoRenew}
                   onChange={() => patch({ autoRenew: false })}
-                  className="accent-[#f56400]"
+                  className="accent-primary"
                 />
                 Manual
               </label>
@@ -1085,7 +1085,7 @@ function PropertyPicker({
                   type="checkbox"
                   checked={checked}
                   onChange={() => onToggle(property, pv)}
-                  className="accent-[#f56400]"
+                  className="accent-primary"
                 />
                 {pv.name}
               </label>
@@ -1277,7 +1277,7 @@ function VariationsSection({
           <button
             type="button"
             onClick={() => setEditor({ mode: "add" })}
-            className="h-9 rounded-lg bg-[#f56400] px-4 text-sm font-medium text-white hover:bg-[#d95700]"
+            className="h-9 rounded-lg bg-primary px-4 text-sm font-medium text-white hover:bg-primary-dark"
           >
             Add variation
           </button>
@@ -1322,7 +1322,7 @@ function VariationsSection({
                             enabled && t.appliesTo.length === 0 ? variations.map((_, i) => i) : t.appliesTo,
                         });
                       }}
-                      className="accent-[#f56400]"
+                      className="accent-primary"
                     />
                     {label}
                   </label>
@@ -1339,7 +1339,7 @@ function VariationsSection({
                                 : t.appliesTo.filter((x) => x !== i);
                               if (next.length > 0) setToggle(key, { appliesTo: next });
                             }}
-                            className="accent-[#f56400]"
+                            className="accent-primary"
                           />
                           {v.name}
                         </label>
@@ -1582,7 +1582,7 @@ function VariationEditorModal({
                 <p className="text-xs text-zinc-500">
                   Choose a category first — Etsy&apos;s variation options depend on it.{" "}
                   {onGoToDetails ? (
-                    <button type="button" onClick={onGoToDetails} className="font-medium text-[#f56400] hover:underline">
+                    <button type="button" onClick={onGoToDetails} className="font-medium text-primary hover:underline">
                       Go to Details
                     </button>
                   ) : (
@@ -1618,7 +1618,7 @@ function VariationEditorModal({
               <button
                 type="button"
                 onClick={pickCustom}
-                className="block text-sm font-medium text-[#f56400] hover:underline"
+                className="block text-sm font-medium text-primary hover:underline"
               >
                 + Create your own
               </button>
@@ -1658,7 +1658,7 @@ function VariationEditorModal({
                   value={variationDraft.name}
                   onChange={(e) => setVariationDraft((d) => ({ ...d, name: e.target.value }))}
                   placeholder="e.g. Paper type"
-                  className="mt-1 h-9 w-full rounded-lg border border-black/10 bg-white px-2 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
+                  className="mt-1 h-9 w-full rounded-lg border border-black/10 bg-white px-2 text-sm outline-none focus:border-primary dark:border-white/15 dark:bg-zinc-950"
                 />
               </label>
 
@@ -1667,7 +1667,7 @@ function VariationEditorModal({
                   type="checkbox"
                   checked={variationDraft.linksPhotos}
                   onChange={(e) => setVariationDraft((d) => ({ ...d, linksPhotos: e.target.checked }))}
-                  className="accent-[#f56400]"
+                  className="accent-primary"
                 />
                 Link photos to this variation
               </label>
@@ -1717,7 +1717,7 @@ function VariationEditorModal({
                   type="button"
                   disabled={variationDraft.name.trim() === "" || variationDraft.values.length === 0}
                   onClick={commit}
-                  className="h-8 rounded-lg bg-[#f56400] px-3 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
+                  className="h-8 rounded-lg bg-primary px-3 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   Done
                 </button>
@@ -1853,7 +1853,7 @@ function VariationValuePicker({
           <select
             value={scaleId ?? ""}
             onChange={(e) => setDraft((d) => ({ ...d, scaleId: Number(e.target.value), valueIds: [], values: [] }))}
-            className="mt-1 h-9 w-full rounded-lg border border-black/10 bg-white px-2 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
+            className="mt-1 h-9 w-full rounded-lg border border-black/10 bg-white px-2 text-sm outline-none focus:border-primary dark:border-white/15 dark:bg-zinc-950"
           >
             {property.scales.map((s) => (
               <option key={s.scaleId} value={s.scaleId}>
@@ -1883,7 +1883,7 @@ function VariationValuePicker({
                 key={pv.valueId ?? pv.name}
                 className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-xs hover:bg-black/[.04] dark:hover:bg-white/[.06]"
               >
-                <input type="checkbox" checked={checked} onChange={() => toggleValue(pv)} className="accent-[#f56400]" />
+                <input type="checkbox" checked={checked} onChange={() => toggleValue(pv)} className="accent-primary" />
                 {pv.name}
               </label>
             );
@@ -1935,7 +1935,7 @@ function VariationValuePicker({
           type="button"
           disabled={!canCommit}
           onClick={onCommit}
-          className="h-8 rounded-lg bg-[#f56400] px-3 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
+          className="h-8 rounded-lg bg-primary px-3 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
         >
           {isEditing ? "Save" : "Add variation"}
         </button>
@@ -2023,7 +2023,7 @@ function CustomOptionsInput({
             }
           }}
           placeholder="Enter an option…"
-          className="h-9 flex-1 rounded-lg border border-black/10 bg-white px-2 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
+          className="h-9 flex-1 rounded-lg border border-black/10 bg-white px-2 text-sm outline-none focus:border-primary dark:border-white/15 dark:bg-zinc-950"
         />
         <button
           type="button"
@@ -2074,7 +2074,7 @@ function CustomOptionsInput({
                   if (e.key === "Escape") setEditingId(null);
                 }}
                 onBlur={commitRename}
-                className="h-7 flex-1 rounded border border-black/10 bg-white px-1.5 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-900"
+                className="h-7 flex-1 rounded border border-black/10 bg-white px-1.5 text-sm outline-none focus:border-primary dark:border-white/15 dark:bg-zinc-900"
               />
             ) : (
               <span className="flex-1 truncate text-sm">{o.text}</span>
@@ -2346,7 +2346,7 @@ function VariationTable({
               value={setPriceDraft}
               onChange={(e) => setSetPriceDraft(e.target.value)}
               placeholder="Set price"
-              className="h-8 w-28 rounded-lg border border-black/10 bg-white px-2 text-xs outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
+              className="h-8 w-28 rounded-lg border border-black/10 bg-white px-2 text-xs outline-none focus:border-primary dark:border-white/15 dark:bg-zinc-950"
             />
             <button
               type="button"
@@ -2366,7 +2366,7 @@ function VariationTable({
                 setAdjustError(null);
               }}
               placeholder="e.g. +2.00 or -10%"
-              className="h-8 w-32 rounded-lg border border-black/10 bg-white px-2 text-xs outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
+              className="h-8 w-32 rounded-lg border border-black/10 bg-white px-2 text-xs outline-none focus:border-primary dark:border-white/15 dark:bg-zinc-950"
             />
             <button
               type="button"
@@ -2390,7 +2390,7 @@ function VariationTable({
                 value={bulk[k]}
                 onChange={(e) => setBulk((b) => ({ ...b, [k]: e.target.value }))}
                 placeholder={`Fill all ${VARIATION_COLUMN_LABEL[k]} fields`}
-                className="h-8 w-44 rounded-lg border border-black/10 bg-white px-2 text-xs outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
+                className="h-8 w-44 rounded-lg border border-black/10 bg-white px-2 text-xs outline-none focus:border-primary dark:border-white/15 dark:bg-zinc-950"
               />
               <button
                 type="button"
@@ -2415,7 +2415,7 @@ function VariationTable({
                   checked={combos.length > 0 && selected.size === combos.length}
                   onChange={toggleSelectAll}
                   aria-label="Select all rows"
-                  className="accent-[#f56400]"
+                  className="accent-primary"
                 />
               </th>
               <th className="px-2 py-1.5 text-left font-medium text-zinc-500">
@@ -2442,7 +2442,7 @@ function VariationTable({
                 <tr
                   key={rowKey}
                   className={`border-t border-black/5 dark:border-white/10 ${enabled ? "" : "opacity-40"} ${
-                    isSelected ? "bg-[#f56400]/5" : ""
+                    isSelected ? "bg-primary/5" : ""
                   }`}
                 >
                   <td className="px-2 py-1">
@@ -2451,7 +2451,7 @@ function VariationTable({
                       checked={isSelected}
                       onChange={() => toggleRow(rowKey)}
                       aria-label={`Select ${c.values.join(" / ")}`}
-                      className="accent-[#f56400]"
+                      className="accent-primary"
                     />
                   </td>
                   <td className="px-2 py-1">
@@ -2489,7 +2489,7 @@ function VariationTable({
                                   ? "optional"
                                   : ""
                           }
-                          className="h-7 w-24 rounded-md border border-black/10 bg-white px-1.5 outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
+                          className="h-7 w-24 rounded-md border border-black/10 bg-white px-1.5 outline-none focus:border-primary dark:border-white/15 dark:bg-zinc-950"
                         />
                       </td>
                     );
@@ -2513,7 +2513,7 @@ function VariationTable({
 // ---------------------------------------------------------------------------
 
 const personalizationInputCls =
-  "mt-1 h-9 w-full rounded-lg border border-black/10 bg-white px-2 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950";
+  "mt-1 h-9 w-full rounded-lg border border-black/10 bg-white px-2 text-sm outline-none focus:border-primary dark:border-white/15 dark:bg-zinc-950";
 
 function PersonalizationSection({
   value,
@@ -2719,7 +2719,7 @@ function PersonalizationFieldEditor({
           type="checkbox"
           checked={question.required}
           onChange={(e) => patchQuestion({ required: e.target.checked })}
-          className="accent-[#f56400]"
+          className="accent-primary"
         />
         Required
       </label>

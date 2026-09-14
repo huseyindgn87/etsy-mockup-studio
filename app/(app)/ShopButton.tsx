@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import MarketplaceBadge from "./MarketplaceBadge";
 
 /**
  * The home screen's single primary action — the connected shop's real name,
@@ -12,6 +13,12 @@ import { useEffect, useState } from "react";
 export default function ShopButton() {
   const [status, setStatus] = useState<"loading" | "loaded" | "error">("loading");
   const [shopName, setShopName] = useState<string | null>(null);
+  const [glowing, setGlowing] = useState(false);
+  const [reducedMotion, setReducedMotion] = useState(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
+    return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  });
+  const [glowStyle, setGlowStyle] = useState<CSSProperties>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -34,22 +41,65 @@ export default function ShopButton() {
     };
   }, []);
 
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const onChange = () => setReducedMotion(query.matches);
+    query.addEventListener("change", onChange);
+    return () => query.removeEventListener("change", onChange);
+  }, []);
+
+  function handlePointerMove(e: ReactPointerEvent<HTMLAnchorElement>) {
+    if (reducedMotion || e.pointerType === "touch") return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    setGlowStyle({
+      "--mx": `${e.clientX - rect.left}px`,
+      "--my": `${e.clientY - rect.top}px`,
+    } as CSSProperties);
+  }
+
+  function handlePointerEnter(e: ReactPointerEvent<HTMLAnchorElement>) {
+    if (reducedMotion || e.pointerType === "touch") return;
+    setGlowing(true);
+  }
+
+  function handlePointerLeave() {
+    setGlowing(false);
+  }
+
   if (status === "loading") {
     return (
       <div
         role="status"
         aria-label="Loading shop name"
-        className="h-10 w-full animate-pulse rounded-full bg-black/[.06] dark:bg-white/[.08]"
+        className="h-11 w-full animate-pulse rounded-full bg-black/[.06]"
       />
     );
   }
 
   return (
-    <Link
-      href="/listings"
-      className="inline-flex h-10 items-center justify-center rounded-full bg-[#f56400] px-5 text-sm font-medium text-white transition-colors hover:bg-[#d95700]"
-    >
-      {status === "loaded" && shopName ? shopName : "My shop"}
-    </Link>
+    <div className="flex flex-col items-center gap-2">
+      <Link
+        href="/listings"
+        onPointerMove={handlePointerMove}
+        onPointerEnter={handlePointerEnter}
+        onPointerLeave={handlePointerLeave}
+        style={glowStyle}
+        className="group relative inline-flex h-11 w-full items-center justify-center overflow-hidden rounded-full bg-primary px-6 text-sm font-medium text-white transition-[background-color,transform] duration-150 hover:bg-primary-dark focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 active:scale-[0.98]"
+      >
+        <span
+          aria-hidden
+          data-testid="shop-button-glow"
+          className="pointer-events-none absolute inset-0 rounded-full transition-opacity duration-200 motion-reduce:hidden"
+          style={{
+            opacity: glowing ? 1 : 0,
+            background:
+              "radial-gradient(120px circle at var(--mx, 50%) var(--my, 50%), var(--color-accent), transparent 100%)",
+          }}
+        />
+        <span className="relative">{status === "loaded" && shopName ? shopName : "My shop"}</span>
+      </Link>
+      <MarketplaceBadge marketplace="etsy" />
+    </div>
   );
 }

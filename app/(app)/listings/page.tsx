@@ -265,7 +265,7 @@ export default function ListingsPage() {
 
           <Link
             href={editorUrl("new")}
-            className="mt-4 flex h-10 w-full items-center justify-center rounded-full bg-[#f56400] text-sm font-medium text-white transition-colors hover:bg-[#d95700]"
+            className="mt-4 flex h-10 w-full items-center justify-center rounded-full bg-primary text-sm font-medium text-white transition-colors hover:bg-primary-dark"
           >
             + Create listing
           </Link>
@@ -313,7 +313,7 @@ export default function ListingsPage() {
               <select
                 value={sectionId ?? ""}
                 onChange={(e) => selectSection(e.target.value ? Number(e.target.value) : null)}
-                className="mt-1 h-9 w-full rounded-lg border border-black/10 bg-white px-2 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-950"
+                className="mt-1 h-9 w-full rounded-lg border border-black/10 bg-white px-2 text-sm outline-none focus:border-primary dark:border-white/15 dark:bg-zinc-950"
               >
                 <option value="">All sections</option>
                 {(sections ?? []).map((s) => (

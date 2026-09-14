@@ -1,6 +1,6 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { isConnected } from "@/lib/etsy/auth";
+import { getEtsySession } from "@/lib/etsy/auth";
 import { getShopName } from "@/lib/etsy/listings";
 import NavBar from "./NavBar";
 
@@ -12,8 +12,8 @@ import NavBar from "./NavBar";
  * route group so it doesn't inherit this chrome — see its own back link).
  */
 export default async function AppLayout({ children }: { children: ReactNode }) {
-  const connected = await isConnected();
-  if (!connected) return <>{children}</>;
+  const session = await getEtsySession();
+  if (!session) return <>{children}</>;
 
   let shopName: string | null = null;
   try {
@@ -24,7 +24,10 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
 
   return (
     <>
-      <NavBar shopName={shopName} />
+      <NavBar
+        shopName={shopName}
+        session={{ userId: session.userId, expiresAt: session.expiresAt }}
+      />
       <div className="flex-1">{children}</div>
       <footer className="border-t border-black/10 px-6 py-4 text-center dark:border-white/15">
         <Link

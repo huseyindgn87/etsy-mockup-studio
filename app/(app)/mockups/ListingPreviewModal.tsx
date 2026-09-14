@@ -109,7 +109,7 @@ export default function ListingPreviewModal({
                 aria-label={m.kind === "video" ? `${m.label} (video)` : m.label}
                 className={`relative h-16 w-16 shrink-0 overflow-hidden rounded-lg border-2 transition-colors ${
                   i === activeIndexClamped
-                    ? "border-[#f56400]"
+                    ? "border-primary"
                     : "border-transparent hover:border-black/10 dark:hover:border-white/15"
                 }`}
               >

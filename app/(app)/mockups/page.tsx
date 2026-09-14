@@ -1633,7 +1633,7 @@ function MockupsPageInner() {
               type="button"
               onClick={publishToEtsy}
               disabled={!!busy || publishCount === 0 || needsReadinessState}
-              className="h-9 rounded-full border border-[#f56400] px-4 text-sm font-medium text-[#f56400] transition-colors hover:bg-[#f56400]/10 disabled:opacity-40"
+              className="h-9 rounded-full border border-primary px-4 text-sm font-medium text-primary transition-colors hover:bg-primary/10 disabled:opacity-40"
             >
               {publishMode === "existing"
                 ? `Add (${publishCount})`
@@ -1649,13 +1649,13 @@ function MockupsPageInner() {
                 type="checkbox"
                 checked={overwriteExisting}
                 onChange={(e) => setOverwriteExisting(e.target.checked)}
-                className="accent-[#f56400]"
+                className="accent-primary"
               />
               replace existing images (in rank order)
             </label>
           )}
           {needsReadinessState && (
-            <p className="text-xs font-medium text-[#f56400]">
+            <p className="text-xs font-medium text-primary">
               Choose a processing profile on the Shipping tab before creating this draft.
             </p>
           )}
@@ -1732,7 +1732,7 @@ function MockupsPageInner() {
                         <span
                           aria-label={`${item.label} incomplete`}
                           className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                            isActive ? "bg-white dark:bg-black" : "bg-[#f56400]"
+                            isActive ? "bg-white dark:bg-black" : "bg-primary"
                           }`}
                         />
                       )}
@@ -1753,7 +1753,7 @@ function MockupsPageInner() {
                     type="button"
                     onClick={runBatch}
                     disabled={!!busy || jobCount === 0}
-                    className="h-9 rounded-full bg-[#f56400] px-4 text-sm font-medium text-white transition-colors hover:bg-[#d95700] disabled:opacity-40"
+                    className="h-9 rounded-full bg-primary px-4 text-sm font-medium text-white transition-colors hover:bg-primary-dark disabled:opacity-40"
                   >
                     {busy ?? `Batch render & download (${jobCount})`}
                   </button>
@@ -1795,7 +1795,7 @@ function MockupsPageInner() {
                             <div
                               className={`flex items-center gap-2 rounded-lg border px-2 py-1.5 text-sm ${
                                 m.id === activeId
-                                  ? "border-[#f56400] bg-[#f56400]/5"
+                                  ? "border-primary bg-primary/5"
                                   : "border-black/10 hover:bg-black/[.03] dark:border-white/15 dark:hover:bg-white/[.05]"
                               }`}
                             >
@@ -1814,7 +1814,7 @@ function MockupsPageInner() {
                                     ),
                                   )
                                 }
-                                className="accent-[#f56400]"
+                                className="accent-primary"
                               />
                               <button
                                 type="button"
@@ -1858,7 +1858,7 @@ function MockupsPageInner() {
                               title={d.name}
                               className={`block aspect-square w-full overflow-hidden rounded-lg border ${
                                 d.id === previewDesign?.id
-                                  ? "border-[#f56400] ring-2 ring-[#f56400]/40"
+                                  ? "border-primary ring-2 ring-primary/40"
                                   : "border-black/10 dark:border-white/15"
                               }`}
                             >
@@ -1968,7 +1968,7 @@ function MockupsPageInner() {
                                 max={s.max}
                                 value={value}
                                 onChange={(e) => onSlider(s.key, Number(e.target.value))}
-                                className="mt-1 w-full accent-[#f56400]"
+                                className="mt-1 w-full accent-primary"
                               />
                             </label>
                           );
@@ -2093,7 +2093,7 @@ function Dropzone({
         }}
         className={`flex w-full flex-col items-center gap-1 rounded-xl border-2 border-dashed px-4 py-6 text-sm transition-colors ${
           hot
-            ? "border-[#f56400] bg-[#f56400]/5"
+            ? "border-primary bg-primary/5"
             : "border-black/15 text-zinc-500 hover:border-black/30 dark:border-white/20 dark:hover:border-white/40"
         }`}
       >
@@ -2295,7 +2295,7 @@ function PhotoEnlargeModal({
               maxLength={MAX_ALT_TEXT_LENGTH}
               onChange={(e) => onAltTextChange(e.target.value)}
               placeholder="Describe this image for screen readers and search…"
-              className="mt-1 w-full resize-y rounded-lg border border-black/10 bg-white px-2 py-1.5 text-sm outline-none focus:border-[#f56400] dark:border-white/15 dark:bg-zinc-900"
+              className="mt-1 w-full resize-y rounded-lg border border-black/10 bg-white px-2 py-1.5 text-sm outline-none focus:border-primary dark:border-white/15 dark:bg-zinc-900"
             />
           </label>
 

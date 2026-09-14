@@ -1,24 +1,58 @@
 // @vitest-environment jsdom
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import { usePathname } from "next/navigation";
 import NavBar from "../NavBar";
 
 vi.mock("next/navigation", () => ({
-  usePathname: () => "/listings",
+  usePathname: vi.fn(),
 }));
 
-describe("NavBar", () => {
-  it("does not expose the mockup studio as a top-level nav entry", () => {
-    render(<NavBar shopName="GHCollectiveUS" />);
+const mockedUsePathname = vi.mocked(usePathname);
 
-    expect(screen.queryByRole("link", { name: "Mockups" })).not.toBeInTheDocument();
-    for (const link of screen.getAllByRole("link")) {
-      expect(link.getAttribute("href")).not.toMatch(/^\/mockups/);
-    }
+describe("NavBar", () => {
+  describe("lobby state (pathname \"/\")", () => {
+    it("renders the wordmark as plain, non-interactive text", () => {
+      mockedUsePathname.mockReturnValue("/");
+      render(<NavBar shopName={null} session={null} />);
+
+      expect(screen.queryByRole("link", { name: /Etsy Mockup Studio/i })).not.toBeInTheDocument();
+      const wordmark = screen.getByText("Etsy Mockup Studio");
+      expect(wordmark.tagName).toBe("SPAN");
+      expect(wordmark).not.toHaveAttribute("tabindex");
+      expect(wordmark).not.toHaveAttribute("href");
+    });
+
+    it("does not show the Listings nav link", () => {
+      mockedUsePathname.mockReturnValue("/");
+      render(<NavBar shopName={null} session={null} />);
+      expect(screen.queryByRole("link", { name: "Listings" })).not.toBeInTheDocument();
+    });
   });
 
-  it("still links to Listings", () => {
-    render(<NavBar shopName={null} />);
-    expect(screen.getByRole("link", { name: "Listings" })).toHaveAttribute("href", "/listings");
+  describe("inside state (any other pathname)", () => {
+    it("renders the wordmark as a link back to the lobby", () => {
+      mockedUsePathname.mockReturnValue("/listings");
+      render(<NavBar shopName={null} session={null} />);
+
+      const wordmark = screen.getByRole("link", { name: "Back to shop selection" });
+      expect(wordmark).toHaveAttribute("href", "/");
+    });
+
+    it("does not expose the mockup studio as a top-level nav entry", () => {
+      mockedUsePathname.mockReturnValue("/listings");
+      render(<NavBar shopName="GHCollectiveUS" session={null} />);
+
+      expect(screen.queryByRole("link", { name: "Mockups" })).not.toBeInTheDocument();
+      for (const link of screen.getAllByRole("link")) {
+        expect(link.getAttribute("href")).not.toMatch(/^\/mockups/);
+      }
+    });
+
+    it("still links to Listings", () => {
+      mockedUsePathname.mockReturnValue("/listings");
+      render(<NavBar shopName={null} session={null} />);
+      expect(screen.getByRole("link", { name: "Listings" })).toHaveAttribute("href", "/listings");
+    });
   });
 });

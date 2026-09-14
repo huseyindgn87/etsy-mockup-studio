@@ -228,9 +228,9 @@ export default function MockupCanvas({
       >
         <polygon
           points={area.map((p) => `${p[0]},${p[1]}`).join(" ")}
-          fill="#f56400"
+          fill="#12615C"
           fillOpacity={0.08}
-          stroke="#f56400"
+          stroke="#12615C"
           strokeWidth={2}
           vectorEffect="non-scaling-stroke"
           strokeDasharray="5 4"
@@ -262,7 +262,7 @@ export default function MockupCanvas({
               anchorMode: cornerMode === "ratio" && e.altKey ? "center" : "opposite",
             };
           }}
-          className="absolute h-4 w-4 -translate-x-1/2 -translate-y-1/2 cursor-grab touch-none rounded-full border-2 border-white bg-[#f56400] shadow active:cursor-grabbing"
+          className="absolute h-4 w-4 -translate-x-1/2 -translate-y-1/2 cursor-grab touch-none rounded-full border-2 border-white bg-primary shadow active:cursor-grabbing"
           style={{ left: `${p[0] * 100}%`, top: `${p[1] * 100}%` }}
         />
       ))}
