@@ -11,5 +11,7 @@ declare module "next-auth" {
 declare module "next-auth/jwt" {
   interface JWT {
     id: string;
+    /** Set at sign-in from the "Keep me signed in" checkbox — see auth.ts and lib/auth/session-cookie.ts. */
+    rememberMe: boolean;
   }
 }

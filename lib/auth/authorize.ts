@@ -6,6 +6,13 @@ export interface AuthorizedUser {
   id: string;
   email: string;
   name: string | null;
+  /** Whether "Keep me signed in" was checked on /login — see auth.ts's jwt callback and lib/auth/session-cookie.ts. */
+  rememberMe: boolean;
+}
+
+/** Truthy exactly the way a "remember me" checkbox arrives over the wire: a real `true`, or the string next-auth/react's `signIn()` serializes a boolean into via `URLSearchParams`. */
+function isChecked(value: unknown): boolean {
+  return value === true || value === "true";
 }
 
 /**
@@ -17,6 +24,7 @@ export interface AuthorizedUser {
 export async function authorizeCredentials(
   rawEmail: unknown,
   rawPassword: unknown,
+  rawRememberMe?: unknown,
 ): Promise<AuthorizedUser | null> {
   const email = typeof rawEmail === "string" ? normalizeEmail(rawEmail) : "";
   const password = typeof rawPassword === "string" ? rawPassword : "";
@@ -28,5 +36,5 @@ export async function authorizeCredentials(
   const valid = await verifyPassword(password, user.passwordHash);
   if (!valid) return null;
 
-  return { id: user.id, email: user.email, name: user.name };
+  return { id: user.id, email: user.email, name: user.name, rememberMe: isChecked(rawRememberMe) };
 }

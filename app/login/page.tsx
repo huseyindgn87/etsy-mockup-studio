@@ -10,6 +10,7 @@ function LoginForm() {
   const params = useSearchParams();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [rememberMe, setRememberMe] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -20,7 +21,7 @@ function LoginForm() {
     setSubmitting(true);
     setError(null);
 
-    const res = await signIn("credentials", { email, password, redirect: false });
+    const res = await signIn("credentials", { email, password, rememberMe, redirect: false });
     setSubmitting(false);
 
     if (!res || res.error) {
@@ -84,6 +85,18 @@ function LoginForm() {
             className="mt-1 h-10 w-full rounded-lg border border-black/10 bg-white px-3 text-sm text-text outline-none focus:border-primary"
           />
         </div>
+
+        <label className="flex items-center gap-2 text-sm text-text-muted">
+          <input
+            id="rememberMe"
+            name="rememberMe"
+            type="checkbox"
+            checked={rememberMe}
+            onChange={(e) => setRememberMe(e.target.checked)}
+            className="h-4 w-4 accent-primary"
+          />
+          Keep me signed in
+        </label>
 
         <button
           type="submit"
