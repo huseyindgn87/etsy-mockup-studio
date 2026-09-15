@@ -20,7 +20,7 @@ an actual `vitest run`, pending manual steps from the migrations folder and
 
 _Last updated 2026-09-16._
 
-- **HEAD:** fa9dfe8 (plus the commit updating this file). `tsc --noEmit`, `eslint .`, `next build` clean; **453 vitest tests passing**.
+- **HEAD:** 1a0cb9b (plus the commit updating this file). `tsc --noEmit`, `eslint .`, `next build` clean; **471 vitest tests passing**.
 - **Shipped:**
   - Listing editor at `/mockups` (variations, photos + video, personalization, settings tab, price-by-variation).
   - `/listings` backed by a DB listings cache with on-demand refresh; multiple Etsy shop connections per user (refresh tokens encrypted at rest).
@@ -28,7 +28,8 @@ _Last updated 2026-09-16._
   - App accounts (Auth.js credentials, "Keep me signed in"), scoping all user data.
   - Mockup template library + calibration screen at `/admin/templates` (last commit touching it was `5392d17 wip` — confirm with the maintainer what, if anything, is left).
   - Account settings at `/settings`: Light/Dark theme stored per user and rendered server-side as `<html data-theme>`, first/last name, email change (requires current password), password change, Etsy connection status + Disconnect (the only place these live), Log out.
-  - Top bar reduced to a sidebar toggle (listings page) and an avatar menu (Account settings, Sign out / Sign in).
+  - Top bar reduced to a sidebar toggle (listings page), the **LISTHOUSE** wordmark (links home; inert text on home itself), and an avatar menu (Account settings, Sign out / Sign in). The product name in the UI is LISTHOUSE; `/login`, `/register` and the TOTP issuer still say "Etsy Mockup Studio".
+  - Home welcome card is still (no `entry-card` sheen; login/register keep it). Clicking the shop button plays a ~1s "$" particle burst (`app/(app)/dollar-burst.ts`, Web Animations API, skipped under reduced motion).
   - Password inputs everywhere use `app/components/PasswordInput.tsx` (show/hide toggle).
   - Optional TOTP two-factor auth: enable/disable on `/settings` (QR via `qrcode`, TOTP on `node:crypto` in `lib/auth/totp.ts`), second sign-in step on `/login` accepting a 6-digit code or a single-use recovery code (10 issued, SHA-256 hashed). Secret AES-256-GCM encrypted with `TWO_FACTOR_ENCRYPTION_KEY`; codes can't be replayed.
 - **In progress:** nothing.
