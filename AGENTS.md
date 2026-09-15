@@ -20,7 +20,7 @@ an actual `vitest run`, pending manual steps from the migrations folder and
 
 _Last updated 2026-09-16._
 
-- **HEAD:** e0814df. `tsc --noEmit`, `eslint .`, `next build` clean; **400 vitest tests passing**.
+- **HEAD:** fa9dfe8 (plus the commit updating this file). `tsc --noEmit`, `eslint .`, `next build` clean; **453 vitest tests passing**.
 - **Shipped:**
   - Listing editor at `/mockups` (variations, photos + video, personalization, settings tab, price-by-variation).
   - `/listings` backed by a DB listings cache with on-demand refresh; multiple Etsy shop connections per user (refresh tokens encrypted at rest).
@@ -30,9 +30,12 @@ _Last updated 2026-09-16._
   - Account settings at `/settings`: Light/Dark theme stored per user and rendered server-side as `<html data-theme>`, first/last name, email change (requires current password), password change, Etsy connection status + Disconnect (the only place these live), Log out.
   - Top bar reduced to a sidebar toggle (listings page) and an avatar menu (Account settings, Sign out / Sign in).
   - Password inputs everywhere use `app/components/PasswordInput.tsx` (show/hide toggle).
-- **In progress:** optional TOTP two-factor auth (authenticator app, hashed single-use recovery codes, secret encrypted with its own key).
+  - Optional TOTP two-factor auth: enable/disable on `/settings` (QR via `qrcode`, TOTP on `node:crypto` in `lib/auth/totp.ts`), second sign-in step on `/login` accepting a 6-digit code or a single-use recovery code (10 issued, SHA-256 hashed). Secret AES-256-GCM encrypted with `TWO_FACTOR_ENCRYPTION_KEY`; codes can't be replayed.
+- **In progress:** nothing.
+- **Known gaps (not yet asked for):** no rate limiting or lockout on password / 2FA code attempts; JWT sessions mean a password, email or 2FA change doesn't sign out other devices; no email verification on email change (no email-sending flow).
 - **Pending manual steps for the maintainer:**
-  - Apply migration `20260915120000_add_user_profile_and_theme` (`npm run db:migrate`) — signed-in pages fail until it's applied.
+  - Apply migrations `20260915120000_add_user_profile_and_theme` and `20260916090000_add_two_factor_auth` (`npm run db:migrate`) — signed-in pages fail until they're applied.
+  - Add `TWO_FACTOR_ENCRYPTION_KEY` (min 32 chars, `openssl rand -base64 32`) to `.env.local` and restart — until then enabling 2FA shows "not available" and the server logs the missing variable.
 - **`.env.local` is maintained by the maintainer only — never edit it.** Document any new variable in `.env.example` and tell the maintainer its name.
 - **Storage:** Cloudflare R2 is wired up in code; bucket/env setup is on hold — do not touch storage config.
 - `TODO.md`'s five tasks all appear shipped (commits 7b3b227, dd060aa, 8575b3c, 72de813, c6953bd); the file itself hasn't been updated.
