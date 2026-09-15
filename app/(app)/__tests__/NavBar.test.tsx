@@ -35,14 +35,13 @@ beforeEach(() => {
 
 describe("NavBar", () => {
   describe.each(["/", "/listings", "/mockups", "/settings"])("on %s", (pathname) => {
-    it("renders no wordmark, page label, shop name, or email", () => {
+    it("renders no old wordmark, page label, shop name, or email", () => {
       renderBar(pathname);
       const header = screen.getByRole("banner");
       expect(header).not.toHaveTextContent("Etsy Mockup Studio");
       expect(header).not.toHaveTextContent("Listings");
       expect(header).not.toHaveTextContent("seller@example.com");
       expect(screen.queryByRole("link", { name: "Listings" })).not.toBeInTheDocument();
-      expect(screen.queryByRole("link", { name: "Back to shop selection" })).not.toBeInTheDocument();
     });
 
     it("renders no Etsy connection controls — no Connected indicator, no Disconnect", () => {
@@ -52,6 +51,51 @@ describe("NavBar", () => {
       expect(header).not.toHaveTextContent(/disconnect/i);
       expect(header.querySelector("form")).toBeNull();
       expect(header.querySelector('[action*="/api/auth/etsy"]')).toBeNull();
+    });
+
+    it("always shows the LISTHOUSE wordmark", () => {
+      renderBar(pathname);
+      expect(screen.getByRole("banner")).toHaveTextContent("LISTHOUSE");
+    });
+  });
+
+  describe("LISTHOUSE wordmark", () => {
+    it.each(["/listings", "/settings", "/mockups"])(
+      "on %s is a real, focusable link home with a visible focus ring",
+      (pathname) => {
+        renderBar(pathname);
+        const link = screen.getByRole("link", { name: "LISTHOUSE" });
+        expect(link.tagName).toBe("A");
+        expect(link).toHaveAttribute("href", "/");
+        expect(link).toHaveClass("focus-visible:ring-2", "focus-visible:ring-accent");
+        expect(link).not.toHaveClass("focus-visible:ring-0");
+
+        link.focus();
+        expect(link).toHaveFocus();
+      },
+    );
+
+    it("on the home screen is inert plain text — not a link, not focusable", () => {
+      renderBar("/");
+      expect(screen.queryByRole("link", { name: "LISTHOUSE" })).not.toBeInTheDocument();
+
+      const wordmark = screen.getByText("LISTHOUSE");
+      expect(wordmark.tagName).toBe("SPAN");
+      expect(wordmark).not.toHaveAttribute("href");
+      expect(wordmark).not.toHaveAttribute("tabindex");
+      expect(wordmark).not.toHaveAttribute("role");
+
+      wordmark.focus();
+      expect(wordmark).not.toHaveFocus();
+    });
+
+    it("sits top-left, before the account menu", () => {
+      renderBar("/listings");
+      const header = screen.getByRole("banner");
+      const wordmark = screen.getByRole("link", { name: "LISTHOUSE" });
+      const menu = screen.getByRole("button", { name: "Account menu" });
+      expect(wordmark.compareDocumentPosition(menu) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(header.contains(wordmark)).toBe(true);
     });
   });
 
@@ -78,11 +122,11 @@ describe("NavBar", () => {
   });
 
   describe("account menu", () => {
-    it("the header carries only the sidebar toggle and the account menu button", () => {
+    it("the header carries only the sidebar toggle, the wordmark, and the account menu", () => {
       renderBar("/listings");
       const buttons = screen.getAllByRole("button").map((b) => b.getAttribute("aria-label"));
       expect(buttons).toEqual(["Toggle sidebar", "Account menu"]);
-      expect(screen.queryAllByRole("link")).toHaveLength(0);
+      expect(screen.getAllByRole("link").map((l) => l.textContent)).toEqual(["LISTHOUSE"]);
     });
 
     it("links to /settings and signs out in one click when signed in", () => {
