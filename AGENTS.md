@@ -20,7 +20,7 @@ an actual `vitest run`, pending manual steps from the migrations folder and
 
 _Last updated 2026-09-16._
 
-- **HEAD:** a5b409d (plus the commit updating this file). `tsc --noEmit`, `eslint .`, `next build` clean; **480 vitest tests passing**.
+- **HEAD:** 57d8027 (plus the commit updating this file). `tsc --noEmit`, `eslint .`, `next build` clean; **555 vitest tests passing**.
 - **Shipped:**
   - Listing editor at `/mockups` (variations, photos + video, personalization, settings tab, price-by-variation).
   - `/listings` backed by a DB listings cache with on-demand refresh; multiple Etsy shop connections per user (refresh tokens encrypted at rest).
@@ -33,10 +33,11 @@ _Last updated 2026-09-16._
   - All glass cards (home, login, register) are still — the hover sheen and its `entry-card` styles are deleted. Clicking the shop button plays a ~1s "$" particle burst (`app/(app)/dollar-burst.ts`, Web Animations API, skipped under reduced motion) — deliberately tight, staying within ~250px of the click point.
   - Password inputs everywhere use `app/components/PasswordInput.tsx` (show/hide toggle).
   - Optional TOTP two-factor auth: enable/disable on `/settings` (QR via `qrcode`, TOTP on `node:crypto` in `lib/auth/totp.ts`), second sign-in step on `/login` accepting a 6-digit code or a single-use recovery code (10 issued, SHA-256 hashed). Secret AES-256-GCM encrypted with `TWO_FACTOR_ENCRYPTION_KEY`; codes can't be replayed.
-- **In progress:** nothing.
-- **Known gaps (not yet asked for):** no rate limiting or lockout on password / 2FA code attempts; JWT sessions mean a password, email or 2FA change doesn't sign out other devices; no email verification on email change (no email-sending flow).
+  - **Listing scheduling, part 1 (data model, API, UI):** `ScheduledListing` model (draft *or* cached listing, shop, owner, UTC `scheduledAt`, IANA `timezone`, status pending/publishing/published/failed/cancelled, `attemptCount`, `lastError`, `etsyListingId`; index on status + scheduledAt). `lib/scheduling/` has Intl-only wall-time⇄UTC conversion (DST-gap times rejected), validation (past rejected) and a store scoped to user **and** active shop. API: `GET/POST /api/schedule` (`from`/`to` range or `draftId`), `PATCH /api/schedule/[id]`, `POST /api/schedule/[id]/cancel`. Editor has "Schedule for later" beside publish (saves the draft, gated by the same `publishBlocker` checks as Publish). `/schedule` (linked from the listings sidebar) shows a two-week strip with TODAY, fortnight arrows, reschedule/cancel per entry. Deleting a draft cancels its live schedules; the draft TTL sweep skips scheduled drafts. The UI has only been verified by build/lint/types, not clicked through against a migrated DB.
+- **In progress:** listing scheduling **part 2 — the background runner** (pick up due `pending` rows, mark `publishing`, publish via the existing render/publish path, record `etsyListingId` / `attemptCount` / `lastError`). Not started. Things it must decide: publishing reads the draft server-side (the editor's Publish composes renders client-side today); whether to delete the draft after publishing; and the editor still allows an immediate Publish of a draft that is also scheduled (would double-publish).
+- **Known gaps (not yet asked for):** no rate limiting or lockout on password / 2FA code attempts; JWT sessions mean a password, email or 2FA change doesn't sign out other devices; no email verification on email change (no email-sending flow); the "one live schedule per draft" check in `createScheduledListing` is read-then-write, not a DB constraint (two simultaneous creates could both succeed).
 - **Pending manual steps for the maintainer:**
-  - Apply migrations `20260915120000_add_user_profile_and_theme` and `20260916090000_add_two_factor_auth` (`npm run db:migrate`) — signed-in pages fail until they're applied.
+  - Apply migrations `20260915120000_add_user_profile_and_theme`, `20260916090000_add_two_factor_auth` and `20260916150000_add_scheduled_listings` (`npm run db:migrate`) — signed-in pages fail until the first two are applied; `/schedule` and "Schedule for later" fail until the third is.
   - Add `TWO_FACTOR_ENCRYPTION_KEY` (min 32 chars, `openssl rand -base64 32`) to `.env.local` and restart — until then enabling 2FA shows "not available" and the server logs the missing variable.
 - **`.env.local` is maintained by the maintainer only — never edit it.** Document any new variable in `.env.example` and tell the maintainer its name.
 - **Storage:** Cloudflare R2 is wired up in code; bucket/env setup is on hold — do not touch storage config.
