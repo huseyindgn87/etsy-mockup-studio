@@ -30,9 +30,15 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         email: { label: "Email", type: "email" },
         password: { label: "Password", type: "password" },
         rememberMe: { label: "Keep me signed in", type: "checkbox" },
+        // Second step for accounts with two-factor auth on — see lib/auth/authorize.ts.
+        code: { label: "Authentication code", type: "text" },
+        recoveryCode: { label: "Recovery code", type: "text" },
       },
       authorize: (credentials) =>
-        authorizeCredentials(credentials?.email, credentials?.password, credentials?.rememberMe),
+        authorizeCredentials(credentials?.email, credentials?.password, credentials?.rememberMe, {
+          code: credentials?.code,
+          recoveryCode: credentials?.recoveryCode,
+        }),
     }),
   ],
   callbacks: {

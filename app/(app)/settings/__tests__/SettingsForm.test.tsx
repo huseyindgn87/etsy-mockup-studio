@@ -11,6 +11,9 @@ vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: refreshMock }) 
 vi.mock("next-auth/react", () => ({ signOut: signOutMock }));
 
 import SettingsForm, { type EtsyConnectionStatus, type SettingsUser } from "../SettingsForm";
+import type { TwoFactorStatus } from "../TwoFactorCard";
+
+const TWO_FACTOR_OFF: TwoFactorStatus = { enabled: false, remainingRecoveryCodes: 0, configError: null };
 
 const USER: SettingsUser = { email: "seller@example.com", firstName: null, lastName: null, theme: "light" };
 const NOT_CONNECTED: EtsyConnectionStatus = { connected: false, shopName: null, configError: null };
@@ -38,7 +41,7 @@ function save() {
 
 describe("SettingsForm — appearance", () => {
   test("offers exactly Light and Dark", () => {
-    render(<SettingsForm user={USER} etsy={NOT_CONNECTED} />);
+    render(<SettingsForm user={USER} etsy={NOT_CONNECTED} twoFactor={TWO_FACTOR_OFF} />);
     const radios = screen.getAllByRole("radio");
     expect(radios.map((r) => r.closest("label")?.textContent)).toEqual(["Light", "Dark"]);
     expect(screen.getByRole("radio", { name: "Light" })).toBeChecked();
@@ -47,7 +50,7 @@ describe("SettingsForm — appearance", () => {
 
   test("saving Dark PATCHes it to the account, applies it, and refreshes the server layout", async () => {
     fetchMock.mockResolvedValue(jsonResponse(200, { profile: { theme: "dark" } }));
-    render(<SettingsForm user={USER} etsy={NOT_CONNECTED} />);
+    render(<SettingsForm user={USER} etsy={NOT_CONNECTED} twoFactor={TWO_FACTOR_OFF} />);
 
     fireEvent.click(screen.getByRole("radio", { name: "Dark" }));
     save();
@@ -64,7 +67,7 @@ describe("SettingsForm — appearance", () => {
 
   test("a failed save doesn't apply the theme", async () => {
     fetchMock.mockResolvedValue(jsonResponse(500, { error: "Boom." }));
-    render(<SettingsForm user={USER} etsy={NOT_CONNECTED} />);
+    render(<SettingsForm user={USER} etsy={NOT_CONNECTED} twoFactor={TWO_FACTOR_OFF} />);
 
     fireEvent.click(screen.getByRole("radio", { name: "Dark" }));
     save();
@@ -76,7 +79,7 @@ describe("SettingsForm — appearance", () => {
 
 describe("SettingsForm — email", () => {
   test("changing the email without the current password shows an error and never calls the API", async () => {
-    render(<SettingsForm user={USER} etsy={NOT_CONNECTED} />);
+    render(<SettingsForm user={USER} etsy={NOT_CONNECTED} twoFactor={TWO_FACTOR_OFF} />);
     fireEvent.change(screen.getByLabelText("Email address"), { target: { value: "new@example.com" } });
     expect(screen.getByLabelText("Current password", { selector: "#emailCurrentPassword" })).toBeInTheDocument();
 
@@ -90,7 +93,7 @@ describe("SettingsForm — email", () => {
 
   test("sends the current password along with the new email", async () => {
     fetchMock.mockResolvedValue(jsonResponse(200, { email: "new@example.com" }));
-    render(<SettingsForm user={USER} etsy={NOT_CONNECTED} />);
+    render(<SettingsForm user={USER} etsy={NOT_CONNECTED} twoFactor={TWO_FACTOR_OFF} />);
     fireEvent.change(screen.getByLabelText("Email address"), { target: { value: "new@example.com" } });
     fireEvent.change(screen.getByLabelText("Current password", { selector: "#emailCurrentPassword" }), {
       target: { value: "correct-password" },
@@ -106,7 +109,7 @@ describe("SettingsForm — email", () => {
 
   test("shows the server's wrong-password error", async () => {
     fetchMock.mockResolvedValue(jsonResponse(403, { error: "Current password is incorrect." }));
-    render(<SettingsForm user={USER} etsy={NOT_CONNECTED} />);
+    render(<SettingsForm user={USER} etsy={NOT_CONNECTED} twoFactor={TWO_FACTOR_OFF} />);
     fireEvent.change(screen.getByLabelText("Email address"), { target: { value: "new@example.com" } });
     fireEvent.change(screen.getByLabelText("Current password", { selector: "#emailCurrentPassword" }), {
       target: { value: "nope" },
@@ -119,13 +122,13 @@ describe("SettingsForm — email", () => {
 
 describe("SettingsForm — password", () => {
   test("every password field has a show/hide toggle", () => {
-    render(<SettingsForm user={USER} etsy={NOT_CONNECTED} />);
+    render(<SettingsForm user={USER} etsy={NOT_CONNECTED} twoFactor={TWO_FACTOR_OFF} />);
     const passwordCard = screen.getByRole("region", { name: "Password" });
     expect(within(passwordCard).getAllByRole("button", { name: "Show password" })).toHaveLength(3);
   });
 
   test("mismatched confirmation is caught before any request", async () => {
-    render(<SettingsForm user={USER} etsy={NOT_CONNECTED} />);
+    render(<SettingsForm user={USER} etsy={NOT_CONNECTED} twoFactor={TWO_FACTOR_OFF} />);
     fireEvent.change(screen.getByLabelText("Current password", { selector: "#currentPassword" }), {
       target: { value: "correct-password" },
     });
@@ -141,7 +144,9 @@ describe("SettingsForm — password", () => {
 describe("SettingsForm — Etsy connection and log out", () => {
   test("connected: shop name, green Connected, red Disconnect posting back to /settings", () => {
     render(
-      <SettingsForm user={USER} etsy={{ connected: true, shopName: "GHCollectiveUS", configError: null }} />,
+      <SettingsForm user={USER} etsy={{ connected: true, shopName: "GHCollectiveUS", configError: null }}
+        twoFactor={TWO_FACTOR_OFF}
+      />,
     );
     const card = screen.getByRole("region", { name: "Etsy connection" });
     expect(within(card).getByText("GHCollectiveUS")).toBeInTheDocument();
@@ -155,21 +160,21 @@ describe("SettingsForm — Etsy connection and log out", () => {
   });
 
   test("not connected: no Disconnect, a Connect link instead", () => {
-    render(<SettingsForm user={USER} etsy={NOT_CONNECTED} />);
+    render(<SettingsForm user={USER} etsy={NOT_CONNECTED} twoFactor={TWO_FACTOR_OFF} />);
     expect(screen.queryByRole("button", { name: "Disconnect" })).not.toBeInTheDocument();
     expect(screen.getByText("Not connected")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Connect Etsy shop" })).toHaveAttribute("href", "/api/auth/etsy/login");
   });
 
   test("Log out signs out in a single click", () => {
-    render(<SettingsForm user={USER} etsy={NOT_CONNECTED} />);
+    render(<SettingsForm user={USER} etsy={NOT_CONNECTED} twoFactor={TWO_FACTOR_OFF} />);
     fireEvent.click(screen.getByRole("button", { name: "Log out" }));
     expect(signOutMock).toHaveBeenCalledTimes(1);
     expect(signOutMock).toHaveBeenCalledWith({ redirect: true, callbackUrl: "/login" });
   });
 
   test("with nothing changed, Save makes no requests", async () => {
-    render(<SettingsForm user={USER} etsy={NOT_CONNECTED} />);
+    render(<SettingsForm user={USER} etsy={NOT_CONNECTED} twoFactor={TWO_FACTOR_OFF} />);
     save();
     expect(await screen.findByText("No changes to save.")).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();

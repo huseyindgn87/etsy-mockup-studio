@@ -11,5 +11,14 @@ export default defineConfig({
   test: {
     environment: "node",
     setupFiles: ["./vitest.setup.ts"],
+    server: {
+      deps: {
+        // next-auth's ESM build imports "next/server" without an extension,
+        // which Node's resolver rejects; letting Vite transform it resolves
+        // it. Needed since lib/auth/two-factor-errors.ts extends next-auth's
+        // own CredentialsSignin (the class Auth.js checks with instanceof).
+        inline: ["next-auth"],
+      },
+    },
   },
 });

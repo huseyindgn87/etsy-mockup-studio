@@ -11,6 +11,8 @@ import {
   normalizeEmail,
 } from "@/lib/auth/validate";
 import LogOutButton from "./LogOutButton";
+import { sendJson } from "./send-json";
+import TwoFactorCard, { type TwoFactorStatus } from "./TwoFactorCard";
 
 export interface SettingsUser {
   email: string;
@@ -30,6 +32,7 @@ export interface EtsyConnectionStatus {
 interface Props {
   user: SettingsUser;
   etsy: EtsyConnectionStatus;
+  twoFactor: TwoFactorStatus;
 }
 
 type Section = "appearance" | "contact" | "email" | "password";
@@ -84,37 +87,14 @@ function NoticeLine({ notice }: { notice: Notice | null | undefined }) {
   );
 }
 
-async function send(
-  url: string,
-  method: "PATCH" | "POST",
-  body: unknown,
-): Promise<{ ok: true; body: Record<string, unknown> } | { ok: false; error: string }> {
-  try {
-    const res = await fetch(url, {
-      method,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    if (!res.ok) {
-      return {
-        ok: false,
-        error: typeof json.error === "string" ? json.error : `Request failed (${res.status}).`,
-      };
-    }
-    return { ok: true, body: json };
-  } catch {
-    return { ok: false, error: "Network error — try again." };
-  }
-}
-
 /**
  * /settings' editable cards. Appearance, contact, email and password are
  * saved together by the sticky footer's Save button — each only when it has
  * actually changed, via its own endpoint, with per-card results. The Etsy
- * connection card acts immediately (it's its own form, outside this one).
+ * connection and two-factor cards act immediately (their own forms, outside
+ * this one).
  */
-export default function SettingsForm({ user, etsy }: Props) {
+export default function SettingsForm({ user, etsy, twoFactor }: Props) {
   const router = useRouter();
 
   const [saved, setSaved] = useState<SettingsUser>(user);
@@ -138,7 +118,7 @@ export default function SettingsForm({ user, etsy }: Props) {
   const passwordDirty = !!(currentPassword || newPassword || confirmNewPassword);
 
   async function saveProfile(next: Partial<Record<Section, Notice>>): Promise<Partial<SettingsUser>> {
-    const r = await send("/api/account/profile", "PATCH", { firstName, lastName, theme });
+    const r = await sendJson("/api/account/profile", "PATCH", { firstName, lastName, theme });
     if (!r.ok) {
       if (themeDirty) next.appearance = { kind: "error", text: r.error };
       if (namesDirty) next.contact = { kind: "error", text: r.error };
@@ -163,7 +143,7 @@ export default function SettingsForm({ user, etsy }: Props) {
       next.email = { kind: "error", text: "Enter your current password to change your email." };
       return {};
     }
-    const r = await send("/api/account/email", "POST", {
+    const r = await sendJson("/api/account/email", "POST", {
       newEmail: email,
       currentPassword: emailPassword,
     });
@@ -189,7 +169,7 @@ export default function SettingsForm({ user, etsy }: Props) {
       return;
     }
 
-    const r = await send("/api/account/password", "POST", {
+    const r = await sendJson("/api/account/password", "POST", {
       currentPassword,
       newPassword,
       confirmPassword: confirmNewPassword,
@@ -436,6 +416,10 @@ export default function SettingsForm({ user, etsy }: Props) {
               )
             )}
           </div>
+        </SettingsCard>
+
+        <SettingsCard id="settings-two-factor" title="Two-factor authentication">
+          <TwoFactorCard status={twoFactor} />
         </SettingsCard>
 
         <div>

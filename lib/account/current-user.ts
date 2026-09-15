@@ -9,6 +9,7 @@ export interface CurrentUser {
   firstName: string | null;
   lastName: string | null;
   theme: Theme;
+  twoFactorEnabled: boolean;
 }
 
 /**
@@ -26,7 +27,14 @@ export const getCurrentUser = cache(async (): Promise<CurrentUser | null> => {
 
   const user = await prisma.user.findUnique({
     where: { id },
-    select: { id: true, email: true, firstName: true, lastName: true, theme: true },
+    select: {
+      id: true,
+      email: true,
+      firstName: true,
+      lastName: true,
+      theme: true,
+      twoFactorEnabled: true,
+    },
   });
   if (!user) return null;
   return { ...user, theme: coerceTheme(user.theme) };

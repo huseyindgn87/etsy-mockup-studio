@@ -1,10 +1,13 @@
 import type { Metadata } from "next";
 import { redirect, unstable_rethrow } from "next/navigation";
-import { getCurrentUser } from "@/lib/account/current-user";
+import { getCurrentUser, type CurrentUser } from "@/lib/account/current-user";
+import { countRemainingRecoveryCodes } from "@/lib/auth/second-factor";
+import { getTwoFactorKey, TWO_FACTOR_KEY_ENV, TwoFactorKeyError } from "@/lib/auth/two-factor-key";
 import { getEtsySession } from "@/lib/etsy/auth";
 import { listShopConnections } from "@/lib/etsy/shop-connections";
 import LogOutButton from "./LogOutButton";
 import SettingsForm, { type EtsyConnectionStatus } from "./SettingsForm";
+import type { TwoFactorStatus } from "./TwoFactorCard";
 
 export const dynamic = "force-dynamic";
 
@@ -34,11 +37,27 @@ async function etsyStatus(userId: string): Promise<EtsyConnectionStatus> {
   }
 }
 
+async function twoFactorStatus(user: CurrentUser): Promise<TwoFactorStatus> {
+  let configError: string | null = null;
+  try {
+    getTwoFactorKey();
+  } catch (err) {
+    if (!(err instanceof TwoFactorKeyError)) throw err;
+    console.error(`[two-factor] ${err.message}`);
+    configError = `Two-factor authentication isn't available yet: the server is missing a valid ${TWO_FACTOR_KEY_ENV}.`;
+  }
+  return {
+    enabled: user.twoFactorEnabled,
+    remainingRecoveryCodes: user.twoFactorEnabled ? await countRemainingRecoveryCodes(user.id) : 0,
+    configError,
+  };
+}
+
 export default async function SettingsPage() {
   const user = await getCurrentUser();
   if (!user) redirect(`/login?callbackUrl=${encodeURIComponent("/settings")}`);
 
-  const etsy = await etsyStatus(user.id);
+  const [etsy, twoFactor] = await Promise.all([etsyStatus(user.id), twoFactorStatus(user)]);
 
   return (
     <div className="bg-page-gradient min-h-screen font-sans">
@@ -61,6 +80,7 @@ export default async function SettingsPage() {
             theme: user.theme,
           }}
           etsy={etsy}
+          twoFactor={twoFactor}
         />
       </div>
     </div>
