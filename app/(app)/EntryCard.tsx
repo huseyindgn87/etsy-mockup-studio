@@ -7,7 +7,7 @@ interface Props {
 
 /**
  * The home screen's glass card. Deliberately carries no account identifiers,
- * no "Etsy Mockup Studio" branding, and no Disconnect action — connection
+ * no app-name branding (that's the top bar's wordmark), and no Disconnect action — connection
  * status and Disconnect live only on /settings.
  */
 export default function EntryCard({ etsyConnected }: Props) {

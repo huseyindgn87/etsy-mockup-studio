@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 import { isValidEmail, isValidPassword, MIN_PASSWORD_LENGTH } from "@/lib/auth/validate";
 import PasswordInput from "@/app/components/PasswordInput";
+import { APP_NAME } from "@/lib/brand";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -52,8 +53,8 @@ export default function RegisterPage() {
 
   return (
     <div className="bg-page-gradient flex min-h-screen flex-col items-center justify-center px-6 font-sans">
-      <main className="entry-card w-full max-w-md rounded-card border border-surface-border bg-surface p-8 shadow-soft backdrop-blur-md">
-        <p className="select-none text-center text-sm font-semibold text-text">Etsy Mockup Studio</p>
+      <main className="w-full max-w-md rounded-card border border-surface-border bg-surface p-8 shadow-soft backdrop-blur-md">
+        <p className="select-none text-center text-sm font-semibold text-text">{APP_NAME}</p>
 
         <div className="mt-6 text-center">
           <h1 className="text-2xl font-semibold tracking-tight text-text">Create your account</h1>

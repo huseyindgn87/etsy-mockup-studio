@@ -149,3 +149,15 @@ describe("LoginPage — two-factor step", () => {
     expect(screen.queryByLabelText("Authentication code")).not.toBeInTheDocument();
   });
 });
+
+describe("LoginPage — branding", () => {
+  test("shows Listhouse on a still glass card (no sheen)", () => {
+    render(<LoginPage />);
+    expect(screen.getByText("Listhouse")).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/etsy mockup studio/i);
+
+    const card = screen.getByRole("main");
+    expect(card).toHaveClass("rounded-card", "bg-surface", "backdrop-blur-md");
+    expect(card).not.toHaveClass("entry-card");
+  });
+});

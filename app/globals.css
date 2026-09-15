@@ -67,37 +67,3 @@ body {
 [data-theme="dark"] .bg-page-gradient {
   background: var(--background);
 }
-
-/* Entry card sheen: a faint diagonal reflection that only appears on hover
-   and settles into place, rather than sweeping or looping. */
-.entry-card {
-  position: relative;
-  overflow: hidden;
-}
-
-.entry-card::before {
-  content: "";
-  position: absolute;
-  inset: -20%;
-  background: linear-gradient(
-    115deg,
-    transparent 40%,
-    rgb(255 255 255 / 0.5) 50%,
-    transparent 60%
-  );
-  transform: translate(-6%, -6%);
-  opacity: 0;
-  transition: opacity 0.45s ease, transform 0.6s ease;
-  pointer-events: none;
-}
-
-.entry-card:hover::before {
-  opacity: 1;
-  transform: translate(0%, 0%);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .entry-card::before {
-    display: none;
-  }
-}

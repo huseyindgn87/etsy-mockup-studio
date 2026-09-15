@@ -25,7 +25,7 @@ export default async function Home({
 
   return (
     <div className="bg-page-gradient flex min-h-screen flex-col items-center justify-center px-6 font-sans">
-      {/* Glass card, deliberately still — no `entry-card` hover sheen here. */}
+      {/* Glass card, deliberately still — no hover sheen. */}
       <main className="w-full max-w-md rounded-card border border-surface-border bg-surface p-8 shadow-soft backdrop-blur-md">
         {etsy_error && (
           <p className="mb-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{etsy_error}</p>

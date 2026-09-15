@@ -13,7 +13,7 @@ describe("Home — welcome card", () => {
     const card = screen.getByRole("main");
 
     expect(card).toHaveClass("rounded-card", "bg-surface", "backdrop-blur-md", "shadow-soft");
-    // `entry-card` is the class that carries the diagonal ::before sheen (app/globals.css).
+    // `entry-card` was the class that carried the diagonal ::before sheen (now deleted from app/globals.css).
     expect(card).not.toHaveClass("entry-card");
     expect(card.className).not.toMatch(/animate-/);
   });

@@ -1,5 +1,6 @@
 import QRCode from "qrcode";
 import { prisma } from "@/lib/db/prisma";
+import { APP_NAME } from "@/lib/brand";
 import { verifyPassword } from "@/lib/auth/password";
 import { generateRecoveryCodes, hashRecoveryCode } from "@/lib/auth/recovery-codes";
 import { generateTotpSecret, otpauthUri, verifyTotp } from "@/lib/auth/totp";
@@ -12,7 +13,8 @@ import { decryptTwoFactorSecret, encryptTwoFactorSecret } from "@/lib/auth/two-f
  * Server-only — pulls in Prisma.
  */
 
-export const TWO_FACTOR_ISSUER = "Etsy Mockup Studio";
+/** The label authenticator apps show next to the code. */
+export const TWO_FACTOR_ISSUER = APP_NAME;
 
 export type TwoFactorError =
   | "not_found"

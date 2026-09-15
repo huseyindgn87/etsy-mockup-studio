@@ -53,6 +53,9 @@ describe("enable", () => {
     expect(setup.qrDataUrl).toMatch(/^data:image\/png;base64,/);
     expect(setup.otpauthUrl).toContain(`secret=${setup.secret}`);
     expect(setup.otpauthUrl).toContain("seller%40example.com");
+    // The authenticator app labels the account "Listhouse".
+    expect(setup.otpauthUrl.startsWith("otpauth://totp/Listhouse:seller%40example.com?")).toBe(true);
+    expect(new URL(setup.otpauthUrl).searchParams.get("issuer")).toBe("Listhouse");
   });
 
   test("requires a valid 6-digit code — a wrong one leaves 2FA off and issues no codes", async () => {

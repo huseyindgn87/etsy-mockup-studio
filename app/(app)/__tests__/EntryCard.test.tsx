@@ -49,7 +49,7 @@ describe("EntryCard", () => {
 
   it("never renders the app name or legacy connect-your-account copy on the card", () => {
     render(<EntryCard etsyConnected={false} />);
-    expect(screen.queryByText("Etsy Mockup Studio")).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/etsy mockup studio|listhouse/i);
     expect(screen.queryByText(/connect your etsy account/i)).not.toBeInTheDocument();
   });
 });

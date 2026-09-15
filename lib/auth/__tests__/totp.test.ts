@@ -63,11 +63,11 @@ describe("TOTP", () => {
   });
 
   test("otpauth URI carries the secret, issuer and standard parameters", () => {
-    const uri = otpauthUri({ secret: "JBSWY3DPEHPK3PXP", accountName: "a+b@example.com", issuer: "Etsy Mockup Studio" });
-    expect(uri.startsWith("otpauth://totp/Etsy%20Mockup%20Studio:a%2Bb%40example.com?")).toBe(true);
+    const uri = otpauthUri({ secret: "JBSWY3DPEHPK3PXP", accountName: "a+b@example.com", issuer: "Two Words" });
+    expect(uri.startsWith("otpauth://totp/Two%20Words:a%2Bb%40example.com?")).toBe(true);
     const params = new URL(uri).searchParams;
     expect(params.get("secret")).toBe("JBSWY3DPEHPK3PXP");
-    expect(params.get("issuer")).toBe("Etsy Mockup Studio");
+    expect(params.get("issuer")).toBe("Two Words");
     expect(params.get("digits")).toBe("6");
     expect(params.get("period")).toBe("30");
   });

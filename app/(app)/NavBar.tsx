@@ -3,10 +3,11 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { PanelLeft } from "lucide-react";
+import { APP_NAME } from "@/lib/brand";
 import { hasSidebar, SIDEBAR_ID, useSidebar } from "./SidebarContext";
 import UserMenu, { type MenuAccount } from "./UserMenu";
 
-const WORDMARK = "LISTHOUSE";
+const WORDMARK = APP_NAME.toUpperCase();
 /** The app home — the shop picker. */
 const HOME_ROUTE = "/";
 const WORDMARK_CLASS = "rounded-md px-1 text-sm font-semibold tracking-[0.2em] text-text";

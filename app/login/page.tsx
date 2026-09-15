@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { signIn } from "next-auth/react";
 import PasswordInput from "@/app/components/PasswordInput";
 import { INVALID_TWO_FACTOR_CODE, TWO_FACTOR_REQUIRED } from "@/lib/auth/two-factor-codes";
+import { APP_NAME } from "@/lib/brand";
 
 const INPUT_CLASS =
   "h-10 w-full rounded-lg border border-black/10 bg-white px-3 text-sm text-text outline-none focus:border-primary";
@@ -92,8 +93,8 @@ function LoginForm() {
   }
 
   return (
-    <main className="entry-card w-full max-w-md rounded-card border border-surface-border bg-surface p-8 shadow-soft backdrop-blur-md">
-      <p className="select-none text-center text-sm font-semibold text-text">Etsy Mockup Studio</p>
+    <main className="w-full max-w-md rounded-card border border-surface-border bg-surface p-8 shadow-soft backdrop-blur-md">
+      <p className="select-none text-center text-sm font-semibold text-text">{APP_NAME}</p>
 
       {step === "credentials" ? (
         <div className="mt-6 text-center">
