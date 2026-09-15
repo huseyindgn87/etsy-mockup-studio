@@ -47,6 +47,9 @@ vi.mock("@/lib/db/prisma", () => ({
         rows.delete(where.id);
       }),
     },
+    scheduledListing: {
+      updateMany: vi.fn(async () => ({ count: 0 })),
+    },
   },
 }));
 
@@ -98,5 +101,24 @@ describe("draft ownership isolation", () => {
     const ok = await deleteDraft("bob", id);
     expect(ok).toBe(false);
     expect(await getDraftRow("alice", id)).not.toBeNull();
+  });
+});
+
+describe("deleteDraft and scheduling", () => {
+  test("cancels the draft's still-editable schedules, scoped to its owner, before deleting it", async () => {
+    const { prisma } = await import("@/lib/db/prisma");
+    const updateMany = vi.mocked(prisma.scheduledListing.updateMany);
+    updateMany.mockClear();
+
+    const { id } = await createDraft("alice");
+    expect(await deleteDraft("bob", id)).toBe(false);
+    expect(updateMany).not.toHaveBeenCalled();
+
+    expect(await deleteDraft("alice", id)).toBe(true);
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { draftId: id, userId: "alice", status: { in: ["pending", "failed"] } },
+      data: { status: "cancelled" },
+    });
+    expect(await getDraftRow("alice", id)).toBeNull();
   });
 });

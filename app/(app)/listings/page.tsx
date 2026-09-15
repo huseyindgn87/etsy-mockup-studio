@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Copy, Merge, Pencil, RefreshCw, Trash2 } from "lucide-react";
+import { CalendarClock, Copy, Merge, Pencil, RefreshCw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { DraftSummary } from "@/lib/drafts/types";
 import { SIDEBAR_ID, useSidebar } from "../SidebarContext";
@@ -332,6 +332,13 @@ export default function ListingsPage() {
                 {drafts ? drafts.length : "…"}
               </span>
             </button>
+            <Link
+              href="/schedule"
+              className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm text-zinc-600 transition-colors hover:bg-black/[.04] dark:text-zinc-400 dark:hover:bg-white/[.06]"
+            >
+              <span>Schedule</span>
+              <CalendarClock size={14} aria-hidden className="text-zinc-400" />
+            </Link>
           </nav>
 
           {!viewingDrafts && (

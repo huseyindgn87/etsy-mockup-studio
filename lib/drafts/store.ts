@@ -10,6 +10,7 @@
 
 import type { ListingDraft, Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db/prisma";
+import { ACTIVE_STATUSES, EDITABLE_STATUSES } from "@/lib/scheduling/types";
 import { deletePrefix, draftPrefix } from "@/lib/storage/r2";
 import { DRAFT_TTL_DAYS } from "./constants";
 import type { DraftSummary } from "./types";
@@ -67,6 +68,13 @@ export async function saveDraft(
 export async function deleteDraft(userId: string, id: string): Promise<boolean> {
   const owned = await getDraftRow(userId, id);
   if (!owned) return false;
+  // The row's FK would just null out `draftId`, leaving a pending schedule
+  // pointing at nothing — cancel it explicitly instead. Published history
+  // keeps its row (see prisma/schema.prisma's `ScheduledListing`).
+  await prisma.scheduledListing.updateMany({
+    where: { draftId: id, userId, status: { in: [...EDITABLE_STATUSES] } },
+    data: { status: "cancelled" },
+  });
   // R2 cleanup is best-effort — an orphaned object is cheap; a draft the user
   // asked to delete but that a storage hiccup (or no R2 configured yet) leaves
   // stuck forever is a real, visible bug. Same tradeoff as sweepExpiredDrafts.
@@ -84,7 +92,11 @@ export async function deleteDraft(userId: string, id: string): Promise<boolean> 
 export async function sweepExpiredDrafts(): Promise<number> {
   const cutoff = new Date(Date.now() - DRAFT_TTL_DAYS * 24 * 60 * 60 * 1000);
   const expired = await prisma.listingDraft.findMany({
-    where: { updatedAt: { lt: cutoff } },
+    // A scheduled draft is waiting to publish, not abandoned — never sweep it.
+    where: {
+      updatedAt: { lt: cutoff },
+      scheduledListings: { none: { status: { in: [...ACTIVE_STATUSES] } } },
+    },
     select: { id: true },
   });
   for (const d of expired) {

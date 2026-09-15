@@ -10,6 +10,8 @@ import type { Calibration, Overlay, Quad, Raster } from "@/lib/mockup/types";
 import { normalizeBlendMode } from "@/lib/mockup/validate";
 import { MAX_COMBINATIONS_HARD_CAP } from "@/lib/etsy/variation-limits";
 import { MAX_DRAFT_PSDS } from "@/lib/drafts/constants";
+import type { ScheduledListingSummary, ScheduleTimeInput } from "@/lib/scheduling/types";
+import ScheduleDialog from "../schedule/ScheduleDialog";
 import type { DraftPhotosData, DraftSource } from "@/lib/drafts/types";
 import { howItsMadeError } from "@/lib/etsy/listing-classification";
 import { personalizationQuestionsError } from "@/lib/etsy/listing-personalization";
@@ -1165,9 +1167,10 @@ function MockupsPageInner() {
     [listingForm, mockups.length, designs.length, ownImages.length],
   );
 
-  const saveDraftNow = useCallback(async () => {
-    if (draftStatus === "restoring") return;
-    if (!draftId && !hasDraftableContent()) return;
+  /** Saves now. Resolves to the draft's id, or `null` when there was nothing to save or saving failed. */
+  const saveDraftNow = useCallback(async (): Promise<string | null> => {
+    if (draftStatus === "restoring") return null;
+    if (!draftId && !hasDraftableContent()) return null;
     setDraftStatus("saving");
     try {
       let id = draftId;
@@ -1242,9 +1245,11 @@ function MockupsPageInner() {
       if (!res.ok) throw new Error(await errorFrom(res));
       setDraftStatus("saved");
       setDraftError(null);
+      return id;
     } catch (err) {
       setDraftStatus("error");
       setDraftError(err instanceof Error ? err.message : "Could not save draft.");
+      return null;
     }
   }, [
     draftId,
@@ -1384,23 +1389,24 @@ function MockupsPageInner() {
     }
   }, [included, designs, jobCount, buildBatchForm]);
 
-  const publishToEtsy = useCallback(async () => {
-    if (photoSlots.length === 0) return;
+  /**
+   * Why this listing can't be published yet, or `null` when it's ready. Shared
+   * by Publish and "Schedule for later" — a listing that couldn't publish now
+   * shouldn't be queued to publish later.
+   */
+  const publishBlocker = useCallback((): string | null => {
+    if (photoSlots.length === 0) return "Add at least one photo first.";
     if ((publishMode === "copy" || publishMode === "existing") && publishId == null) {
-      setError("No target listing — go back to Listings and choose one.");
-      return;
+      return "No target listing — go back to Listings and choose one.";
     }
     if (publishMode === "new" && !listingForm.title.trim()) {
-      setError("Enter a title for the new draft (Listing information form).");
-      return;
+      return "Enter a title for the new draft (Listing information form).";
     }
     if (publishMode === "new" && publishId == null && listingForm.taxonomyId == null) {
-      setError("Choose a category for the new listing (Details tab).");
-      return;
+      return "Choose a category for the new listing (Details tab).";
     }
     if (publishMode === "new" && listingForm.readinessStateId == null) {
-      setError("Choose a processing profile for the new draft (Shipping tab).");
-      return;
+      return "Choose a processing profile for the new draft (Shipping tab).";
     }
     if (publishMode !== "existing") {
       const howError = howItsMadeError({
@@ -1409,21 +1415,25 @@ function MockupsPageInner() {
         whenMade: listingForm.whenMade,
         productionPartnerIds: listingForm.productionPartnerIds,
       });
-      if (howError) {
-        setError(`${howError} (How it's made tab)`);
-        return;
-      }
+      if (howError) return `${howError} (How it's made tab)`;
+      const personalizationError = personalizationQuestionsError(
+        listingForm.personalizationQuestions.filter((q) => q.questionText.trim() !== ""),
+      );
+      if (personalizationError) return `${personalizationError} (Personalization tab)`;
+    }
+    return null;
+  }, [photoSlots.length, publishMode, publishId, listingForm]);
+
+  const publishToEtsy = useCallback(async () => {
+    if (photoSlots.length === 0) return;
+    const blocker = publishBlocker();
+    if (blocker) {
+      setError(blocker);
+      return;
     }
     const activePersonalization = listingForm.personalizationQuestions.filter(
       (q) => q.questionText.trim() !== "",
     );
-    if (publishMode !== "existing") {
-      const personalizationError = personalizationQuestionsError(activePersonalization);
-      if (personalizationError) {
-        setError(`${personalizationError} (Personalization tab)`);
-        return;
-      }
-    }
     setError(null);
     setPublishResult(null);
     try {
@@ -1517,7 +1527,59 @@ function MockupsPageInner() {
     publishCount,
     buildBatchForm,
     videos,
+    publishBlocker,
   ]);
+
+  // ---- "Schedule for later" — see app/(app)/schedule and lib/scheduling/* ----
+  const [scheduleOpen, setScheduleOpen] = useState(false);
+  /** This draft's live schedule in the active shop, if it has one. */
+  const [schedule, setSchedule] = useState<ScheduledListingSummary | null>(null);
+
+  useEffect(() => {
+    if (!draftId) return;
+    const controller = new AbortController();
+    fetch(`/api/schedule?draftId=${encodeURIComponent(draftId)}`, { signal: controller.signal })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((body: { scheduledListings?: ScheduledListingSummary[] } | null) => {
+        if (!controller.signal.aborted) setSchedule(body?.scheduledListings?.[0] ?? null);
+      })
+      .catch(() => {
+        /* no schedule shown — scheduling itself still reports its own errors */
+      });
+    return () => controller.abort();
+  }, [draftId]);
+
+  /** Saves the draft (it stays a draft in our DB — nothing goes to Etsy), then schedules or reschedules it. */
+  async function submitSchedule(input: ScheduleTimeInput): Promise<string | null> {
+    const blocker = publishBlocker();
+    if (blocker) return blocker;
+    const id = await saveDraftNow();
+    if (!id) return "The draft couldn't be saved, so it can't be scheduled yet.";
+
+    const existing = schedule && schedule.draftId === id ? schedule : null;
+    const res = await fetch(existing ? `/api/schedule/${encodeURIComponent(existing.id)}` : "/api/schedule", {
+      method: existing ? "PATCH" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(existing ? input : { ...input, draftId: id }),
+    });
+    if (!res.ok) return errorFrom(res);
+    const body = (await res.json()) as { scheduledListing: ScheduledListingSummary };
+    setSchedule(body.scheduledListing);
+    setScheduleOpen(false);
+    return null;
+  }
+
+  /** The schedule's time as a wall time in the zone it was picked in, e.g. "Sep 20, 2:30 PM GMT+3". */
+  const scheduledLabel = schedule
+    ? new Date(schedule.scheduledAt).toLocaleString(undefined, {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        timeZone: schedule.timezone,
+        timeZoneName: "short",
+      })
+    : null;
 
   const areaCount = active ? quadList(active.calibration).length : 0;
   const areaIndex = Math.min(activeArea, Math.max(0, areaCount - 1));
@@ -1631,6 +1693,18 @@ function MockupsPageInner() {
             </span>
             <button
               type="button"
+              onClick={() => setScheduleOpen(true)}
+              disabled={!!busy || publishCount === 0 || needsReadinessState || draftStatus === "restoring"}
+              className="h-9 rounded-full border border-black/10 px-4 text-sm font-medium transition-colors hover:bg-black/[.04] disabled:opacity-40 dark:border-white/15 dark:hover:bg-white/[.06]"
+            >
+              {schedule
+                ? schedule.status === "failed"
+                  ? "Reschedule (failed)"
+                  : `Scheduled · ${scheduledLabel}`
+                : "Schedule for later"}
+            </button>
+            <button
+              type="button"
               onClick={publishToEtsy}
               disabled={!!busy || publishCount === 0 || needsReadinessState}
               className="h-9 rounded-full border border-primary px-4 text-sm font-medium text-primary transition-colors hover:bg-primary/10 disabled:opacity-40"
@@ -1642,7 +1716,28 @@ function MockupsPageInner() {
           </div>
         </div>
 
+        {scheduleOpen && (
+          <ScheduleDialog
+            heading={schedule ? "Reschedule listing" : "Schedule for later"}
+            description="The listing is kept as a draft here and published to Etsy at the time you choose. Nothing is sent to Etsy until then."
+            submitLabel={schedule ? "Reschedule" : "Schedule"}
+            initial={schedule}
+            onSubmit={submitSchedule}
+            onClose={() => setScheduleOpen(false)}
+          />
+        )}
+
         <div className="mx-auto mt-2 w-full max-w-7xl space-y-1">
+          {schedule && (
+            <p className="text-xs text-zinc-600 dark:text-zinc-400">
+              {schedule.status === "failed"
+                ? `The scheduled publish failed${schedule.lastError ? `: ${schedule.lastError}` : ""}. Reschedule to try again. `
+                : `Scheduled to publish ${scheduledLabel}. It stays a draft here until then — nothing is sent to Etsy yet. `}
+              <Link href="/schedule" className="font-medium text-primary underline underline-offset-2">
+                View schedule
+              </Link>
+            </p>
+          )}
           {publishMode === "existing" && (
             <label className="flex items-center gap-1.5 text-xs text-zinc-600 dark:text-zinc-400">
               <input

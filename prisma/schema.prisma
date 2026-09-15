@@ -60,6 +60,7 @@ model User {
   templates       MockupTemplate[]
   shopConnections EtsyShopConnection[]
   listings        Listing[]
+  scheduledListings ScheduledListing[]
 
   @@map("users")
 }
@@ -186,6 +187,7 @@ model ListingDraft {
   updatedAt    DateTime @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  scheduledListings ScheduledListing[]
 
   @@index([userId, updatedAt])
   @@map("listing_drafts")
@@ -295,4 +297,48 @@ model Listing {
   @@unique([userId, shopId, listingId])
   @@index([userId, shopId, state])
   @@map("listings")
+}
+
+/// A listing the user has asked to publish to Etsy at a later time
+/// (lib/scheduling/store.ts). Scheduling never talks to Etsy — the listing's
+/// content stays a `ListingDraft` in our own DB until a background runner
+/// (not built yet) picks the row up at `scheduledAt` and publishes it.
+///
+/// Refers to exactly one of: `draftId` (a saved `ListingDraft` — what the
+/// editor's "Schedule for later" creates) or `listingId` (an Etsy listing id
+/// already in this shop's `Listing` cache). `draftId` is SET NULL on draft
+/// deletion so a published row's history survives; deleting a draft cancels
+/// its still-active schedules first (lib/drafts/store.ts's `deleteDraft`).
+///
+/// Scoped to the owning `User` *and* the Etsy `shopId` it will publish to —
+/// every read and write filters on both.
+///
+/// `scheduledAt` is the UTC instant. `timezone` is the IANA zone the user
+/// picked it in, kept so the time can be shown and edited back in that zone.
+/// `status` is "pending" | "publishing" | "published" | "failed" |
+/// "cancelled" (lib/scheduling/types.ts). `attemptCount` / `lastError` are
+/// the runner's bookkeeping; `etsyListingId` is the listing Etsy returned
+/// once published.
+model ScheduledListing {
+  id            String   @id @default(cuid())
+  userId        String
+  shopId        String
+  draftId       String?
+  listingId     String?
+  scheduledAt   DateTime
+  timezone      String
+  status        String   @default("pending")
+  attemptCount  Int      @default(0)
+  lastError     String?
+  etsyListingId String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user  User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  draft ListingDraft? @relation(fields: [draftId], references: [id], onDelete: SetNull)
+
+  @@index([status, scheduledAt])
+  @@index([userId, shopId, scheduledAt])
+  @@index([draftId])
+  @@map("scheduled_listings")
 }
