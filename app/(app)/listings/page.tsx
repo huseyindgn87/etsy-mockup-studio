@@ -4,6 +4,7 @@ import Link from "next/link";
 import { Copy, Merge, Pencil, RefreshCw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { DraftSummary } from "@/lib/drafts/types";
+import { SIDEBAR_ID, useSidebar } from "../SidebarContext";
 import RefreshShopModal from "./RefreshShopModal";
 
 interface Listing {
@@ -83,6 +84,7 @@ function editorUrl(mode: "copy" | "new" | "existing", listing?: Listing): string
 }
 
 export default function ListingsPage() {
+  const { open: sidebarOpen } = useSidebar();
   const [state, setState] = useState<ListingState>("active");
   const [sectionId, setSectionId] = useState<number | null>(null);
   const [offset, setOffset] = useState(0);
@@ -264,8 +266,8 @@ export default function ListingsPage() {
   return (
     <div className="min-h-screen bg-zinc-50 font-sans dark:bg-black">
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-6 px-6 py-8 lg:flex-row">
-        {/* ---- left sidebar: state + section filters ---- */}
-        <aside className="lg:w-56 lg:shrink-0">
+        {/* ---- left sidebar: state + section filters (collapsed from the top bar's toggle) ---- */}
+        <aside id={SIDEBAR_ID} hidden={!sidebarOpen} className="lg:w-56 lg:shrink-0">
           <Link
             href="/"
             className="text-sm text-zinc-500 transition-colors hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"

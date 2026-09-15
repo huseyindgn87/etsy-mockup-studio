@@ -1,9 +1,8 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 import { getCurrentUser } from "@/lib/account/current-user";
-import { getEtsySession } from "@/lib/etsy/auth";
-import { getShopName } from "@/lib/etsy/listings";
 import NavBar from "./NavBar";
+import { SidebarProvider } from "./SidebarContext";
 
 /**
  * Shared chrome (top nav + footer) for every real app page. `/login` and
@@ -12,9 +11,12 @@ import NavBar from "./NavBar";
  *
  * The app account (not the Etsy connection) is what gates access here —
  * `proxy.ts` redirects an unauthenticated request to `/login` before this
- * layout ever renders, so `session` below is expected to always be set; the
+ * layout ever renders, so `user` below is expected to always be set; the
  * null check is just defense in depth, matching Next's own guidance not to
  * rely on Proxy alone.
+ *
+ * No Etsy lookups here: the top bar carries no shop name or connection
+ * status any more (those live only on /settings).
  */
 export default async function AppLayout({ children }: { children: ReactNode }) {
   // From the DB, not the session JWT — the JWT's email is frozen at sign-in
@@ -22,26 +24,9 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
   const user = await getCurrentUser();
   if (!user) return <>{children}</>;
 
-  const etsySession = await getEtsySession();
-
-  let shopName: string | null = null;
-  if (etsySession) {
-    try {
-      shopName = await getShopName();
-    } catch {
-      // An Etsy API hiccup shouldn't block the whole app shell from rendering.
-    }
-  }
-
   return (
-    <>
-      <NavBar
-        email={user.email}
-        shopName={shopName}
-        etsySession={
-          etsySession ? { userId: etsySession.userId, expiresAt: etsySession.expiresAt } : null
-        }
-      />
+    <SidebarProvider>
+      <NavBar account={{ email: user.email, firstName: user.firstName }} />
       <div className="flex-1">{children}</div>
       <footer className="border-t border-black/10 px-6 py-4 text-center dark:border-white/15">
         <Link
@@ -51,6 +36,6 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
           Templates
         </Link>
       </footer>
-    </>
+    </SidebarProvider>
   );
 }
