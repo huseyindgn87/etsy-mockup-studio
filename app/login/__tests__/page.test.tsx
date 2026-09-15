@@ -35,6 +35,17 @@ describe("LoginPage", () => {
     expect(checkbox).not.toBeChecked();
   });
 
+  test("the password field has a show/hide toggle that doesn't submit the form", () => {
+    render(<LoginPage />);
+    const input = screen.getByLabelText("Password");
+    expect(input).toHaveAttribute("type", "password");
+
+    fireEvent.click(screen.getByRole("button", { name: "Show password" }));
+    expect(input).toHaveAttribute("type", "text");
+    expect(screen.getByRole("button", { name: "Hide password" })).toBeInTheDocument();
+    expect(signInMock).not.toHaveBeenCalled();
+  });
+
   test("signing in without checking it sends rememberMe: false", async () => {
     render(<LoginPage />);
     fillAndSubmit();

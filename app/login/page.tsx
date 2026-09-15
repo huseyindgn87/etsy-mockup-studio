@@ -4,6 +4,7 @@ import Link from "next/link";
 import { Suspense, useState, type FormEvent } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { signIn } from "next-auth/react";
+import PasswordInput from "@/app/components/PasswordInput";
 
 function LoginForm() {
   const router = useRouter();
@@ -74,15 +75,14 @@ function LoginForm() {
           <label htmlFor="password" className="block text-sm font-medium text-text">
             Password
           </label>
-          <input
+          <PasswordInput
             id="password"
             name="password"
-            type="password"
             autoComplete="current-password"
             required
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            className="mt-1 h-10 w-full rounded-lg border border-black/10 bg-white px-3 text-sm text-text outline-none focus:border-primary"
+            className="h-10 w-full rounded-lg border border-black/10 bg-white px-3 text-sm text-text outline-none focus:border-primary"
           />
         </div>
 

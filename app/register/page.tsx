@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 import { isValidEmail, isValidPassword, MIN_PASSWORD_LENGTH } from "@/lib/auth/validate";
+import PasswordInput from "@/app/components/PasswordInput";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -88,16 +89,15 @@ export default function RegisterPage() {
             <label htmlFor="password" className="block text-sm font-medium text-text">
               Password
             </label>
-            <input
+            <PasswordInput
               id="password"
               name="password"
-              type="password"
               autoComplete="new-password"
               required
               minLength={MIN_PASSWORD_LENGTH}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="mt-1 h-10 w-full rounded-lg border border-black/10 bg-white px-3 text-sm text-text outline-none focus:border-primary"
+              className="h-10 w-full rounded-lg border border-black/10 bg-white px-3 text-sm text-text outline-none focus:border-primary"
             />
             <p className="mt-1 text-xs text-text-muted">At least {MIN_PASSWORD_LENGTH} characters.</p>
           </div>
@@ -106,15 +106,14 @@ export default function RegisterPage() {
             <label htmlFor="confirmPassword" className="block text-sm font-medium text-text">
               Confirm password
             </label>
-            <input
+            <PasswordInput
               id="confirmPassword"
               name="confirmPassword"
-              type="password"
               autoComplete="new-password"
               required
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
-              className="mt-1 h-10 w-full rounded-lg border border-black/10 bg-white px-3 text-sm text-text outline-none focus:border-primary"
+              className="h-10 w-full rounded-lg border border-black/10 bg-white px-3 text-sm text-text outline-none focus:border-primary"
             />
           </div>
 
