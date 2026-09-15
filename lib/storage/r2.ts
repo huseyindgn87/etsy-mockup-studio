@@ -100,6 +100,17 @@ export async function listKeys(prefix: string): Promise<string[]> {
   return (res.Contents ?? []).map((o) => o.Key!).filter(Boolean);
 }
 
+/** Deletes exactly `keys` (at most 1000 per call) — nothing is listed or matched by prefix. */
+export async function deleteObjects(keys: string[]): Promise<void> {
+  if (!keys.length) return;
+  await client().send(
+    new DeleteObjectsCommand({
+      Bucket: bucket(),
+      Delete: { Objects: keys.slice(0, 1000).map((Key) => ({ Key })) },
+    }),
+  );
+}
+
 /** Deletes every object under `prefix` — used to wipe a whole draft's files on delete/expiry. */
 export async function deletePrefix(prefix: string): Promise<void> {
   const keys = await listKeys(prefix);

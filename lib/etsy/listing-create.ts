@@ -374,3 +374,23 @@ export async function updateListingPersonalization(
     requestBody,
   );
 }
+
+/**
+ * Publish a draft listing on etsy.com — `PATCH /shops/{shop}/listings/{listing}`
+ * with `state=active`. Etsy requires the listing to have at least one image,
+ * and a physical listing's shipping profile to be complete; it rejects the
+ * request with an explanatory error otherwise. Activating also incurs Etsy's
+ * listing fee.
+ */
+export async function activateListing(shopId: number, listingId: number): Promise<void> {
+  const form = new URLSearchParams({ state: "active" });
+  await readEtsyResponse(
+    await etsyFetch(`/shops/${shopId}/listings/${listingId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: form.toString(),
+    }),
+    `PATCH /shops/${shopId}/listings/${listingId} (state=active)`,
+    form.toString(),
+  );
+}

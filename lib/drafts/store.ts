@@ -73,7 +73,7 @@ export async function deleteDraft(userId: string, id: string): Promise<boolean> 
   // keeps its row (see prisma/schema.prisma's `ScheduledListing`).
   await prisma.scheduledListing.updateMany({
     where: { draftId: id, userId, status: { in: [...EDITABLE_STATUSES] } },
-    data: { status: "cancelled" },
+    data: { status: "cancelled", activeDraftId: null },
   });
   // R2 cleanup is best-effort — an orphaned object is cheap; a draft the user
   // asked to delete but that a storage hiccup (or no R2 configured yet) leaves

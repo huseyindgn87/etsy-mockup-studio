@@ -1,10 +1,10 @@
 import { type NextRequest, NextResponse } from "next/server";
+import { parseScheduleContent } from "@/lib/scheduling/content-request";
 import { resolveScheduleScope, storeResultResponse } from "@/lib/scheduling/request";
 import {
   createScheduledListing,
   listActiveSchedulesForDraft,
   listScheduledListings,
-  type ScheduleTarget,
 } from "@/lib/scheduling/store";
 import { parseRange, parseScheduleTime } from "@/lib/scheduling/validate";
 
@@ -37,11 +37,13 @@ export async function GET(request: NextRequest) {
 }
 
 /**
- * `POST /api/schedule` — `{ draftId | listingId, date, time, timezone }`.
- * `date`/`time` are a wall time in `timezone`, stored as a UTC instant; it
- * must be in the future. Only records the schedule — nothing is sent to Etsy.
- * 201 with `{ scheduledListing }`; 404 for a draft/listing that isn't the
- * caller's; 409 when it's already scheduled.
+ * `POST /api/schedule` — `{ draftId, date, time, timezone, publishSpec,
+ * renderSetId, images }`. `date`/`time` are a wall time in `timezone`, stored
+ * as a UTC instant; it must be in the future. `images` (1–20, rank order)
+ * must already be uploaded via `PUT /api/schedule/renders/...`. Only records
+ * the schedule — nothing is sent to Etsy until the runner publishes it.
+ * 201 with `{ scheduledListing }`; 404 for a draft that isn't the caller's;
+ * 409 when the draft already has an active schedule.
  */
 export async function POST(request: Request) {
   const resolved = await resolveScheduleScope();
@@ -54,21 +56,21 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Expected a JSON body." }, { status: 400 });
   }
 
-  const hasDraft = typeof body.draftId === "string" && body.draftId !== "";
-  const hasListing = typeof body.listingId === "string" && /^\d{1,20}$/.test(body.listingId);
-  if (hasDraft === hasListing) {
-    return NextResponse.json(
-      { error: "Provide exactly one of `draftId` or `listingId`." },
-      { status: 400 },
-    );
+  if (typeof body.draftId !== "string" || body.draftId === "") {
+    return NextResponse.json({ error: "Provide the `draftId` to schedule." }, { status: 400 });
   }
-  const target: ScheduleTarget = hasDraft
-    ? { draftId: body.draftId as string }
-    : { listingId: body.listingId as string };
-
   const time = parseScheduleTime(body);
   if (!time.ok) return NextResponse.json({ error: time.error }, { status: 400 });
 
-  const result = await createScheduledListing(resolved.scope, target, time.scheduledAt, time.timezone);
+  const content = await parseScheduleContent(resolved.scope, body);
+  if (!content.ok) return content.response;
+
+  const result = await createScheduledListing(
+    resolved.scope,
+    body.draftId,
+    time.scheduledAt,
+    time.timezone,
+    content.content,
+  );
   return storeResultResponse(result, 201);
 }

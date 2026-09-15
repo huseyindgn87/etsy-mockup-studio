@@ -1,0 +1,71 @@
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+
+vi.mock("@/lib/scheduling/runner", () => ({
+  runDueScheduledListings: vi.fn(async () => ({ published: ["s1"], retrying: [], failed: [], skipped: 0, recovered: 0 })),
+}));
+vi.mock("@/lib/scheduling/publisher", () => ({ publishScheduledListing: vi.fn() }));
+vi.mock("@/lib/storage/r2", () => ({ deleteObjects: vi.fn() }));
+
+import { POST } from "@/app/api/schedule/run/route";
+import { decideRouteAccess } from "@/lib/auth/route-guard";
+import { isAuthorizedRunnerRequest } from "@/lib/scheduling/runner-auth";
+import { runDueScheduledListings } from "@/lib/scheduling/runner";
+
+const SECRET = "s".repeat(40);
+
+function call(authorization?: string) {
+  return POST(
+    new Request("http://localhost/api/schedule/run", {
+      method: "POST",
+      headers: authorization ? { Authorization: authorization } : {},
+    }),
+  );
+}
+
+beforeEach(() => {
+  vi.mocked(runDueScheduledListings).mockClear();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
+describe("POST /api/schedule/run", () => {
+  test("is disabled (503) until SCHEDULE_RUNNER_SECRET is set — and when it's too short", async () => {
+    vi.stubEnv("SCHEDULE_RUNNER_SECRET", "");
+    expect((await call(`Bearer ${SECRET}`)).status).toBe(503);
+    vi.stubEnv("SCHEDULE_RUNNER_SECRET", "short");
+    expect((await call("Bearer short")).status).toBe(503);
+    expect(runDueScheduledListings).not.toHaveBeenCalled();
+  });
+
+  test("401 without the right shared secret", async () => {
+    vi.stubEnv("SCHEDULE_RUNNER_SECRET", SECRET);
+    expect((await call()).status).toBe(401);
+    expect((await call("Bearer wrong")).status).toBe(401);
+    expect((await call(SECRET)).status).toBe(401);
+    expect(runDueScheduledListings).not.toHaveBeenCalled();
+  });
+
+  test("runs the runner and returns its result with the right secret", async () => {
+    vi.stubEnv("SCHEDULE_RUNNER_SECRET", SECRET);
+    const res = await call(`Bearer ${SECRET}`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ published: ["s1"], retrying: [], failed: [], skipped: 0, recovered: 0 });
+    expect(runDueScheduledListings).toHaveBeenCalledTimes(1);
+  });
+
+  test("the secret comparison is exact", () => {
+    expect(isAuthorizedRunnerRequest(`Bearer ${SECRET}`, SECRET)).toBe(true);
+    expect(isAuthorizedRunnerRequest(`Bearer ${SECRET}x`, SECRET)).toBe(false);
+    expect(isAuthorizedRunnerRequest(`bearer ${SECRET}`, SECRET)).toBe(false);
+    expect(isAuthorizedRunnerRequest(null, SECRET)).toBe(false);
+  });
+
+  test("the route guard lets the runner through without an app session, but nothing else under /api/schedule", () => {
+    expect(decideRouteAccess("/api/schedule/run", false)).toEqual({ action: "next" });
+    expect(decideRouteAccess("/api/schedule", false)).toEqual({ action: "unauthorized" });
+    expect(decideRouteAccess("/api/schedule/renders/x/image-00", false)).toEqual({ action: "unauthorized" });
+  });
+});

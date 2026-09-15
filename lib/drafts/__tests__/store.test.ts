@@ -117,7 +117,7 @@ describe("deleteDraft and scheduling", () => {
     expect(await deleteDraft("alice", id)).toBe(true);
     expect(updateMany).toHaveBeenCalledWith({
       where: { draftId: id, userId: "alice", status: { in: ["pending", "failed"] } },
-      data: { status: "cancelled" },
+      data: { status: "cancelled", activeDraftId: null },
     });
     expect(await getDraftRow("alice", id)).toBeNull();
   });

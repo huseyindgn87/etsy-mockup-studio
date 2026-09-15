@@ -16,16 +16,32 @@ export const EDITABLE_STATUSES: readonly ScheduleStatus[] = ["pending", "failed"
 
 /**
  * Statuses that count as a draft's live schedule — a draft may have at most
- * one, so it can never be published twice. A "failed" row still counts: the
- * way to retry it is to reschedule it.
+ * one (enforced by the unique `activeDraftId` column), so it can never be
+ * published twice. A "failed" row still counts: the way to retry it is to
+ * reschedule it.
  */
 export const ACTIVE_STATUSES: readonly ScheduleStatus[] = ["pending", "publishing", "failed"];
+
+/** Failed publish attempts before a scheduled listing is marked "failed" for good. */
+export const MAX_PUBLISH_ATTEMPTS = 3;
+
+/**
+ * One image a scheduled publish sends to Etsy, stored in rank order on the
+ * row. `key` is the R2 object (under `scheduled/{userId}/{renderSetId}/`,
+ * see lib/scheduling/render-keys.ts) holding the image the browser rendered —
+ * or a copy of the user's own photo — when the listing was scheduled.
+ */
+export interface ScheduledImage {
+  key: string;
+  filename: string;
+  contentType: string;
+  altText?: string;
+}
 
 /** One scheduled listing as the API returns it. */
 export interface ScheduledListingSummary {
   id: string;
   draftId: string | null;
-  listingId: string | null;
   title: string;
   thumbnailUrl: string | null;
   /** ISO 8601, UTC. */
@@ -33,7 +49,10 @@ export interface ScheduledListingSummary {
   /** IANA timezone the time was picked in. */
   timezone: string;
   status: ScheduleStatus;
+  imageCount: number;
   attemptCount: number;
+  /** ISO 8601 — when a failed attempt will be retried, while it waits out its backoff. */
+  nextAttemptAt: string | null;
   lastError: string | null;
   etsyListingId: string | null;
 }
@@ -43,4 +62,14 @@ export interface ScheduleTimeInput {
   date: string;
   time: string;
   timezone: string;
+}
+
+/** What the editor uploads alongside a schedule: the listing content and the images it rendered. */
+export interface ScheduleContentInput {
+  /** The editor's Publish payload (`PublishSpec`), mode "new" or "copy". */
+  publishSpec: unknown;
+  /** The browser-generated id the images were uploaded under. */
+  renderSetId: string;
+  /** In rank order; image `i` was uploaded to slot `image-NN`. */
+  images: { filename: string; contentType: string; altText?: string }[];
 }

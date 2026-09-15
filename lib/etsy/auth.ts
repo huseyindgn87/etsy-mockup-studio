@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { cookies } from "next/headers";
 import { getEtsyConfig, ETSY_ENDPOINTS } from "./config";
 import { refreshSession } from "./oauth";
@@ -128,14 +129,27 @@ export async function fetchWithRateLimitRetry(
 }
 
 /**
- * Call the Etsy API v3 with the stored token. Adds the required `Authorization`
- * and `x-api-key` headers, retries on rate-limiting, and throws if not connected.
+ * An access token pinned to the current async call chain by
+ * {@link withEtsyAccessToken} — for work with no browser request behind it
+ * (the scheduled-listing runner), where there's no session cookie to read.
+ */
+const pinnedAccessToken = new AsyncLocalStorage<string>();
+
+/** Runs `fn` with every `etsyFetch` inside it authenticated by `accessToken` instead of the session cookie. */
+export function withEtsyAccessToken<T>(accessToken: string, fn: () => Promise<T>): Promise<T> {
+  return pinnedAccessToken.run(accessToken, fn);
+}
+
+/**
+ * Call the Etsy API v3 with the stored token (or the one pinned by
+ * {@link withEtsyAccessToken}). Adds the required `Authorization` and
+ * `x-api-key` headers, retries on rate-limiting, and throws if not connected.
  */
 export async function etsyFetch(
   path: string,
   init: RequestInit = {},
 ): Promise<Response> {
-  const accessToken = await getAccessToken();
+  const accessToken = pinnedAccessToken.getStore() ?? (await getAccessToken());
   if (!accessToken) throw new Error("Not connected to Etsy.");
   const { clientId, sharedSecret } = getEtsyConfig();
 

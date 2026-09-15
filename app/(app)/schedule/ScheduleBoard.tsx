@@ -14,6 +14,7 @@ import {
 import { utcToWallTime } from "@/lib/scheduling/timezone";
 import {
   EDITABLE_STATUSES,
+  MAX_PUBLISH_ATTEMPTS,
   type ScheduledListingSummary,
   type ScheduleStatus,
   type ScheduleTimeInput,
@@ -39,15 +40,9 @@ function dateFromKey(key: string): Date {
   return new Date(y, m - 1, d);
 }
 
-/** Where clicking an entry goes: its draft in the editor, or the listing it targets. */
+/** Where clicking an entry goes: its draft in the editor (`null` once the draft is deleted). */
 function editorHref(item: ScheduledListingSummary): string | null {
-  if (item.draftId) return `/mockups?draftId=${encodeURIComponent(item.draftId)}`;
-  if (item.listingId) {
-    const params = new URLSearchParams({ mode: "existing", listingId: item.listingId, title: item.title });
-    if (item.thumbnailUrl) params.set("thumbnailUrl", item.thumbnailUrl);
-    return `/mockups?${params.toString()}`;
-  }
-  return null;
+  return item.draftId ? `/mockups?draftId=${encodeURIComponent(item.draftId)}` : null;
 }
 
 async function errorFrom(res: Response): Promise<string> {
@@ -320,7 +315,14 @@ function ScheduleEntry({
         return `${wall.time} in ${item.timezone.replaceAll("_", " ")}`;
       })()
     : undefined;
-  const badge = STATUS_BADGE[item.status];
+  // A pending row that has already failed an attempt is waiting out its backoff.
+  const badge =
+    item.status === "pending" && item.attemptCount > 0
+      ? {
+          label: `Retrying (${item.attemptCount}/${MAX_PUBLISH_ATTEMPTS})`,
+          className: "bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300",
+        }
+      : STATUS_BADGE[item.status];
   const editable = EDITABLE_STATUSES.includes(item.status);
   const href = editorHref(item);
 
@@ -354,7 +356,7 @@ function ScheduleEntry({
       )}
       {badge && (
         <span
-          title={item.status === "failed" ? (item.lastError ?? undefined) : undefined}
+          title={item.lastError ?? undefined}
           className={`mt-1 inline-block rounded px-1 py-px text-[10px] font-medium ${badge.className}`}
         >
           {badge.label}

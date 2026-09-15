@@ -10,6 +10,10 @@ const PUBLIC_EXACT = new Set([
   // An external cron endpoint guarded by its own bearer secret, not a
   // browser session — see app/api/drafts/sweep/route.ts.
   "/api/drafts/sweep",
+  // The scheduled-listing runner, triggered by a cron service or
+  // `npm run schedule:run` — requires its own shared secret, see
+  // app/api/schedule/run/route.ts.
+  "/api/schedule/run",
 ]);
 
 const AUTH_PAGES = new Set(["/login", "/register"]);

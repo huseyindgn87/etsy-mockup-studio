@@ -8,17 +8,21 @@
  * the same user's other shop — behaves exactly like a row that doesn't
  * exist: "not found", never "forbidden", so ids can't be probed.
  *
- * Nothing here talks to Etsy. Status changes that race the (future)
- * background runner go through a conditional `updateMany`, so a row the
- * runner has already moved to "publishing" can't be rescheduled or cancelled
- * underneath it.
+ * Nothing here talks to Etsy or storage. Status changes that race the
+ * background runner (lib/scheduling/runner.ts) go through a conditional
+ * `updateMany`, so a row the runner has already moved to "publishing" can't
+ * be rescheduled or cancelled underneath it.
  */
 
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db/prisma";
+import type { PublishSpec } from "@/lib/etsy/publish-listing";
+import { coerceScheduledImages } from "./publish-spec";
 import {
   ACTIVE_STATUSES,
   EDITABLE_STATUSES,
   SCHEDULE_STATUSES,
+  type ScheduledImage,
   type ScheduledListingSummary,
   type ScheduleStatus,
 } from "./types";
@@ -32,14 +36,25 @@ export type StoreResult<T> =
   | { ok: true; value: T }
   | { ok: false; code: "not_found" | "conflict"; error: string };
 
+/** Everything a schedule publishes — fixed when it's scheduled (or replaced from the editor). */
+export interface ScheduleContent {
+  publishSpec: PublishSpec;
+  renderSetId: string;
+  images: ScheduledImage[];
+}
+
+const ALREADY_SCHEDULED = "This draft is already scheduled. Reschedule it instead.";
+
 interface ScheduledRow {
   id: string;
   draftId: string | null;
-  listingId: string | null;
   scheduledAt: Date;
   timezone: string;
   status: string;
+  images: Prisma.JsonValue;
+  renderSetId: string | null;
   attemptCount: number;
+  nextAttemptAt: Date | null;
   lastError: string | null;
   etsyListingId: string | null;
   draft: { title: string; hasThumbnail: boolean } | null;
@@ -47,58 +62,36 @@ interface ScheduledRow {
 
 const withDraft = { draft: { select: { title: true, hasThumbnail: true } } } as const;
 
+/** Postgres unique violation, as Prisma reports it — here, a second active schedule for one draft. */
+export function isUniqueViolation(err: unknown): boolean {
+  return !!err && typeof err === "object" && (err as { code?: unknown }).code === "P2002";
+}
+
 function coerceStatus(value: string): ScheduleStatus {
   return (SCHEDULE_STATUSES as readonly string[]).includes(value) ? (value as ScheduleStatus) : "failed";
 }
 
-/** Title + thumbnail for rows that point at an Etsy listing rather than a draft, from the listings cache. */
-async function listingDisplay(
-  scope: Scope,
-  rows: ScheduledRow[],
-): Promise<Map<string, { title: string; thumbnailUrl: string | null }>> {
-  const ids = [...new Set(rows.map((r) => r.listingId).filter((id): id is string => !!id))];
-  if (ids.length === 0) return new Map();
-  const listings = await prisma.listing.findMany({
-    where: { userId: scope.userId, shopId: scope.shopId, listingId: { in: ids } },
-    select: { listingId: true, title: true, thumbnailUrl: true },
-  });
-  return new Map(listings.map((l) => [l.listingId, { title: l.title, thumbnailUrl: l.thumbnailUrl }]));
-}
-
-function toSummary(
-  row: ScheduledRow,
-  listings: Map<string, { title: string; thumbnailUrl: string | null }>,
-): ScheduledListingSummary {
-  let title: string;
+function toSummary(row: ScheduledRow): ScheduledListingSummary {
+  let title = "Deleted draft";
   let thumbnailUrl: string | null = null;
   if (row.draft && row.draftId) {
     title = row.draft.title.trim() || "Untitled listing";
     if (row.draft.hasThumbnail) thumbnailUrl = `/api/drafts/${row.draftId}/assets/thumbnail/thumb`;
-  } else if (row.listingId) {
-    const listing = listings.get(row.listingId);
-    title = listing?.title ?? `Listing #${row.listingId}`;
-    thumbnailUrl = listing?.thumbnailUrl ?? null;
-  } else {
-    title = "Deleted draft";
   }
   return {
     id: row.id,
     draftId: row.draftId,
-    listingId: row.listingId,
     title,
     thumbnailUrl,
     scheduledAt: row.scheduledAt.toISOString(),
     timezone: row.timezone,
     status: coerceStatus(row.status),
+    imageCount: coerceScheduledImages(row.images).length,
     attemptCount: row.attemptCount,
+    nextAttemptAt: row.nextAttemptAt ? row.nextAttemptAt.toISOString() : null,
     lastError: row.lastError,
     etsyListingId: row.etsyListingId,
   };
-}
-
-async function summarize(scope: Scope, rows: ScheduledRow[]): Promise<ScheduledListingSummary[]> {
-  const listings = await listingDisplay(scope, rows);
-  return rows.map((row) => toSummary(row, listings));
 }
 
 async function findOwned(scope: Scope, id: string): Promise<ScheduledRow | null> {
@@ -108,53 +101,50 @@ async function findOwned(scope: Scope, id: string): Promise<ScheduledRow | null>
   });
 }
 
-export type ScheduleTarget = { draftId: string } | { listingId: string };
+const contentData = (content: ScheduleContent) => ({
+  publishSpec: content.publishSpec as unknown as Prisma.InputJsonValue,
+  renderSetId: content.renderSetId,
+  images: content.images as unknown as Prisma.InputJsonValue,
+});
 
 /**
- * Schedules a draft (or a listing from this shop's cache) to publish at
- * `scheduledAt`. The caller has already validated the time
- * (lib/scheduling/validate.ts). Fails with "not_found" when the draft or
- * listing isn't the caller's, and "conflict" when it already has a live
- * schedule in this shop — reschedule that one instead.
+ * Schedules a draft to publish at `scheduledAt` with already-rendered
+ * `content`. The caller has validated the time and content and confirmed the
+ * images are in storage. Fails with "not_found" when the draft isn't the
+ * caller's, and "conflict" when the database refuses a second active
+ * schedule for the same draft.
  */
 export async function createScheduledListing(
   scope: Scope,
-  target: ScheduleTarget,
+  draftId: string,
   scheduledAt: Date,
   timezone: string,
+  content: ScheduleContent,
 ): Promise<StoreResult<ScheduledListingSummary>> {
-  if ("draftId" in target) {
-    const draft = await prisma.listingDraft.findFirst({
-      where: { id: target.draftId, userId: scope.userId },
-      select: { id: true },
-    });
-    if (!draft) return { ok: false, code: "not_found", error: "Draft not found." };
-  } else {
-    const listing = await prisma.listing.findFirst({
-      where: { userId: scope.userId, shopId: scope.shopId, listingId: target.listingId, removedAt: null },
-      select: { id: true },
-    });
-    if (!listing) return { ok: false, code: "not_found", error: "Listing not found." };
-  }
-
-  const existing = await prisma.scheduledListing.findFirst({
-    where: { userId: scope.userId, shopId: scope.shopId, ...target, status: { in: [...ACTIVE_STATUSES] } },
+  const draft = await prisma.listingDraft.findFirst({
+    where: { id: draftId, userId: scope.userId },
     select: { id: true },
   });
-  if (existing) {
-    return {
-      ok: false,
-      code: "conflict",
-      error: "This listing is already scheduled. Reschedule it instead.",
-    };
-  }
+  if (!draft) return { ok: false, code: "not_found", error: "Draft not found." };
 
-  const row = await prisma.scheduledListing.create({
-    data: { userId: scope.userId, shopId: scope.shopId, ...target, scheduledAt, timezone },
-    include: withDraft,
-  });
-  const [summary] = await summarize(scope, [row]);
-  return { ok: true, value: summary };
+  try {
+    const row = await prisma.scheduledListing.create({
+      data: {
+        userId: scope.userId,
+        shopId: scope.shopId,
+        draftId,
+        activeDraftId: draftId,
+        scheduledAt,
+        timezone,
+        ...contentData(content),
+      },
+      include: withDraft,
+    });
+    return { ok: true, value: toSummary(row) };
+  } catch (err) {
+    if (isUniqueViolation(err)) return { ok: false, code: "conflict", error: ALREADY_SCHEDULED };
+    throw err;
+  }
 }
 
 /**
@@ -176,7 +166,7 @@ export async function listScheduledListings(
     orderBy: { scheduledAt: "asc" },
     include: withDraft,
   });
-  return summarize(scope, rows);
+  return rows.map(toSummary);
 }
 
 /** A draft's live schedule(s) in this shop — what the editor shows next to "Schedule for later". */
@@ -189,52 +179,87 @@ export async function listActiveSchedulesForDraft(
     orderBy: { scheduledAt: "asc" },
     include: withDraft,
   });
-  return summarize(scope, rows);
+  return rows.map(toSummary);
 }
 
-/** Applies `data` only while the row is still editable; explains why not otherwise. */
-async function updateIfEditable(
-  scope: Scope,
-  id: string,
-  data: { status: ScheduleStatus; scheduledAt?: Date; timezone?: string; attemptCount?: number; lastError?: null },
-  verb: string,
-): Promise<StoreResult<ScheduledListingSummary>> {
-  const { count } = await prisma.scheduledListing.updateMany({
-    where: { id, userId: scope.userId, shopId: scope.shopId, status: { in: [...EDITABLE_STATUSES] } },
-    data,
-  });
-  const row = await findOwned(scope, id);
-  if (!row) return { ok: false, code: "not_found", error: "Scheduled listing not found." };
-  if (count === 0) {
-    return { ok: false, code: "conflict", error: `This listing is ${row.status} and can't be ${verb}.` };
-  }
-  const [summary] = await summarize(scope, [row]);
-  return { ok: true, value: summary };
+export interface Rescheduled {
+  summary: ScheduledListingSummary;
+  /** The images the new content replaced — no longer referenced by any row, for the caller to delete. */
+  superseded: { renderSetId: string | null; images: ScheduledImage[] } | null;
 }
 
 /**
  * Moves a pending or failed schedule to a new time. A failed row goes back
- * to "pending" with its attempt count and error cleared — rescheduling is
- * how a failed publish is retried.
+ * to "pending" with its attempts, backoff and error cleared — rescheduling is
+ * how a failed publish is retried; its images were kept for exactly that.
+ *
+ * With `content` (a reschedule from the editor, which re-renders) the
+ * listing and images are replaced too, and any Etsy listing a previous
+ * attempt created is forgotten, since it was built from the old content.
  */
 export async function rescheduleScheduledListing(
   scope: Scope,
   id: string,
   scheduledAt: Date,
   timezone: string,
-): Promise<StoreResult<ScheduledListingSummary>> {
-  return updateIfEditable(
-    scope,
-    id,
-    { status: "pending", scheduledAt, timezone, attemptCount: 0, lastError: null },
-    "rescheduled",
-  );
+  content?: ScheduleContent,
+): Promise<StoreResult<Rescheduled>> {
+  const before = await findOwned(scope, id);
+  if (!before) return { ok: false, code: "not_found", error: "Scheduled listing not found." };
+  if (!content && coerceScheduledImages(before.images).length === 0) {
+    return {
+      ok: false,
+      code: "conflict",
+      error: "This schedule has no rendered images. Open the listing and schedule it again from the editor.",
+    };
+  }
+
+  const { count } = await prisma.scheduledListing.updateMany({
+    where: { id, userId: scope.userId, shopId: scope.shopId, status: { in: [...EDITABLE_STATUSES] } },
+    data: {
+      status: "pending",
+      scheduledAt,
+      timezone,
+      attemptCount: 0,
+      nextAttemptAt: null,
+      lastError: null,
+      ...(content ? { ...contentData(content), etsyListingId: null } : {}),
+    },
+  });
+  const row = await findOwned(scope, id);
+  if (!row) return { ok: false, code: "not_found", error: "Scheduled listing not found." };
+  if (count === 0) {
+    return { ok: false, code: "conflict", error: `This listing is ${row.status} and can't be rescheduled.` };
+  }
+  const superseded =
+    content && before.renderSetId !== content.renderSetId
+      ? { renderSetId: before.renderSetId, images: coerceScheduledImages(before.images) }
+      : null;
+  return { ok: true, value: { summary: toSummary(row), superseded } };
 }
 
-/** Cancels a pending or failed schedule. The draft itself is untouched. */
+/** Cancels a pending or failed schedule. The draft itself is untouched, and can be scheduled again. */
 export async function cancelScheduledListing(
   scope: Scope,
   id: string,
 ): Promise<StoreResult<ScheduledListingSummary>> {
-  return updateIfEditable(scope, id, { status: "cancelled" }, "cancelled");
+  const { count } = await prisma.scheduledListing.updateMany({
+    where: { id, userId: scope.userId, shopId: scope.shopId, status: { in: [...EDITABLE_STATUSES] } },
+    data: { status: "cancelled", activeDraftId: null, nextAttemptAt: null },
+  });
+  const row = await findOwned(scope, id);
+  if (!row) return { ok: false, code: "not_found", error: "Scheduled listing not found." };
+  if (count === 0) {
+    return { ok: false, code: "conflict", error: `This listing is ${row.status} and can't be cancelled.` };
+  }
+  return { ok: true, value: toSummary(row) };
+}
+
+/** Whether any of the user's schedules uses this render set — its images must then stay put. */
+export async function isRenderSetInUse(userId: string, renderSetId: string): Promise<boolean> {
+  const row = await prisma.scheduledListing.findFirst({
+    where: { userId, renderSetId },
+    select: { id: true },
+  });
+  return !!row;
 }

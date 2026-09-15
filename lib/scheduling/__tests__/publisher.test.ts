@@ -1,0 +1,197 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { beforeEach, describe, expect, test, vi } from "vitest";
+
+const { calls, objects } = vi.hoisted(() => ({
+  calls: [] as string[],
+  objects: new Map<string, Buffer>(),
+}));
+
+vi.mock("@/lib/etsy/auth", () => ({
+  withEtsyAccessToken: vi.fn(async (_token: string, fn: () => Promise<unknown>) => fn()),
+}));
+vi.mock("@/lib/etsy/oauth", () => ({
+  refreshSession: vi.fn(async () => ({
+    accessToken: "fresh-access",
+    refreshToken: "rotated-refresh",
+    expiresAt: 0,
+    userId: "1",
+  })),
+}));
+vi.mock("@/lib/etsy/shop-connections", () => ({
+  getDecryptedRefreshToken: vi.fn(async () => "stored-refresh"),
+  updateConnectionRefreshToken: vi.fn(async () => {}),
+}));
+vi.mock("@/lib/etsy/listing-create", () => ({
+  createDraftListing: vi.fn(async () => {
+    calls.push("create");
+    return 4242;
+  }),
+  activateListing: vi.fn(async () => {
+    calls.push("activate");
+  }),
+  getListingStructure: vi.fn(),
+  setListingProperty: vi.fn(async () => {
+    calls.push("property");
+  }),
+  setListingInventorySku: vi.fn(async () => {}),
+  updateListingInventory: vi.fn(async () => {}),
+  updateListingPersonalization: vi.fn(async () => {}),
+  updateListingSettings: vi.fn(async () => {
+    calls.push("settings");
+  }),
+}));
+vi.mock("@/lib/etsy/listing-images", () => ({
+  uploadListingImage: vi.fn(async (p: { rank: number }) => {
+    calls.push(`image:${p.rank}`);
+    return { listingImageId: 100 + p.rank, rank: p.rank, url: null };
+  }),
+}));
+vi.mock("@/lib/storage/r2", () => ({
+  getObject: vi.fn(async (key: string) =>
+    objects.has(key) ? { body: objects.get(key)!, contentType: "image/jpeg" } : null,
+  ),
+}));
+
+import type { ScheduledListing } from "@prisma/client";
+import { withEtsyAccessToken } from "@/lib/etsy/auth";
+import { activateListing, createDraftListing, setListingProperty } from "@/lib/etsy/listing-create";
+import { uploadListingImage } from "@/lib/etsy/listing-images";
+import { refreshSession } from "@/lib/etsy/oauth";
+import { getDecryptedRefreshToken, updateConnectionRefreshToken } from "@/lib/etsy/shop-connections";
+import { getObject } from "@/lib/storage/r2";
+import { publishScheduledListing } from "../publisher";
+import { SET_A, storedImages, VALID_SPEC } from "./fixtures";
+
+/** The stored `images` column, typed as Prisma's JSON value. */
+const jsonImages = (n: number, userId = "alice") =>
+  storedImages(userId, n) as unknown as ScheduledListing["images"];
+
+function makeRow(overrides: Partial<ScheduledListing> = {}): ScheduledListing {
+  return {
+    id: "s1",
+    userId: "alice",
+    shopId: "111",
+    draftId: "draft-1",
+    activeDraftId: "draft-1",
+    scheduledAt: new Date("2026-09-17T12:00:00Z"),
+    timezone: "UTC",
+    status: "publishing",
+    publishSpec: VALID_SPEC,
+    renderSetId: SET_A,
+    images: jsonImages(3),
+    attemptCount: 0,
+    nextAttemptAt: null,
+    lastError: null,
+    etsyListingId: null,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    ...overrides,
+  } as ScheduledListing;
+}
+
+function storeImages(n: number) {
+  for (const image of storedImages("alice", n)) objects.set(image.key, Buffer.from(`bytes of ${image.key}`));
+}
+
+const hooks = () => ({ onListingCreated: vi.fn(async () => {}) });
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  calls.length = 0;
+  objects.clear();
+});
+
+describe("publishScheduledListing", () => {
+  test("creates the listing, attaches 20 stored images in order, then activates it", async () => {
+    storeImages(20);
+    const h = hooks();
+    const listingId = await publishScheduledListing(makeRow({ images: jsonImages(20) }), h);
+
+    expect(listingId).toBe("4242");
+    expect(createDraftListing).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(createDraftListing).mock.calls[0][0]).toBe(111);
+    expect(vi.mocked(createDraftListing).mock.calls[0][1]).toMatchObject({ title: "Halloween mug", taxonomyId: 1234 });
+    expect(h.onListingCreated).toHaveBeenCalledWith("4242");
+
+    const uploads = vi.mocked(uploadListingImage).mock.calls.map(([p]) => p);
+    expect(uploads).toHaveLength(20);
+    uploads.forEach((p, i) => {
+      const image = storedImages("alice", 20)[i];
+      expect(p).toMatchObject({ shopId: 111, listingId: 4242, rank: i + 1, overwrite: true, altText: image.altText });
+      expect(Buffer.from(p.bytes).toString()).toBe(`bytes of ${image.key}`);
+    });
+    expect(vi.mocked(getObject).mock.calls.map(([key]) => key)).toEqual(storedImages("alice", 20).map((i) => i.key));
+
+    // Details, then every image, and activation last.
+    expect(calls[0]).toBe("create");
+    expect(calls.at(-1)).toBe("activate");
+    expect(calls.indexOf("activate")).toBeGreaterThan(calls.indexOf("image:20"));
+    expect(activateListing).toHaveBeenCalledWith(111, 4242);
+  });
+
+  test("authenticates with the stored refresh token and saves Etsy's rotated one", async () => {
+    storeImages(3);
+    await publishScheduledListing(makeRow(), hooks());
+    expect(getDecryptedRefreshToken).toHaveBeenCalledWith("alice", "111");
+    expect(refreshSession).toHaveBeenCalledWith("stored-refresh");
+    expect(updateConnectionRefreshToken).toHaveBeenCalledWith("alice", "111", "rotated-refresh");
+    expect(vi.mocked(withEtsyAccessToken).mock.calls[0][0]).toBe("fresh-access");
+  });
+
+  test("a retry reuses the listing a previous attempt created instead of creating another", async () => {
+    storeImages(3);
+    const h = hooks();
+    const listingId = await publishScheduledListing(makeRow({ etsyListingId: "777" }), h);
+    expect(listingId).toBe("777");
+    expect(createDraftListing).not.toHaveBeenCalled();
+    expect(h.onListingCreated).not.toHaveBeenCalled();
+    expect(vi.mocked(uploadListingImage).mock.calls.every(([p]) => p.listingId === 777)).toBe(true);
+    expect(activateListing).toHaveBeenCalledWith(111, 777);
+  });
+
+  test("an image missing from storage fails the attempt before the listing is activated", async () => {
+    storeImages(2); // the third is missing
+    await expect(publishScheduledListing(makeRow(), hooks())).rejects.toThrow("Image 3 is missing from storage.");
+    expect(activateListing).not.toHaveBeenCalled();
+  });
+
+  test("a failed follow-up step fails the attempt — the listing is never activated half set up", async () => {
+    storeImages(3);
+    vi.mocked(setListingProperty).mockRejectedValueOnce(new Error("invalid value"));
+    const spec = {
+      ...VALID_SPEC,
+      newListing: {
+        ...VALID_SPEC.newListing,
+        properties: [{ propertyId: 200, name: "Primary color", valueIds: [1], values: ["Black"] }],
+      },
+    };
+    await expect(publishScheduledListing(makeRow({ publishSpec: spec }), hooks())).rejects.toThrow(
+      "Primary color: invalid value",
+    );
+    expect(uploadListingImage).not.toHaveBeenCalled();
+    expect(activateListing).not.toHaveBeenCalled();
+  });
+
+  test("an invalid stored spec, or no images, fails without calling Etsy", async () => {
+    await expect(
+      publishScheduledListing(makeRow({ publishSpec: { ...VALID_SPEC, mode: "existing" } }), hooks()),
+    ).rejects.toThrow(/details are invalid/);
+    await expect(publishScheduledListing(makeRow({ images: [] as unknown as ScheduledListing["images"] }), hooks())).rejects.toThrow(/no images/);
+    expect(refreshSession).not.toHaveBeenCalled();
+    expect(createDraftListing).not.toHaveBeenCalled();
+  });
+
+  test("a shop that's no longer connected fails with a clear message", async () => {
+    vi.mocked(getDecryptedRefreshToken).mockResolvedValueOnce(null);
+    await expect(publishScheduledListing(makeRow(), hooks())).rejects.toThrow(/no longer connected/);
+    expect(createDraftListing).not.toHaveBeenCalled();
+  });
+
+  test("the publisher never composites — it doesn't import the mockup compositor at all", () => {
+    const source = readFileSync(path.join(process.cwd(), "lib/scheduling/publisher.ts"), "utf8");
+    const runner = readFileSync(path.join(process.cwd(), "lib/scheduling/runner.ts"), "utf8");
+    expect(source).not.toMatch(/@\/lib\/mockup/);
+    expect(runner).not.toMatch(/@\/lib\/mockup/);
+  });
+});
