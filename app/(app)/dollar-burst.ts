@@ -14,8 +14,13 @@ const MIN_PARTICLES = 20;
 const MAX_PARTICLES = 30;
 /** Total lifetime of the effect; each particle lasts 85–100% of this. */
 export const BURST_DURATION_MS = 1000;
-/** px/s² — pulls particles back down after the upward launch. */
-const GRAVITY = 1200;
+/**
+ * px/s² — pulls particles back down after the upward launch. Scaled together
+ * with the launch speed below (both a third of their original 1200 / 300–650)
+ * so every trajectory keeps its shape but covers a third of the distance — a
+ * tight burst around the click point.
+ */
+const GRAVITY = 400;
 const KEYFRAME_SAMPLES = 16;
 const COLORS = ["var(--color-primary)", "var(--color-accent)", "#d4a017", "#2f9e44"];
 
@@ -73,7 +78,7 @@ export function burstDollars(x: number, y: number, random: () => number = Math.r
     // Launch mostly upward — within ±75° of straight up — then let gravity
     // arc each particle back down while it fades over the last ~45%.
     const angle = -Math.PI / 2 + (random() - 0.5) * ((5 * Math.PI) / 6);
-    const speed = 300 + random() * 350; // px/s
+    const speed = 100 + random() * 117; // px/s
     const vx = Math.cos(angle) * speed;
     const vy = Math.sin(angle) * speed;
     const spin = (random() - 0.5) * 720;

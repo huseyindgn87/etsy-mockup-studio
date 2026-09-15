@@ -97,6 +97,24 @@ describe("burstDollars", () => {
     expect(horizontal.has(1) && horizontal.has(-1)).toBe(true);
   });
 
+  test("stays a tight burst close to the click point", () => {
+    // Fastest launch at the widest angle, the opposite extreme, and a random one.
+    burstDollars(200, 200, () => 0.9999);
+    burstDollars(200, 200, () => 0);
+    burstDollars(200, 200);
+
+    let furthest = 0;
+    for (const [frames] of animateMock.mock.calls as [Keyframe[]][]) {
+      for (const f of frames) {
+        const { dx, dy } = offsetOf(f);
+        furthest = Math.max(furthest, Math.hypot(dx, dy));
+      }
+    }
+    // The original tuning reached ~760px at the extremes; a third of that is ~255px.
+    expect(furthest).toBeLessThanOrEqual(270);
+    expect(furthest).toBeGreaterThan(50); // still visibly bursts
+  });
+
   test("cleans itself up after the effect", () => {
     vi.useFakeTimers();
     burstDollars(10, 10);
