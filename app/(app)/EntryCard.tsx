@@ -6,10 +6,9 @@ interface Props {
 }
 
 /**
- * The home screen's glass card. Deliberately carries no account identifiers
- * — those live behind the header's Connected pill / user menu so a seller
- * never sees raw ids here, and no "Etsy Mockup Studio" branding — that's the
- * nav bar's job, not the card's.
+ * The home screen's glass card. Deliberately carries no account identifiers,
+ * no "Etsy Mockup Studio" branding, and no Disconnect action — connection
+ * status and Disconnect live only on /settings.
  */
 export default function EntryCard({ etsyConnected }: Props) {
   return (
@@ -24,20 +23,9 @@ export default function EntryCard({ etsyConnected }: Props) {
       </div>
 
       {etsyConnected ? (
-        <>
-          <div className="w-full">
-            <ShopButton />
-          </div>
-
-          <form action="/api/auth/etsy/logout" method="post">
-            <button
-              type="submit"
-              className="text-xs text-text-muted underline-offset-2 transition-colors hover:text-text hover:underline"
-            >
-              Disconnect
-            </button>
-          </form>
-        </>
+        <div className="w-full">
+          <ShopButton />
+        </div>
       ) : (
         // eslint-disable-next-line @next/next/no-html-link-for-pages -- an API route (redirects to Etsy's consent screen), not a page; the rule's matcher mistakes it for one because of the sibling app/api/auth/[...nextauth] catch-all.
         <a

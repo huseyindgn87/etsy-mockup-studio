@@ -30,7 +30,15 @@ model User {
   passwordHash  String
   emailVerified DateTime?
   name          String?
+  /// Editable from /settings' "Contact information" card. Null until set.
+  firstName     String?
+  lastName      String?
   image         String?
+  /// "light" | "dark" (lib/account/theme.ts) — chosen in /settings. Rendered
+  /// server-side as `<html data-theme>` by app/layout.tsx, so the stored
+  /// theme is already applied in the first HTML byte (no flash). There is
+  /// deliberately no "follow the OS" value.
+  theme         String    @default("light")
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 

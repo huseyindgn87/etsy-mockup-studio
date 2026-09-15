@@ -1,5 +1,9 @@
 @import "tailwindcss";
 
+/* `dark:` utilities follow the account's stored theme (`<html data-theme>`,
+   rendered server-side by app/layout.tsx), never the OS preference. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
 :root {
   --background: #ffffff;
   --foreground: #171717;
@@ -35,11 +39,19 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --background: #0a0a0a;
+  --foreground: #ededed;
+  --color-primary: #1d7f78;
+  --color-primary-dark: #166660;
+  --color-page-from: #111614;
+  --color-page-to: #0a0d0c;
+  --color-surface: rgb(28 34 31 / 72%);
+  --color-surface-border: rgb(255 255 255 / 10%);
+  --color-text: #e6ebe8;
+  --color-text-muted: #9ba7a1;
+  --shadow-soft: 0 1px 2px rgb(0 0 0 / 0.3), 0 12px 32px -12px rgb(0 0 0 / 0.6);
 }
 
 body {
@@ -52,10 +64,8 @@ body {
   background: linear-gradient(to bottom, var(--color-page-from), var(--color-page-to));
 }
 
-@media (prefers-color-scheme: dark) {
-  .bg-page-gradient {
-    background: var(--background);
-  }
+[data-theme="dark"] .bg-page-gradient {
+  background: var(--background);
 }
 
 /* Entry card sheen: a faint diagonal reflection that only appears on hover

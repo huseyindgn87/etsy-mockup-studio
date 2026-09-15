@@ -1,6 +1,6 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { auth } from "@/auth";
+import { getCurrentUser } from "@/lib/account/current-user";
 import { getEtsySession } from "@/lib/etsy/auth";
 import { getShopName } from "@/lib/etsy/listings";
 import NavBar from "./NavBar";
@@ -17,8 +17,10 @@ import NavBar from "./NavBar";
  * rely on Proxy alone.
  */
 export default async function AppLayout({ children }: { children: ReactNode }) {
-  const session = await auth();
-  if (!session?.user?.id) return <>{children}</>;
+  // From the DB, not the session JWT — the JWT's email is frozen at sign-in
+  // and would go stale after a change on /settings.
+  const user = await getCurrentUser();
+  if (!user) return <>{children}</>;
 
   const etsySession = await getEtsySession();
 
@@ -34,7 +36,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
   return (
     <>
       <NavBar
-        email={session.user.email ?? ""}
+        email={user.email}
         shopName={shopName}
         etsySession={
           etsySession ? { userId: etsySession.userId, expiresAt: etsySession.expiresAt } : null

@@ -25,7 +25,7 @@ describe("EntryCard", () => {
     expect(document.body.textContent).not.toMatch(/\d{2}:\d{2}:\d{2}/);
   });
 
-  it("shows the greeting, the shop button, and a quiet Disconnect link when Etsy is connected", async () => {
+  it("shows the greeting and the shop button, but no Disconnect (that lives only on /settings), when Etsy is connected", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue({ ok: true, json: async () => ({ shopName: "GHCollectiveUS" }) }),
@@ -34,7 +34,7 @@ describe("EntryCard", () => {
     render(<EntryCard etsyConnected />);
     expect(screen.getByRole("heading", { name: "Welcome back" })).toBeInTheDocument();
     await screen.findByRole("link", { name: "GHCollectiveUS" });
-    expect(screen.getByRole("button", { name: "Disconnect" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Disconnect" })).not.toBeInTheDocument();
   });
 
   it("shows a Connect Etsy shop button, and no shop button or Disconnect, when not connected", () => {
