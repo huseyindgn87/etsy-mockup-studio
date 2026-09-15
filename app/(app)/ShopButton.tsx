@@ -1,7 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import {
+  useEffect,
+  useState,
+  type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
+import { burstDollars } from "./dollar-burst";
 import MarketplaceBadge from "./MarketplaceBadge";
 
 /**
@@ -67,6 +74,19 @@ export default function ShopButton() {
     setGlowing(false);
   }
 
+  /** Fires the "$" burst and lets the click carry on — never prevents the navigation. */
+  function handleClick(e: ReactMouseEvent<HTMLAnchorElement>) {
+    let x = e.clientX;
+    let y = e.clientY;
+    // Keyboard activation (Enter) reports no pointer position — burst from the button's centre.
+    if (e.detail === 0) {
+      const rect = e.currentTarget.getBoundingClientRect();
+      x = rect.left + rect.width / 2;
+      y = rect.top + rect.height / 2;
+    }
+    burstDollars(x, y);
+  }
+
   if (status === "loading") {
     return (
       <div
@@ -81,6 +101,7 @@ export default function ShopButton() {
     <div className="flex flex-col items-center gap-2">
       <Link
         href="/listings"
+        onClick={handleClick}
         onPointerMove={handlePointerMove}
         onPointerEnter={handlePointerEnter}
         onPointerLeave={handlePointerLeave}
