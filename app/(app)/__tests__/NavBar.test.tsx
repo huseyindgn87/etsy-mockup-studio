@@ -60,13 +60,13 @@ describe("NavBar", () => {
   });
 
   describe("LISTHOUSE wordmark", () => {
-    it.each(["/listings", "/settings", "/mockups"])(
-      "on %s is a real, focusable link home with a visible focus ring",
+    it.each(["/", "/settings", "/mockups"])(
+      "on %s is a real, focusable link to /listings (the app's home) with a visible focus ring",
       (pathname) => {
         renderBar(pathname);
         const link = screen.getByRole("link", { name: "LISTHOUSE" });
         expect(link.tagName).toBe("A");
-        expect(link).toHaveAttribute("href", "/");
+        expect(link).toHaveAttribute("href", "/listings");
         expect(link).toHaveClass("focus-visible:ring-2", "focus-visible:ring-accent");
         expect(link).not.toHaveClass("focus-visible:ring-0");
 
@@ -75,8 +75,8 @@ describe("NavBar", () => {
       },
     );
 
-    it("on the home screen is inert plain text — not a link, not focusable", () => {
-      renderBar("/");
+    it("on /listings itself is inert plain text — not a link, not focusable", () => {
+      renderBar("/listings");
       expect(screen.queryByRole("link", { name: "LISTHOUSE" })).not.toBeInTheDocument();
 
       const wordmark = screen.getByText("LISTHOUSE");
@@ -90,7 +90,7 @@ describe("NavBar", () => {
     });
 
     it("sits top-left, before the account menu", () => {
-      renderBar("/listings");
+      renderBar("/settings");
       const header = screen.getByRole("banner");
       const wordmark = screen.getByRole("link", { name: "LISTHOUSE" });
       const menu = screen.getByRole("button", { name: "Account menu" });
@@ -123,9 +123,17 @@ describe("NavBar", () => {
 
   describe("account menu", () => {
     it("the header carries only the sidebar toggle, the wordmark, and the account menu", () => {
-      renderBar("/listings");
-      const buttons = screen.getAllByRole("button").map((b) => b.getAttribute("aria-label"));
-      expect(buttons).toEqual(["Toggle sidebar", "Account menu"]);
+      const { unmount } = renderBar("/listings");
+      expect(screen.getAllByRole("button").map((b) => b.getAttribute("aria-label"))).toEqual([
+        "Toggle sidebar",
+        "Account menu",
+      ]);
+      expect(screen.queryAllByRole("link")).toHaveLength(0); // wordmark is inert text here
+      expect(screen.getByRole("banner")).toHaveTextContent("LISTHOUSE");
+      unmount();
+
+      renderBar("/settings");
+      expect(screen.getAllByRole("button").map((b) => b.getAttribute("aria-label"))).toEqual(["Account menu"]);
       expect(screen.getAllByRole("link").map((l) => l.textContent)).toEqual(["LISTHOUSE"]);
     });
 

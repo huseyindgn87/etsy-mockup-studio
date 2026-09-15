@@ -8,8 +8,8 @@ import { hasSidebar, SIDEBAR_ID, useSidebar } from "./SidebarContext";
 import UserMenu, { type MenuAccount } from "./UserMenu";
 
 const WORDMARK = APP_NAME.toUpperCase();
-/** The app home — the shop picker. */
-const HOME_ROUTE = "/";
+/** The app home — the listings page, which always shows the currently selected shop. */
+const HOME_ROUTE = "/listings";
 const WORDMARK_CLASS = "rounded-md px-1 text-sm font-semibold tracking-[0.2em] text-text";
 
 interface Props {
@@ -23,8 +23,9 @@ interface Props {
  * nothing else. No page labels, shop name, email, or Etsy connection
  * controls; connection status and Disconnect live only on /settings.
  *
- * The wordmark links home from every other page; on home itself it's inert
- * text (not a link, not focusable).
+ * The wordmark links home (/listings, the current shop's listings) from every
+ * other page — including the shop picker at / — and is inert text (not a
+ * link, not focusable) only while on /listings itself.
  */
 export default function NavBar({ account }: Props) {
   const pathname = usePathname();
