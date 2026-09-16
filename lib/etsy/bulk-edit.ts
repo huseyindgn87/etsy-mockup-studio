@@ -396,7 +396,10 @@ export function applyKindFor(field: BulkFieldKey): BulkApplyKind {
   return APPLY_KINDS[field];
 }
 
-/** Media is shown per listing and never written from this screen. */
+/**
+ * Fields that never go through a listing patch. Media is edited per listing
+ * on the shared photo/video grid and saved by `POST /api/etsy/listings/[id]/media`.
+ */
 export const READ_ONLY_FIELDS: readonly BulkFieldKey[] = ["photos", "videos"];
 
 export function isReadOnlyField(field: BulkFieldKey): boolean {

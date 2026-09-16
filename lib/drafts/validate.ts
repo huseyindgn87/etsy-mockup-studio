@@ -17,6 +17,9 @@ export function coercePhotosData(raw: unknown): DraftPhotosData {
     removedJobKeys: Array.isArray(r.removedJobKeys)
       ? r.removedJobKeys.filter((k): k is string => typeof k === "string")
       : [],
+    removedEtsyImageIds: Array.isArray(r.removedEtsyImageIds)
+      ? r.removedEtsyImageIds.filter((id): id is number => Number.isInteger(id) && id > 0)
+      : [],
     altTextBySlot:
       r.altTextBySlot && typeof r.altTextBySlot === "object" ? r.altTextBySlot : {},
     activeTab: typeof r.activeTab === "string" ? r.activeTab : "photos",

@@ -69,3 +69,51 @@ export async function uploadListingImage(params: {
     url: raw.url_fullxfull ?? raw.url_570xN ?? null,
   };
 }
+
+/**
+ * Re-associate an image this listing already had with it, at `rank` —
+ * Etsy's documented way to bring back an image removed by
+ * {@link deleteListingImage} without re-uploading the file (the same
+ * `POST .../images` call, with `listing_image_id` instead of `image`).
+ */
+export async function assignListingImage(params: {
+  shopId: number;
+  listingId: number;
+  listingImageId: number;
+  rank: number;
+  altText?: string;
+}): Promise<UploadedListingImage> {
+  const form = new FormData();
+  form.append("listing_image_id", String(Math.trunc(params.listingImageId)));
+  form.append("rank", String(Math.trunc(params.rank)));
+  if (params.altText) form.append("alt_text", params.altText.slice(0, MAX_ALT_TEXT_LENGTH));
+
+  const res = await etsyFetch(
+    `/shops/${params.shopId}/listings/${params.listingId}/images`,
+    { method: "POST", body: form },
+  );
+  const raw = (await readEtsyResponse(
+    res,
+    `POST /shops/${params.shopId}/listings/${params.listingId}/images`,
+    { listingImageId: params.listingImageId, rank: params.rank, altText: params.altText },
+  )) as RawListingImage;
+  return {
+    listingImageId: raw.listing_image_id,
+    rank: raw.rank,
+    url: raw.url_fullxfull ?? raw.url_570xN ?? null,
+  };
+}
+
+/**
+ * `DELETE /v3/application/shops/{shop_id}/listings/{listing_id}/images/{listing_image_id}`
+ * — `listings_w` scope. Etsy keeps the file, so the image can be re-associated
+ * with {@link assignListingImage}.
+ */
+export async function deleteListingImage(params: {
+  shopId: number;
+  listingId: number;
+  listingImageId: number;
+}): Promise<void> {
+  const path = `/shops/${params.shopId}/listings/${params.listingId}/images/${params.listingImageId}`;
+  await readEtsyResponse(await etsyFetch(path, { method: "DELETE" }), `DELETE ${path}`);
+}

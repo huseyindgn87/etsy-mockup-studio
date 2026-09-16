@@ -99,6 +99,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
     activeTab: photosData.activeTab,
     imageOrder: photosData.imageOrder,
     removedJobKeys: photosData.removedJobKeys,
+    removedEtsyImageIds: photosData.removedEtsyImageIds,
     altTextBySlot: photosData.altTextBySlot,
     mockups,
     designs: photosData.designs.map((d) => ({

@@ -4,7 +4,26 @@ import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { MAX_LISTING_IMAGES } from "@/lib/etsy/listing-image-limits";
 import { MAX_LISTING_VIDEOS } from "@/lib/etsy/video-limits";
-import { PhotoEnlargeModal, PhotoGrid, VideoSection, type PhotoSlot } from "../ListingMedia";
+import {
+  ListingMediaEditor,
+  PhotoEnlargeModal,
+  PhotoGrid,
+  VideoSection,
+  type ListingVideoItem,
+  type PhotoSlot,
+} from "../ListingMedia";
+import {
+  initialExistingMedia,
+  mediaPhotoSlots,
+  mediaSavePayload,
+  moveMediaPhoto,
+  moveMediaVideo,
+  removeMediaPhoto,
+  setMediaAltText,
+  setMediaVideo,
+  type EtsyListingMedia,
+  type ExistingMediaState,
+} from "../existing-media";
 import { moveItem, withAltText } from "../photo-order";
 
 const makeSlots = (n: number): PhotoSlot[] =>
@@ -191,12 +210,16 @@ describe("PhotoGrid empty slots", () => {
 });
 
 function VideoHarness({ initial }: { initial: (File | null)[] }) {
-  const [videos, setVideos] = useState(initial);
+  const [videos, setVideos] = useState<(ListingVideoItem | null)[]>(
+    initial.map((file) => (file ? { kind: "file", file } : null)),
+  );
   return (
     <VideoSection
       videos={videos}
       errors={videos.map(() => null)}
-      onSelect={(slot, file) => setVideos((prev) => prev.map((v, i) => (i === slot ? file : v)))}
+      onSelect={(slot, file) =>
+        setVideos((prev) => prev.map((v, i) => (i === slot ? (file ? { kind: "file", file } : null) : v)))
+      }
       onMove={(from, to) => setVideos((prev) => moveItem(prev, from, to))}
     />
   );
@@ -234,5 +257,90 @@ describe("VideoSection", () => {
     const click = vi.spyOn(input, "click");
     fireEvent.click(screen.getByRole("button", { name: "Upload a video to slot 2" }));
     expect(click).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("ListingMediaEditor on a listing that already exists", () => {
+  const LISTING: EtsyListingMedia = {
+    images: [
+      { imageId: 11, url: "https://img/11.jpg", rank: 1, altText: "Front view" },
+      { imageId: 12, url: "https://img/12.jpg", rank: 2, altText: "" },
+      { imageId: 13, url: "https://img/13.jpg", rank: 3, altText: "" },
+    ],
+    videos: [{ videoId: 71, thumbnailUrl: "https://vid/71.jpg", videoUrl: "https://vid/71.mp4", state: "active" }],
+  };
+
+  function ExistingHarness({ onSave }: { onSave: (state: ExistingMediaState) => void }) {
+    const [state, setState] = useState(() => initialExistingMedia(LISTING));
+    return (
+      <>
+        <ListingMediaEditor
+          slots={mediaPhotoSlots(state, LISTING)}
+          altTextBySlot={state.altTextBySlot}
+          onMovePhoto={(from, to) => setState((s) => moveMediaPhoto(s, from, to))}
+          onRemovePhoto={(slotId) => setState((s) => removeMediaPhoto(s, slotId).state)}
+          onAltTextChange={(slotId, text) => setState((s) => setMediaAltText(s, slotId, text))}
+          onAddPhotos={() => {}}
+          videos={state.videos}
+          videoErrors={state.videoErrors}
+          onMoveVideo={(from, to) => setState((s) => moveMediaVideo(s, from, to))}
+          onSelectVideo={(slot, file) => setState((s) => setMediaVideo(s, slot, file))}
+        />
+        <button type="button" onClick={() => onSave(state)}>
+          Save
+        </button>
+      </>
+    );
+  }
+
+  const savedPayload = (onSave: ReturnType<typeof vi.fn>) => {
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    return mediaSavePayload(onSave.mock.calls.at(-1)![0]).payload;
+  };
+
+  it("shows the listing's photos as tiles, with its alt text already filled", () => {
+    render(<ExistingHarness onSave={() => {}} />);
+    expect(tileLabels()).toEqual(["Etsy photo 1", "Etsy photo 2", "Etsy photo 3"]);
+    expect(screen.getByRole("button", { name: "Alt text for photo 1" })).toHaveAttribute("data-state", "filled");
+    expect(screen.getByRole("button", { name: "Alt text for photo 2" })).toHaveAttribute("data-state", "empty");
+    expect(screen.getAllByRole("button", { name: /^Add a photo to slot/ })).toHaveLength(MAX_LISTING_IMAGES - 3);
+  });
+
+  it("reorders, removes and edits alt text into the payload a save sends", () => {
+    const onSave = vi.fn();
+    render(<ExistingHarness onSave={onSave} />);
+    drag(tile("Etsy photo 3"), tile("Etsy photo 1"));
+    fireEvent.click(screen.getByRole("button", { name: "Remove photo 3" }));
+    fireEvent.click(screen.getByRole("button", { name: "Alt text for photo 1" }));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Back view" } });
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+    expect(savedPayload(onSave).images).toEqual([
+      { kind: "existing", imageId: 13, altText: "Back view" },
+      { kind: "existing", imageId: 11, altText: "Front view" },
+    ]);
+  });
+
+  it("the enlarged view's Make listing thumbnail moves that tile to slot 1", () => {
+    const onSave = vi.fn();
+    render(<ExistingHarness onSave={onSave} />);
+    fireEvent.click(screen.getByRole("button", { name: "View photo 2" }));
+    fireEvent.click(screen.getByRole("button", { name: "Make listing thumbnail" }));
+    expect(savedPayload(onSave).images.map((i) => (i.kind === "existing" ? i.imageId : null))).toEqual([12, 11, 13]);
+  });
+
+  it("an Etsy video tile removes and reorders, with no alt text button", () => {
+    const onSave = vi.fn();
+    render(<ExistingHarness onSave={onSave} />);
+    const videoList = screen.getByRole("list", { name: "Listing videos" });
+    expect(within(videoList).queryByRole("button", { name: /alt text/i })).not.toBeInTheDocument();
+    expect(within(videoList).getByRole("listitem", { name: "Video slot 1" })).toHaveTextContent("On Etsy");
+
+    fireEvent.click(screen.getByRole("button", { name: "Move video 1 right" }));
+    expect(savedPayload(onSave).videos).toEqual([{ kind: "existing", videoId: 71 }]);
+    expect(within(videoList).getByRole("button", { name: "Upload a video to slot 1" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove video 2" }));
+    expect(savedPayload(onSave).videos).toEqual([]);
   });
 });

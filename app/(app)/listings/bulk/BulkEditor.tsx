@@ -21,7 +21,21 @@ import type { PersonalizationQuestionInput } from "@/lib/etsy/listing-personaliz
 import BulkApplyControl, { type ApplyInstruction } from "./BulkApplyControl";
 import BulkFieldInput, { INVENTORY_LOCKED } from "./BulkFieldInput";
 import BulkSidebar from "./BulkSidebar";
-import MediaStrip from "./MediaStrip";
+import { ListingMediaEditor } from "@/app/components/listing-media/ListingMedia";
+import {
+  addMediaPhotos,
+  initialExistingMedia,
+  mediaPhotoSlots,
+  mediaSaveForm,
+  mediaSavePayload,
+  moveMediaPhoto,
+  moveMediaVideo,
+  removeMediaPhoto,
+  setMediaAltText,
+  setMediaVideo,
+  type ExistingMediaState,
+} from "@/app/components/listing-media/existing-media";
+import { checkPickedVideo } from "@/app/components/listing-media/video-file";
 import VariationsCard from "./VariationsCard";
 import { INPUT_CLS, attributeChoicesAcross, labelFor, propertyForListing } from "./helpers";
 import {
@@ -68,6 +82,19 @@ function sameValue(a: FieldValue, b: FieldValue): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
+/** Which parts of a row's media grid differ from the listing as Etsy has it. */
+function mediaChanges(listing: BulkListingDetail, state: ExistingMediaState | undefined) {
+  if (!state) return { photos: false, videos: false };
+  const now = mediaSavePayload(state).payload;
+  const was = mediaSavePayload(initialExistingMedia(listing)).payload;
+  return {
+    photos: JSON.stringify(now.images) !== JSON.stringify(was.images),
+    videos: JSON.stringify(now.videos) !== JSON.stringify(was.videos),
+  };
+}
+
+const newPhotoId = () => Math.random().toString(36).slice(2, 10);
+
 const numberOr = (value: number | null, digits = 2): string =>
   value == null ? "" : digits > 0 ? value.toFixed(digits) : String(value);
 
@@ -103,6 +130,12 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
   const [results, setResults] = useState<SaveResult[] | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [scheduleNote, setScheduleNote] = useState(false);
+  /**
+   * Each row's photo/video grid, once it has been touched. Local only — a
+   * listing's media is written by Sync updates and nothing else.
+   */
+  const [media, setMedia] = useState<Record<number, ExistingMediaState>>({});
+  const [mediaErrors, setMediaErrors] = useState<Record<number, string | null>>({});
 
   const idsKey = listingIds.join(",");
   const field = selection.field;
@@ -429,6 +462,61 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
       .filter((u) => Object.keys(u.patch).length > 0);
   }, [listings, targeted, patchFor]);
 
+  /** Ticked listings whose photo/video grid would change on save. */
+  const mediaUpdates = useMemo(
+    () =>
+      (listings ?? []).filter((l) => {
+        if (!targeted[l.listingId]) return false;
+        const changed = mediaChanges(l, media[l.listingId]);
+        return changed.photos || changed.videos;
+      }),
+    [listings, targeted, media],
+  );
+  const syncCount = new Set([
+    ...updates.map((u) => u.listingId),
+    ...mediaUpdates.map((l) => l.listingId),
+  ]).size;
+
+  const mediaFor = (listing: BulkListingDetail) => media[listing.listingId] ?? initialExistingMedia(listing);
+
+  function updateMedia(listing: BulkListingDetail, change: (state: ExistingMediaState) => ExistingMediaState) {
+    setMedia((prev) => ({
+      ...prev,
+      [listing.listingId]: change(prev[listing.listingId] ?? initialExistingMedia(listing)),
+    }));
+  }
+
+  function removePhoto(listing: BulkListingDetail, slotId: string) {
+    const { state, removed } = removeMediaPhoto(mediaFor(listing), slotId);
+    if (removed) URL.revokeObjectURL(removed.url);
+    setMedia((prev) => ({ ...prev, [listing.listingId]: state }));
+  }
+
+  function addPhotos(listing: BulkListingDetail, files: File[]) {
+    const { state, errors } = addMediaPhotos(mediaFor(listing), files, (file) => ({
+      id: newPhotoId(),
+      file,
+      url: URL.createObjectURL(file),
+    }));
+    setMedia((prev) => ({ ...prev, [listing.listingId]: state }));
+    setMediaErrors((prev) => ({ ...prev, [listing.listingId]: errors.length > 0 ? errors.join(" ") : null }));
+  }
+
+  async function selectVideo(listing: BulkListingDetail, slot: number, file: File | null) {
+    const error = file ? await checkPickedVideo(file) : null;
+    updateMedia(listing, (state) => setMediaVideo(state, slot, file, error));
+  }
+
+  /** Forget a row's grid edits, releasing the previews of photos added to it. */
+  function resetMedia(listingId: number) {
+    setMedia((prev) => {
+      for (const added of prev[listingId]?.added ?? []) URL.revokeObjectURL(added.url);
+      const next = { ...prev };
+      delete next[listingId];
+      return next;
+    });
+  }
+
   /** How many listings have a pending change per field, for the sidebar badges. */
   const pendingByField = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -442,9 +530,12 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
         if (sameValue(value, originalValue(listing, key))) continue;
         counts[key] = (counts[key] ?? 0) + 1;
       }
+      const changed = mediaChanges(listing, media[listing.listingId]);
+      if (changed.photos) counts.photos = (counts.photos ?? 0) + 1;
+      if (changed.videos) counts.videos = (counts.videos ?? 0) + 1;
     }
     return counts;
-  }, [listings, edited, targeted, editable, originalValue]);
+  }, [listings, edited, targeted, editable, originalValue, media]);
 
   const visible = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -459,23 +550,79 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
     setSaveError(null);
     setResults(null);
     try {
-      const res = await fetch("/api/etsy/listings/bulk/save", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ updates }),
-      });
-      if (!res.ok) throw new Error(await errorFrom(res));
-      const body = (await res.json()) as { results: SaveResult[] };
-      setResults(body.results);
-      // Saved values are now the listings' own values — clear the edits that
-      // landed so the rows stop showing them as pending.
-      const savedIds = new Set(body.results.filter((r) => r.ok).map((r) => r.listingId));
-      setListings((prev) => (prev ?? []).map((l) => (savedIds.has(l.listingId) ? applySaved(l, patchFor(l)) : l)));
-      setEdited((prev) => {
-        const next = { ...prev };
-        for (const id of savedIds) delete next[id];
-        return next;
-      });
+      let fieldResults: SaveResult[] = [];
+      if (updates.length > 0) {
+        const res = await fetch("/api/etsy/listings/bulk/save", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ updates }),
+        });
+        if (!res.ok) throw new Error(await errorFrom(res));
+        fieldResults = ((await res.json()) as { results: SaveResult[] }).results;
+        // Saved values are now the listings' own values — clear the edits that
+        // landed so the rows stop showing them as pending.
+        const savedIds = new Set(fieldResults.filter((r) => r.ok).map((r) => r.listingId));
+        setListings((prev) => (prev ?? []).map((l) => (savedIds.has(l.listingId) ? applySaved(l, patchFor(l)) : l)));
+        setEdited((prev) => {
+          const next = { ...prev };
+          for (const id of savedIds) delete next[id];
+          return next;
+        });
+      }
+
+      // Media goes one listing at a time: each carries its own files.
+      const mediaResults: SaveResult[] = [];
+      for (const listing of mediaUpdates) {
+        const id = listing.listingId;
+        try {
+          const res = await fetch(`/api/etsy/listings/${id}/media`, {
+            method: "POST",
+            body: mediaSaveForm(mediaFor(listing)),
+          });
+          if (!res.ok) throw new Error(await errorFrom(res));
+          const body = (await res.json()) as {
+            ok: boolean;
+            failed: { name: string; error: string }[];
+            images: BulkListingDetail["images"] | null;
+            videos: BulkListingDetail["videos"] | null;
+          };
+          if (body.images && body.videos) {
+            const images = body.images;
+            const videos = body.videos;
+            setListings((prev) =>
+              (prev ?? []).map((l) =>
+                l.listingId === id ? { ...l, images, videos, thumbnailUrl: images[0]?.url ?? l.thumbnailUrl } : l,
+              ),
+            );
+            resetMedia(id);
+          }
+          mediaResults.push(
+            body.ok
+              ? { listingId: id, ok: true }
+              : { listingId: id, ok: false, error: body.failed.map((f) => `${f.name}: ${f.error}`).join("; ") },
+          );
+        } catch (err) {
+          mediaResults.push({ listingId: id, ok: false, error: err instanceof Error ? err.message : "Save failed." });
+        }
+      }
+
+      const byId = new Map<number, SaveResult>();
+      for (const result of [...fieldResults, ...mediaResults]) {
+        const earlier = byId.get(result.listingId);
+        byId.set(
+          result.listingId,
+          !earlier
+            ? result
+            : {
+                listingId: result.listingId,
+                ok: earlier.ok && result.ok,
+                ...(earlier.ok && result.ok
+                  ? {}
+                  : { error: [earlier.error, result.error].filter(Boolean).join("; ") }),
+              },
+        );
+      }
+      setResults([...byId.values()]);
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : "Save failed.");
     } finally {
@@ -514,10 +661,10 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
             <button
               type="button"
               onClick={save}
-              disabled={saving || updates.length === 0}
+              disabled={saving || syncCount === 0}
               className="inline-flex h-9 items-center rounded-full bg-primary px-4 text-sm font-medium text-white transition-colors hover:bg-primary-dark disabled:opacity-40"
             >
-              {saving ? "Syncing…" : `Sync updates${updates.length > 0 ? ` (${updates.length})` : ""}`}
+              {saving ? "Syncing…" : `Sync updates${syncCount > 0 ? ` (${syncCount})` : ""}`}
             </button>
           </div>
         </div>
@@ -612,10 +759,15 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
               {visible.map((listing) => {
                 const result = resultFor(listing.listingId);
                 const rowPatch = patchFor(listing);
-                const changed = Object.keys(rowPatch).length;
+                const rowMedia = mediaChanges(listing, media[listing.listingId]);
+                const changed =
+                  Object.keys(rowPatch).length + (rowMedia.photos ? 1 : 0) + (rowMedia.videos ? 1 : 0);
+                const rowMediaState = mediaFor(listing);
                 return (
                   <div
                     key={listing.listingId}
+                    role="group"
+                    aria-label={listing.title}
                     className="rounded-xl border border-black/10 bg-white p-4 dark:border-white/15 dark:bg-zinc-950"
                   >
                     <div className="flex items-start gap-3">
@@ -653,7 +805,28 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
 
                     <div className="mt-3 pl-7">
                       {field === "photos" || field === "videos" ? (
-                        <MediaStrip listing={listing} kind={field} />
+                        <>
+                          {mediaErrors[listing.listingId] && (
+                            <p className="mb-2 text-xs font-medium text-red-600 dark:text-red-400">
+                              {mediaErrors[listing.listingId]}
+                            </p>
+                          )}
+                          <ListingMediaEditor
+                            sections={field}
+                            slots={mediaPhotoSlots(rowMediaState, listing)}
+                            altTextBySlot={rowMediaState.altTextBySlot}
+                            onMovePhoto={(from, to) => updateMedia(listing, (m) => moveMediaPhoto(m, from, to))}
+                            onRemovePhoto={(slotId) => removePhoto(listing, slotId)}
+                            onAltTextChange={(slotId, text) =>
+                              updateMedia(listing, (m) => setMediaAltText(m, slotId, text))
+                            }
+                            onAddPhotos={(files) => addPhotos(listing, files)}
+                            videos={rowMediaState.videos}
+                            videoErrors={rowMediaState.videoErrors}
+                            onSelectVideo={(slot, file) => void selectVideo(listing, slot, file)}
+                            onMoveVideo={(from, to) => updateMedia(listing, (m) => moveMediaVideo(m, from, to))}
+                          />
+                        </>
                       ) : field === "variations" ? (
                         <VariationsCard
                           listing={listing}

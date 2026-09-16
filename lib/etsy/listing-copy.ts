@@ -17,7 +17,8 @@ export interface ListingCopySource {
   /** Price in major currency units, or null when Etsy omitted it. */
   price: number | null;
   shopSectionId: number | null;
-  images: { dataUrl: string; fileName: string }[];
+  /** In rank order, each with the source photo's own alt text. */
+  images: { dataUrl: string; fileName: string; altText: string }[];
 }
 
 interface RawPrice {
@@ -27,6 +28,7 @@ interface RawPrice {
 }
 
 interface RawImage {
+  alt_text?: string | null;
   url_fullxfull?: string;
   url_570xN?: string;
   url_340x270?: string;
@@ -88,13 +90,20 @@ export async function getListingCopySource(listingId: number): Promise<ListingCo
     `GET /listings/${listingId}`,
   )) as RawListingDetail;
 
-  const imageUrls = (raw.images ?? [])
+  const sources = (raw.images ?? [])
     .slice(0, MAX_LISTING_IMAGES)
-    .map(pickCopyImageUrl)
-    .filter((u): u is string => u != null);
+    .map((img) => ({ url: pickCopyImageUrl(img), altText: img.alt_text ?? "" }))
+    .filter((img): img is { url: string; altText: string } => img.url != null);
 
-  const downloaded = await Promise.all(imageUrls.map((url, i) => fetchImageAsDataUrl(url, i)));
-  const images = downloaded.filter((img): img is { dataUrl: string; fileName: string } => img != null);
+  const downloaded = await Promise.all(
+    sources.map(async (src, i) => {
+      const img = await fetchImageAsDataUrl(src.url, i);
+      return img ? { ...img, altText: src.altText } : null;
+    }),
+  );
+  const images = downloaded.filter(
+    (img): img is { dataUrl: string; fileName: string; altText: string } => img != null,
+  );
 
   return {
     listingId: raw.listing_id,

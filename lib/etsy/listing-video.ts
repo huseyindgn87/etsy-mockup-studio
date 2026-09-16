@@ -53,3 +53,34 @@ export async function uploadListingVideo(params: {
     thumbnailUrl: raw.thumbnail_url ?? null,
   };
 }
+
+/**
+ * Associate a video this shop already has with the listing again — the same
+ * `POST .../videos` call with `video_id` instead of a file.
+ */
+export async function assignListingVideo(params: {
+  shopId: number;
+  listingId: number;
+  videoId: number;
+}): Promise<void> {
+  const form = new FormData();
+  form.append("video_id", String(Math.trunc(params.videoId)));
+  const path = `/shops/${params.shopId}/listings/${params.listingId}/videos`;
+  await readEtsyResponse(await etsyFetch(path, { method: "POST", body: form }), `POST ${path}`, {
+    videoId: params.videoId,
+  });
+}
+
+/**
+ * `DELETE /v3/application/shops/{shop_id}/listings/{listing_id}/videos/{video_id}`
+ * — `listings_w` scope. Etsy keeps the file, so it can be re-associated with
+ * {@link assignListingVideo}.
+ */
+export async function deleteListingVideo(params: {
+  shopId: number;
+  listingId: number;
+  videoId: number;
+}): Promise<void> {
+  const path = `/shops/${params.shopId}/listings/${params.listingId}/videos/${params.videoId}`;
+  await readEtsyResponse(await etsyFetch(path, { method: "DELETE" }), `DELETE ${path}`);
+}

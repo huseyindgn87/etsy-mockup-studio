@@ -47,9 +47,28 @@ vi.mock("@/lib/etsy/listing-images", () => ({
         altText: p.altText,
         filename: p.filename,
       });
+      editCalls.push(`upload ${p.filename}@${p.rank}${p.altText ? ` "${p.altText}"` : ""}`);
       return { listingImageId: 9000 + (p.rank ?? 0), rank: p.rank ?? 1, url: null };
     },
   ),
+  assignListingImage: vi.fn(async (p: { listingId: number; listingImageId: number; rank: number; altText?: string }) => {
+    editCalls.push(`assign ${p.listingId}/${p.listingImageId}@${p.rank}${p.altText ? ` "${p.altText}"` : ""}`);
+    return { listingImageId: p.listingImageId, rank: p.rank, url: null };
+  }),
+  deleteListingImage: vi.fn(async (p: { listingId: number; listingImageId: number }) => {
+    editCalls.push(`delete ${p.listingId}/${p.listingImageId}`);
+  }),
+}));
+
+/** Every image/video write an existing-listing save made, in order. */
+const editCalls: string[] = [];
+/** What `fetchListingDetails` reports as the listing's current media. */
+let currentMedia: {
+  images: { imageId: number; url: string; rank: number; altText: string }[];
+  videos: { videoId: number; thumbnailUrl: string; videoUrl: string; state: string }[];
+} = { images: [], videos: [] };
+vi.mock("@/lib/etsy/listing-details", () => ({
+  fetchListingDetails: vi.fn(async (ids: number[]) => ids.map((listingId) => ({ listingId, ...currentMedia }))),
 }));
 
 const videoCalls: { shopId: number; listingId: number; filename: string; contentType: string }[] = [];
@@ -64,9 +83,16 @@ vi.mock("@/lib/etsy/listing-video", () => ({
         contentType: p.contentType,
       });
       if (videoShouldFail) throw new Error("Etsy rejected the video");
+      editCalls.push(`upload video ${p.filename}`);
       return { videoId: 5001, videoUrl: null, thumbnailUrl: null };
     },
   ),
+  assignListingVideo: vi.fn(async (p: { videoId: number }) => {
+    editCalls.push(`assign video ${p.videoId}`);
+  }),
+  deleteListingVideo: vi.fn(async (p: { videoId: number }) => {
+    editCalls.push(`delete video ${p.videoId}`);
+  }),
 }));
 
 const createCalls: unknown[] = [];
@@ -1495,4 +1521,110 @@ describe("POST /api/mockups/render", () => {
       returnPolicyId: null,
     });
   }, 30_000);
+});
+
+describe("existing-listing editor: Save to Etsy writes the edited grid", () => {
+  const etsyImage = (imageId: number, rank: number, altText = "") => ({
+    imageId,
+    url: `https://img/${imageId}.jpg`,
+    rank,
+    altText,
+  });
+  const etsyVideo = (videoId: number) => ({ videoId, thumbnailUrl: "", videoUrl: "", state: "active" });
+  const etsy = (imageId: number, altText = "") => ({ kind: "etsy", imageId, altText });
+
+  function editForm(payload: Record<string, unknown>, files: { field: string; buf: Buffer; name: string; type?: string }[] = []) {
+    return form(
+      {
+        mockups: [],
+        designs: [],
+        jobs: [],
+        ownImages: [],
+        editExisting: true,
+        publishTo: { mode: "existing", listingId: 555 },
+        ...payload,
+      },
+      files,
+    );
+  }
+
+  function reset(images = [etsyImage(1, 1, "front"), etsyImage(2, 2), etsyImage(3, 3)], videos = [etsyVideo(71), etsyVideo(72)]) {
+    editCalls.length = 0;
+    uploadCalls.length = 0;
+    currentMedia = { images, videos };
+  }
+
+  test("reorder persists on save: the grid order becomes the listing's rank order", async () => {
+    reset();
+    const res = await POST(editForm({ imageOrder: [etsy(1, "front"), etsy(3), etsy(2)] }));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { edited: boolean; failed: unknown[] };
+    expect(body.edited).toBe(true);
+    expect(body.failed).toEqual([]);
+    expect(editCalls).toEqual(["delete 555/2", "delete 555/3", "assign 555/3@2", "assign 555/2@3"]);
+  });
+
+  test("alt text saves to the right image of the right listing", async () => {
+    reset();
+    await POST(editForm({ imageOrder: [etsy(1, "front"), etsy(2, "Mug on a desk"), etsy(3)] }));
+    expect(editCalls).toEqual(["delete 555/2", "delete 555/3", 'assign 555/2@2 "Mug on a desk"', "assign 555/3@3"]);
+    expect(editCalls.every((c) => !c.includes("/1@") && !c.includes("555/1"))).toBe(true);
+  });
+
+  test("remove clears the right tile, and a removed video is deleted", async () => {
+    reset();
+    await POST(
+      editForm({
+        imageOrder: [etsy(1, "front"), etsy(3)],
+        videoOrder: [{ kind: "existing", videoId: 71 }],
+      }),
+    );
+    expect(editCalls).toEqual(["delete 555/2", "delete 555/3", "assign 555/3@2", "delete video 72"]);
+  });
+
+  test("new photos go in at their grid position with their own alt text", async () => {
+    reset();
+    const own = Buffer.from("not a real jpeg, just bytes");
+    await POST(
+      editForm(
+        {
+          ownImages: [{ name: "studio", altText: "On a model" }],
+          imageOrder: [{ kind: "own", index: 0 }, etsy(1, "front"), etsy(2), etsy(3)],
+        },
+        [{ field: "ownImage", buf: own, name: "studio.jpg", type: "image/jpeg" }],
+      ),
+    );
+    expect(editCalls).toEqual([
+      "delete 555/1",
+      "delete 555/2",
+      "delete 555/3",
+      'upload studio.jpg@1 "On a model"',
+      'assign 555/1@2 "front"',
+      "assign 555/2@3",
+      "assign 555/3@4",
+    ]);
+  });
+
+  test("an unchanged grid writes nothing, and an empty grid is refused", async () => {
+    reset();
+    await POST(
+      editForm({
+        imageOrder: [etsy(1, "front"), etsy(2), etsy(3)],
+        videoOrder: [{ kind: "existing", videoId: 71 }, { kind: "existing", videoId: 72 }],
+      }),
+    );
+    expect(editCalls).toEqual([]);
+
+    const res = await POST(editForm({ imageOrder: [] }));
+    expect(res.status).toBe(400);
+    expect(editCalls).toEqual([]);
+  });
+
+  test("a photo id that isn't on the listing is never re-associated", async () => {
+    reset();
+    const res = await POST(editForm({ imageOrder: [etsy(1, "front"), etsy(2), etsy(3), etsy(4242)] }));
+    const body = (await res.json()) as { failed: { error: string }[] };
+    expect(body.failed).toHaveLength(1);
+    expect(editCalls).toEqual([]);
+  });
 });

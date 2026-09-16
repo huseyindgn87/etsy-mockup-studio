@@ -27,23 +27,25 @@ import {
   slotIdFor,
   withAltText,
   type ImageSlotRef,
-} from "./photo-order";
+} from "@/app/components/listing-media/photo-order";
+import type { EtsyListingMedia } from "@/app/components/listing-media/existing-media";
+import { checkPickedVideo } from "@/app/components/listing-media/video-file";
 import type { DraftPhotosData, DraftSource } from "@/lib/drafts/types";
 import { howItsMadeError } from "@/lib/etsy/listing-classification";
 import { personalizationQuestionsError } from "@/lib/etsy/listing-personalization";
 import { MAX_LISTING_IMAGES, checkImageFileBasics } from "@/lib/etsy/listing-image-limits";
-import {
-  MAX_LISTING_VIDEOS,
-  checkVideoDuration,
-  checkVideoFileBasics,
-} from "@/lib/etsy/video-limits";
+import { MAX_LISTING_VIDEOS } from "@/lib/etsy/video-limits";
 import ListingForm, {
   EMPTY_LISTING_FORM,
   type ListingFormTab,
   type ListingFormValue,
   type VariationToggleKey,
 } from "./ListingForm";
-import { PhotoEnlargeModal, PhotoGrid, VideoSection, type PhotoSlot } from "./ListingMedia";
+import {
+  ListingMediaEditor,
+  type ListingVideoItem,
+  type PhotoSlot,
+} from "@/app/components/listing-media/ListingMedia";
 import ListingPreviewModal, { type PreviewMediaItem } from "./ListingPreviewModal";
 import MockupCanvas from "./MockupCanvas";
 import TemplatePicker from "./TemplatePicker";
@@ -343,6 +345,8 @@ interface PublishResult {
   uploaded: { name: string; rank: number }[];
   failed: { name: string; error: string }[];
   skipped: number;
+  /** An existing listing's photo/video grid was saved onto it (not just appended to). */
+  edited: boolean;
 }
 
 const SLIDERS = [
@@ -357,23 +361,6 @@ type SliderKey = (typeof SLIDERS)[number]["key"];
 const uid = () => Math.random().toString(36).slice(2, 10);
 const stripExt = (s: string) => s.replace(/\.[^.]+$/, "");
 
-/** Reads a video file's duration via a hidden `<video>` element — NaN if the browser can't decode it. */
-function probeVideoDuration(file: File): Promise<number> {
-  return new Promise((resolve) => {
-    const url = URL.createObjectURL(file);
-    const v = document.createElement("video");
-    v.preload = "metadata";
-    v.onloadedmetadata = () => {
-      URL.revokeObjectURL(url);
-      resolve(v.duration);
-    };
-    v.onerror = () => {
-      URL.revokeObjectURL(url);
-      resolve(NaN);
-    };
-    v.src = url;
-  });
-}
 
 async function errorFrom(res: Response): Promise<string> {
   const body = (await res.json().catch(() => null)) as { error?: string } | null;
@@ -454,7 +441,6 @@ function MockupsPageInner() {
     publishModeFromParams(searchParams),
   );
   const publishId = targetListing?.listingId ?? null;
-  const [overwriteExisting, setOverwriteExisting] = useState(false);
   const [listingForm, setListingForm] = useState<ListingFormValue>(EMPTY_LISTING_FORM);
   const [publishResult, setPublishResult] = useState<PublishResult | null>(null);
   const [cornerMode, setCornerMode] = useState<"free" | "ratio">("free");
@@ -462,7 +448,7 @@ function MockupsPageInner() {
   const [showPreview, setShowPreview] = useState(false);
   const [activeTab, setActiveTab] = useState<NavTab>("photos");
   const [shopName, setShopName] = useState<string | null>(null);
-  const [videos, setVideos] = useState<(File | null)[]>(() => Array(MAX_LISTING_VIDEOS).fill(null));
+  const [videos, setVideos] = useState<(ListingVideoItem | null)[]>(() => Array(MAX_LISTING_VIDEOS).fill(null));
   const [videoErrors, setVideoErrors] = useState<(string | null)[]>(() =>
     Array(MAX_LISTING_VIDEOS).fill(null),
   );
@@ -473,18 +459,12 @@ function MockupsPageInner() {
       setVideos((prev) => prev.map((v, i) => (i === slot ? null : v)));
       return;
     }
-    const basicsError = checkVideoFileBasics(file);
-    if (basicsError) {
-      setVideoErrors((prev) => prev.map((e, i) => (i === slot ? basicsError : e)));
+    const videoError = await checkPickedVideo(file);
+    if (videoError) {
+      setVideoErrors((prev) => prev.map((e, i) => (i === slot ? videoError : e)));
       return;
     }
-    const duration = await probeVideoDuration(file);
-    const durationError = checkVideoDuration(duration);
-    if (durationError) {
-      setVideoErrors((prev) => prev.map((e, i) => (i === slot ? durationError : e)));
-      return;
-    }
-    setVideos((prev) => prev.map((v, i) => (i === slot ? file : v)));
+    setVideos((prev) => prev.map((v, i) => (i === slot ? { kind: "file", file } : v)));
   }, []);
 
   // ---- photo grid: rendered mockups + user-uploaded photos, one Etsy image slot each ----
@@ -493,9 +473,12 @@ function MockupsPageInner() {
   /** Rendered combos the user removed from the grid — kept out of `imageOrder`, persisted with the draft. */
   const [removedJobKeys, setRemovedJobKeys] = useState<string[]>([]);
   const [altTextBySlot, setAltTextBySlot] = useState<Record<string, string>>({});
-  const [enlargedSlotId, setEnlargedSlotId] = useState<string | null>(null);
-  const [enlargedFocusAltText, setEnlargedFocusAltText] = useState(false);
   const [jobThumbs, setJobThumbs] = useState<Record<string, string>>({});
+  /** "existing" mode: the target listing's photos and videos as Etsy has them now — shown as tiles, saved only on Publish. */
+  const [etsyMedia, setEtsyMedia] = useState<EtsyListingMedia | null>(null);
+  const [etsyMediaError, setEtsyMediaError] = useState<string | null>(null);
+  /** Photos already on the listing that the user removed from the grid — persisted with the draft. */
+  const [removedEtsyImageIds, setRemovedEtsyImageIds] = useState<number[]>([]);
 
   // ---- "Save draft" — see the effects below photoSlots, and lib/drafts/* ----
   const router = useRouter();
@@ -509,7 +492,7 @@ function MockupsPageInner() {
   // so this must stay stable even once autosave adds `draftId` to the URL
   // (which would otherwise change `searchParams`/`targetListing` identity
   // and re-trigger the prefill effect on every save).
-  const [copySourceListingId] = useState(() =>
+  const [copySourceListingId, setCopySourceListingId] = useState(() =>
     searchParams.get("mode") === "copy" && !searchParams.get("draftId")
       ? (Number.parseInt(searchParams.get("listingId") ?? "", 10) || null)
       : null,
@@ -523,7 +506,7 @@ function MockupsPageInner() {
   const [uploadedAssetKeys, setUploadedAssetKeys] = useState<Set<string>>(new Set());
   const inFlightUploads = useRef<Set<string>>(new Set());
 
-  const addOwnImages = useCallback((files: File[]) => {
+  const addOwnImages = useCallback((files: File[]): string[] => {
     setError(null);
     const added: OwnImage[] = [];
     for (const file of files) {
@@ -535,6 +518,7 @@ function MockupsPageInner() {
       added.push({ id: uid(), file, url: URL.createObjectURL(file) });
     }
     if (added.length) setOwnImages((prev) => [...prev, ...added]);
+    return added.map((o) => o.id);
   }, []);
 
   const removeOwnImage = useCallback((id: string) => {
@@ -549,7 +533,6 @@ function MockupsPageInner() {
       delete next[`own:${id}`];
       return next;
     });
-    setEnlargedSlotId((cur) => (cur === `own:${id}` ? null : cur));
   }, []);
 
   function removeImageSlot(slotId: string) {
@@ -559,19 +542,17 @@ function MockupsPageInner() {
       removeOwnImage(ref.id);
       return;
     }
-    setRemovedJobKeys((prev) => (prev.includes(ref.key) ? prev : [...prev, ref.key]));
+    if (ref.kind === "job") {
+      setRemovedJobKeys((prev) => (prev.includes(ref.key) ? prev : [...prev, ref.key]));
+    } else {
+      setRemovedEtsyImageIds((prev) => (prev.includes(ref.imageId) ? prev : [...prev, ref.imageId]));
+    }
     setImageOrder((prev) => prev.filter((r) => slotIdFor(r) !== slotId));
     setAltTextBySlot((prev) => {
       const next = { ...prev };
       delete next[slotId];
       return next;
     });
-    setEnlargedSlotId((cur) => (cur === slotId ? null : cur));
-  }
-
-  function openPhoto(slotId: string, focusAltText: boolean) {
-    setEnlargedFocusAltText(focusAltText);
-    setEnlargedSlotId(slotId);
   }
 
   function setAltText(slotId: string, text: string) {
@@ -586,6 +567,58 @@ function MockupsPageInner() {
     setVideos((prev) => moveItem(prev, from, to));
     setVideoErrors((prev) => moveItem(prev, from, to));
   }
+
+  // ---- "existing" mode: the listing's current photos and videos, as tiles ----
+  // Read-only (GET) — what the grid starts from. Nothing is written to the
+  // listing until Save to Etsy sends the whole grid.
+  useEffect(() => {
+    if (publishMode !== "existing" || publishId == null) return;
+    const controller = new AbortController();
+    fetch(`/api/etsy/listings/bulk?ids=${publishId}`, { signal: controller.signal })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(await errorFrom(res));
+        return (await res.json()) as { listings: EtsyListingMedia[] };
+      })
+      .then((body) => {
+        if (controller.signal.aborted) return;
+        const listing = body.listings[0];
+        if (!listing) throw new Error("This listing could not be loaded — refresh the shop and try again.");
+        setEtsyMediaError(null);
+        setEtsyMedia({ images: listing.images, videos: listing.videos });
+        setVideos((prev) => {
+          if (prev.some((v) => v)) return prev;
+          const next: (ListingVideoItem | null)[] = listing.videos
+            .slice(0, MAX_LISTING_VIDEOS)
+            .map((v) => ({ kind: "etsy", videoId: v.videoId, videoUrl: v.videoUrl, thumbnailUrl: v.thumbnailUrl }));
+          while (next.length < MAX_LISTING_VIDEOS) next.push(null);
+          return next;
+        });
+      })
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) return;
+        setEtsyMediaError(
+          `Couldn't load this listing's current photos, so nothing can be saved to it yet: ${
+            err instanceof Error ? err.message : "request failed"
+          }`,
+        );
+      });
+    return () => controller.abort();
+  }, [publishMode, publishId]);
+
+  // Each Etsy photo's own alt text, unless a restored draft already holds an edit of it.
+  useEffect(() => {
+    if (!etsyMedia || draftStatus === "restoring") return;
+    // Seeding derived state once both sources have settled.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setAltTextBySlot((prev) => {
+      let next = prev;
+      for (const img of etsyMedia.images) {
+        const slotId = `etsy:${img.imageId}`;
+        if (!(slotId in next)) next = { ...next, [slotId]: img.altText };
+      }
+      return next;
+    });
+  }, [etsyMedia, draftStatus]);
 
   const psdInput = useRef<HTMLInputElement>(null);
   const designInput = useRef<HTMLInputElement>(null);
@@ -870,9 +903,11 @@ function MockupsPageInner() {
         currentJobRefs.map((r) => r.key),
         ownImages.map((o) => o.id),
         new Set(removedJobKeys),
+        etsyMedia ? etsyMedia.images.map((img) => img.imageId) : null,
+        new Set(removedEtsyImageIds),
       ),
     );
-  }, [currentJobRefs, ownImages, removedJobKeys]);
+  }, [currentJobRefs, ownImages, removedJobKeys, etsyMedia, removedEtsyImageIds]);
 
   // Thumbnails for the photo grid: a small composite per mockup×design combo,
   // using the same `compose()` core as the live editor preview and the server
@@ -922,13 +957,16 @@ function MockupsPageInner() {
             label: m && d ? `${d.name} × ${m.name}` : "Rendering…",
           };
         }
+        if (ref.kind === "etsy") {
+          const img = etsyMedia?.images.find((i) => i.imageId === ref.imageId);
+          return { slotId, ref, thumbnailUrl: img?.url ?? null, label: `Etsy photo ${img?.rank ?? ""}`.trim() };
+        }
         const own = ownImages.find((o) => o.id === ref.id);
         return { slotId, ref, thumbnailUrl: own?.url ?? null, label: own?.file.name ?? "Photo" };
       }),
-    [imageOrder, jobThumbs, included, designs, ownImages],
+    [imageOrder, jobThumbs, included, designs, ownImages, etsyMedia],
   );
   const publishCount = Math.min(photoSlots.length, MAX_LISTING_IMAGES);
-  const enlargedSlot = photoSlots.find((s) => s.slotId === enlargedSlotId) ?? null;
 
   // Photos + videos, in the same rail order the preview modal shows them —
   // only built while the modal is open, so opening it is what creates the
@@ -943,7 +981,14 @@ function MockupsPageInner() {
     }));
     const vids: PreviewMediaItem[] = videos
       .map((v, i): PreviewMediaItem | null =>
-        v ? { id: `video:${i}`, kind: "video", url: URL.createObjectURL(v), label: `Video ${i + 1}` } : null,
+        v
+          ? {
+              id: `video:${i}`,
+              kind: "video",
+              url: v.kind === "file" ? URL.createObjectURL(v.file) : v.videoUrl,
+              label: `Video ${i + 1}`,
+            }
+          : null,
       )
       .filter((x): x is PreviewMediaItem => x != null);
     return [...photos, ...vids];
@@ -964,6 +1009,7 @@ function MockupsPageInner() {
           activeTab: NavTab;
           imageOrder: ImageSlotRef[];
           removedJobKeys?: string[];
+          removedEtsyImageIds?: number[];
           altTextBySlot: Record<string, string>;
           mockups: {
             id: string;
@@ -1051,6 +1097,18 @@ function MockupsPageInner() {
         setAltTextBySlot(body.altTextBySlot ?? {});
         setImageOrder(body.imageOrder ?? []);
         setRemovedJobKeys(body.removedJobKeys ?? []);
+        setRemovedEtsyImageIds(body.removedEtsyImageIds ?? []);
+        // A copy made from the listings page's bulk Copy is saved before it
+        // was ever opened — fill it from its source listing the first time.
+        if (
+          body.source?.mode === "copy" &&
+          !body.formData?.title &&
+          body.mockups.length === 0 &&
+          body.designs.length === 0 &&
+          body.ownImages.length === 0
+        ) {
+          setCopySourceListingId(body.source.listingId);
+        }
         setMockups(restoredMockups);
         setDesigns(restoredDesigns);
         setOwnImages(restoredOwn);
@@ -1097,7 +1155,7 @@ function MockupsPageInner() {
           tags: string[];
           price: number | null;
           shopSectionId: number | null;
-          images: { dataUrl: string; fileName: string }[];
+          images: { dataUrl: string; fileName: string; altText?: string }[];
         };
         if (cancelled) return;
 
@@ -1111,12 +1169,25 @@ function MockupsPageInner() {
         }));
 
         const files: File[] = [];
+        const altTexts: string[] = [];
         for (const img of src.images) {
           const r = await fetch(img.dataUrl);
           const blob = await r.blob();
           files.push(new File([blob], img.fileName, { type: blob.type || "image/jpeg" }));
+          altTexts.push(img.altText ?? "");
         }
-        if (!cancelled && files.length > 0) addOwnImages(files);
+        if (!cancelled && files.length > 0) {
+          const ids = addOwnImages(files);
+          if (ids.length === files.length) {
+            setAltTextBySlot((prev) => {
+              let next = prev;
+              ids.forEach((id, i) => {
+                if (altTexts[i]) next = withAltText(next, `own:${id}`, altTexts[i]);
+              });
+              return next;
+            });
+          }
+        }
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "Could not load the listing to copy.");
@@ -1224,6 +1295,7 @@ function MockupsPageInner() {
           .map((o) => ({ id: o.id, name: o.file.name })),
         imageOrder,
         removedJobKeys,
+        removedEtsyImageIds,
         altTextBySlot,
         activeTab,
       };
@@ -1267,6 +1339,7 @@ function MockupsPageInner() {
     uploadedAssetKeys,
     imageOrder,
     removedJobKeys,
+    removedEtsyImageIds,
     altTextBySlot,
     activeTab,
     listingForm,
@@ -1351,13 +1424,32 @@ function MockupsPageInner() {
           included.map((m) => m.id),
           designs.map((d) => d.id),
           ownImages.map((o) => o.id),
+          altTextBySlot,
         );
+
+        // The video tiles, in slot order: files picked here are sent as
+        // `video` parts, a video already on the listing by its Etsy id.
+        let fileIndex = 0;
+        const videoOrder: ({ kind: "existing"; videoId: number } | { kind: "new"; index: number })[] = [];
+        for (const v of videos) {
+          if (!v) continue;
+          if (v.kind === "etsy") {
+            videoOrder.push({ kind: "existing", videoId: v.videoId });
+          } else {
+            fd.append("video", v.file);
+            videoOrder.push({ kind: "new", index: fileIndex++ });
+          }
+        }
+        if (publishTo.mode === "existing") {
+          payload.editExisting = true;
+          payload.videoOrder = videoOrder;
+        }
       }
 
       fd.set("payload", JSON.stringify(payload));
       return fd;
     },
-    [included, designs, ownImages, imageOrder, altTextBySlot],
+    [included, designs, ownImages, imageOrder, altTextBySlot, videos],
   );
 
   const runBatch = useCallback(async () => {
@@ -1395,6 +1487,9 @@ function MockupsPageInner() {
     if ((publishMode === "copy" || publishMode === "existing") && publishId == null) {
       return "No target listing — go back to Listings and choose one.";
     }
+    if (publishMode === "existing" && etsyMedia == null) {
+      return etsyMediaError ?? "Still loading this listing's current photos.";
+    }
     if (publishMode === "new" && !listingForm.title.trim()) {
       return "Enter a title for the new draft (Listing information form).";
     }
@@ -1418,7 +1513,7 @@ function MockupsPageInner() {
       if (personalizationError) return `${personalizationError} (Personalization tab)`;
     }
     return null;
-  }, [photoSlots.length, publishMode, publishId, listingForm]);
+  }, [photoSlots.length, publishMode, publishId, listingForm, etsyMedia, etsyMediaError]);
 
   /**
    * The `publishTo` payload — everything about the listing itself, minus the
@@ -1435,7 +1530,6 @@ function MockupsPageInner() {
       // needs no source listing to borrow anything from.
       ...(publishId != null ? { listingId: publishId } : {}),
     };
-    if (publishMode === "existing") publishTo.overwrite = overwriteExisting;
     if (publishMode !== "existing") {
       publishTo.howItsMade = {
         whoMade: listingForm.whoMade,
@@ -1475,7 +1569,7 @@ function MockupsPageInner() {
       };
     }
     return publishTo;
-  }, [listingForm, publishMode, publishId, overwriteExisting]);
+  }, [listingForm, publishMode, publishId]);
 
   const publishToEtsy = useCallback(async () => {
     if (photoSlots.length === 0) return;
@@ -1489,13 +1583,12 @@ function MockupsPageInner() {
     try {
       setBusy(
         publishMode === "existing"
-          ? `Adding ${publishCount} images to Etsy…`
+          ? "Saving photos and videos to Etsy…"
           : "Creating draft and uploading images…",
       );
       const publishTo = buildPublishTo();
 
       const fd = buildBatchForm(publishTo);
-      for (const v of videos) if (v) fd.append("video", v);
       const res = await fetch("/api/mockups/render", {
         method: "POST",
         body: fd,
@@ -1518,6 +1611,7 @@ function MockupsPageInner() {
         uploaded: body.uploaded ?? [],
         failed: body.failed ?? [],
         skipped: body.skipped ?? 0,
+        edited: !!body.edited,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Etsy upload failed.");
@@ -1528,9 +1622,7 @@ function MockupsPageInner() {
     photoSlots,
     publishId,
     publishMode,
-    publishCount,
     buildBatchForm,
-    videos,
     publishBlocker,
     buildPublishTo,
   ]);
@@ -1566,7 +1658,7 @@ function MockupsPageInner() {
         const mockup = included.find((m) => m.id === mockupId);
         const design = designs.find((d) => d.id === designId);
         if (mockup && design) sources.push({ kind: "render", mockup, design, altText });
-      } else {
+      } else if (ref.kind === "own") {
         const own = ownImages.find((o) => o.id === ref.id);
         if (own) sources.push({ kind: "own", file: own.file, altText });
       }
@@ -1705,7 +1797,7 @@ function MockupsPageInner() {
 
   /** One-line description of what Publish will do — mode and target are both fixed, chosen back on the Listings page. */
   const modeCaption = (() => {
-    if (publishMode === "existing") return `Adding to "${targetListing?.title}"`;
+    if (publishMode === "existing") return `Editing "${targetListing?.title}"`;
     if (publishMode === "copy") return `Copy of "${targetListing?.title}"`;
     return targetListing
       ? `New draft, category & shipping borrowed from "${targetListing.title}"`
@@ -1794,7 +1886,7 @@ function MockupsPageInner() {
               className="h-9 rounded-full border border-primary px-4 text-sm font-medium text-primary transition-colors hover:bg-primary/10 disabled:opacity-40"
             >
               {publishMode === "existing"
-                ? `Add (${publishCount})`
+                ? `Save to Etsy (${publishCount})`
                 : `Create draft & upload (${publishCount})`}
             </button>
           </div>
@@ -1826,16 +1918,8 @@ function MockupsPageInner() {
               </Link>
             </p>
           )}
-          {publishMode === "existing" && (
-            <label className="flex items-center gap-1.5 text-xs text-zinc-600 dark:text-zinc-400">
-              <input
-                type="checkbox"
-                checked={overwriteExisting}
-                onChange={(e) => setOverwriteExisting(e.target.checked)}
-                className="accent-primary"
-              />
-              replace existing images (in rank order)
-            </label>
+          {publishMode === "existing" && etsyMediaError && (
+            <p className="text-xs font-medium text-red-600 dark:text-red-400">{etsyMediaError}</p>
           )}
           {needsReadinessState && (
             <p className="text-xs font-medium text-primary">
@@ -1844,9 +1928,7 @@ function MockupsPageInner() {
           )}
           <p className="text-xs text-zinc-500">
             {publishMode === "existing"
-              ? overwriteExisting
-                ? "The selected listing's first images will be replaced with these renders."
-                : `Images are added to the selected listing (anything past the ${MAX_LISTING_IMAGES}-image limit is skipped). No images are deleted.`
+              ? `The listing's photos and videos become exactly what the grid shows, in that order, when you press Save to Etsy (anything past the ${MAX_LISTING_IMAGES}-image limit is skipped). Nothing on Etsy changes before that.`
               : "A new draft listing is created and images are uploaded to it. The live listing is never touched."}
           </p>
         </div>
@@ -1864,6 +1946,7 @@ function MockupsPageInner() {
             {publishResult.createdDraft
               ? `Draft listing #${publishResult.listingId} created · `
               : ""}
+            {publishResult.edited && "Photos and videos saved to Etsy · "}
             {publishResult.uploaded.length} images uploaded
             {publishResult.skipped > 0 &&
               ` · ${publishResult.skipped} skipped (${MAX_LISTING_IMAGES}-image limit)`}
@@ -2185,24 +2268,18 @@ function MockupsPageInner() {
                   Preview runs in the browser, batch rendering on the server — same core.
                 </p>
 
-                <PhotoGrid
+                <ListingMediaEditor
                   slots={photoSlots}
                   altTextBySlot={altTextBySlot}
-                  onMove={moveImageSlot}
-                  onRemove={removeImageSlot}
-                  onEnlarge={(slotId) => openPhoto(slotId, false)}
-                  onEditAltText={(slotId) => openPhoto(slotId, true)}
-                  onAddOwn={addOwnImages}
+                  onMovePhoto={moveImageSlot}
+                  onRemovePhoto={removeImageSlot}
+                  onAltTextChange={setAltText}
+                  onAddPhotos={addOwnImages}
+                  videos={videos}
+                  videoErrors={videoErrors}
+                  onSelectVideo={selectVideo}
+                  onMoveVideo={moveVideoSlot}
                 />
-
-                <div className="mt-8 border-t border-black/10 pt-6 dark:border-white/15">
-                  <VideoSection
-                    videos={videos}
-                    errors={videoErrors}
-                    onSelect={selectVideo}
-                    onMove={moveVideoSlot}
-                  />
-                </div>
               </div>
             )}
 
@@ -2231,20 +2308,6 @@ function MockupsPageInner() {
         />
       )}
 
-      {enlargedSlot && (
-        <PhotoEnlargeModal
-          slot={enlargedSlot}
-          index={photoSlots.findIndex((s) => s.slotId === enlargedSlot.slotId)}
-          altText={altTextBySlot[enlargedSlot.slotId] ?? ""}
-          focusAltText={enlargedFocusAltText}
-          onAltTextChange={(text) => setAltText(enlargedSlot.slotId, text)}
-          onMakeThumbnail={() => {
-            const from = photoSlots.findIndex((s) => s.slotId === enlargedSlot.slotId);
-            if (from > 0) moveImageSlot(from, 0);
-          }}
-          onClose={() => setEnlargedSlotId(null)}
-        />
-      )}
     </div>
   );
 }

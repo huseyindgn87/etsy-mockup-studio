@@ -15,7 +15,7 @@ import {
 } from "@/lib/etsy/video-limits";
 import type { ImageSlotRef } from "./photo-order";
 
-/** One photo-grid slot — a rendered mockup×design combo or a user-uploaded photo. */
+/** One photo-grid slot — a rendered mockup×design combo, a user-uploaded photo, or a photo already on Etsy. */
 export interface PhotoSlot {
   slotId: string;
   ref: ImageSlotRef;
@@ -357,9 +357,14 @@ export function PhotoEnlargeModal({
   );
 }
 
+/** A filled video slot: a file picked in this session, or a video already on the Etsy listing. */
+export type ListingVideoItem =
+  | { kind: "file"; file: File }
+  | { kind: "etsy"; videoId: number; videoUrl: string; thumbnailUrl: string };
+
 /**
  * Video slots — one per `MAX_LISTING_VIDEOS`, matching Etsy's per-listing
- * video cap. Tiles reorder like photos (the publish sends them in slot
+ * video cap. Tiles reorder like photos (the save sends them in slot
  * order). Format and size are checked as soon as a file is picked; duration
  * is checked once the browser can decode its metadata — an unreadable
  * duration (an unusual codec) doesn't block the file, since Etsy is still the
@@ -371,7 +376,7 @@ export function VideoSection({
   onSelect,
   onMove,
 }: {
-  videos: (File | null)[];
+  videos: (ListingVideoItem | null)[];
   errors: (string | null)[];
   onSelect: (slot: number, file: File | null) => void;
   onMove: (from: number, to: number) => void;
@@ -419,7 +424,7 @@ function VideoSlot({
 }: {
   slot: number;
   count: number;
-  video: File | null;
+  video: ListingVideoItem | null;
   error: string | null;
   onSelect: (slot: number, file: File | null) => void;
   onMove: (from: number, to: number) => void;
@@ -428,24 +433,31 @@ function VideoSlot({
   isDropTarget: boolean;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
-  const url = useMemo(() => (video ? URL.createObjectURL(video) : null), [video]);
+  const file = video?.kind === "file" ? video.file : null;
+  const objectUrl = useMemo(() => (file ? URL.createObjectURL(file) : null), [file]);
   useEffect(() => {
     return () => {
-      if (url) URL.revokeObjectURL(url);
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [url]);
+  }, [objectUrl]);
+  const url = video?.kind === "etsy" ? video.videoUrl : objectUrl;
 
   return (
     <li {...dragSource} {...dragTarget} aria-label={`Video slot ${slot + 1}`} className="min-w-0 space-y-2">
       {error && <p className="text-xs font-medium text-red-600">{error}</p>}
-      {video && url ? (
+      {video && (url || video.kind === "etsy") ? (
         <>
           <div
             className={`group relative aspect-video cursor-grab overflow-hidden rounded-lg border bg-black active:cursor-grabbing ${
               isDropTarget ? "border-primary ring-2 ring-primary" : "border-black/10 dark:border-white/15"
             }`}
           >
-            <video src={url} controls className="h-full w-full object-contain" />
+            <video
+              src={url || undefined}
+              poster={video.kind === "etsy" ? video.thumbnailUrl || undefined : undefined}
+              controls
+              className="h-full w-full object-contain"
+            />
             <span className="pointer-events-none absolute left-1 top-1 rounded bg-black/60 px-1 text-[10px] font-medium text-white">
               {slot + 1}
             </span>
@@ -460,7 +472,9 @@ function VideoSlot({
             <MoveButtons noun="video" index={slot} count={count} onMove={onMove} />
           </div>
           <p className="min-w-0 truncate text-xs text-zinc-500">
-            {video.name} · {(video.size / (1024 * 1024)).toFixed(1)} MB
+            {video.kind === "file"
+              ? `${video.file.name} · ${(video.file.size / (1024 * 1024)).toFixed(1)} MB`
+              : "On Etsy"}
           </p>
         </>
       ) : (
@@ -488,5 +502,78 @@ function VideoSlot({
         }}
       />
     </li>
+  );
+}
+
+/**
+ * The one photo + video tile grid every listing editor uses — the create
+ * editor, an existing listing's editor, copies, and each row of the bulk
+ * screen. Fully controlled: the caller owns the slots, alt text and videos
+ * and decides when (and whether) anything is saved; this only opens the
+ * enlarged view for a tile.
+ */
+export function ListingMediaEditor({
+  sections = "all",
+  slots,
+  altTextBySlot,
+  onMovePhoto,
+  onRemovePhoto,
+  onAltTextChange,
+  onAddPhotos,
+  videos = [],
+  videoErrors = [],
+  onSelectVideo = () => {},
+  onMoveVideo = () => {},
+}: {
+  sections?: "all" | "photos" | "videos";
+  slots: PhotoSlot[];
+  altTextBySlot: Record<string, string>;
+  onMovePhoto: (from: number, to: number) => void;
+  onRemovePhoto: (slotId: string) => void;
+  onAltTextChange: (slotId: string, text: string) => void;
+  onAddPhotos: (files: File[]) => void;
+  videos?: (ListingVideoItem | null)[];
+  videoErrors?: (string | null)[];
+  onSelectVideo?: (slot: number, file: File | null) => void;
+  onMoveVideo?: (from: number, to: number) => void;
+}) {
+  const [enlarged, setEnlarged] = useState<{ slotId: string; focusAltText: boolean } | null>(null);
+  const enlargedIndex = enlarged ? slots.findIndex((s) => s.slotId === enlarged.slotId) : -1;
+  const enlargedSlot = enlargedIndex >= 0 ? slots[enlargedIndex] : null;
+
+  return (
+    <>
+      {sections !== "videos" && (
+        <PhotoGrid
+          slots={slots}
+          altTextBySlot={altTextBySlot}
+          onMove={onMovePhoto}
+          onRemove={onRemovePhoto}
+          onEnlarge={(slotId) => setEnlarged({ slotId, focusAltText: false })}
+          onEditAltText={(slotId) => setEnlarged({ slotId, focusAltText: true })}
+          onAddOwn={onAddPhotos}
+        />
+      )}
+
+      {sections !== "photos" && (
+        <div className={sections === "all" ? "mt-8 border-t border-black/10 pt-6 dark:border-white/15" : ""}>
+          <VideoSection videos={videos} errors={videoErrors} onSelect={onSelectVideo} onMove={onMoveVideo} />
+        </div>
+      )}
+
+      {enlarged && enlargedSlot && (
+        <PhotoEnlargeModal
+          slot={enlargedSlot}
+          index={enlargedIndex}
+          altText={altTextBySlot[enlargedSlot.slotId] ?? ""}
+          focusAltText={enlarged.focusAltText}
+          onAltTextChange={(text) => onAltTextChange(enlargedSlot.slotId, text)}
+          onMakeThumbnail={() => {
+            if (enlargedIndex > 0) onMovePhoto(enlargedIndex, 0);
+          }}
+          onClose={() => setEnlarged(null)}
+        />
+      )}
+    </>
   );
 }

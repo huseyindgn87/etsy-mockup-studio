@@ -1,7 +1,14 @@
 import { NextResponse } from "next/server";
 import { getEtsySession } from "@/lib/etsy/auth";
 import { createDraftListing, updateVariationImages } from "@/lib/etsy/listing-create";
+import { fetchListingDetails } from "@/lib/etsy/listing-details";
 import { uploadListingImage } from "@/lib/etsy/listing-images";
+import {
+  applyListingMediaEdit,
+  parseMediaOrder,
+  planListingMediaEdit,
+  type ImagePlacement,
+} from "@/lib/etsy/listing-media-edit";
 import { MAX_LISTING_IMAGES } from "@/lib/etsy/listing-image-limits";
 import type { PersonalizationQuestionInput } from "@/lib/etsy/listing-personalization";
 import { uploadListingVideo } from "@/lib/etsy/listing-video";
@@ -87,6 +94,14 @@ interface RenderPayload {
    * behavior for callers that don't send it).
    */
   imageOrder?: ImageOrderEntry[];
+  /**
+   * "existing" mode only: the grid is the listing's whole photo set — `imageOrder`
+   * may also hold `{ kind: "etsy", imageId, altText }` for photos already on it,
+   * and `videoOrder` (`{ kind: "existing", videoId } | { kind: "new", index }`,
+   * `index` into the `video` files) its whole video set. See `listing-media-edit.ts`.
+   */
+  editExisting?: boolean;
+  videoOrder?: unknown;
   /** When set, upload the renders to this Etsy listing instead of zipping. */
   publishTo?: PublishSpec;
 }
@@ -131,6 +146,32 @@ function sanitizeImageOrder(raw: unknown, jobCount: number, ownCount: number): I
   return out;
 }
 
+/**
+ * The edited grid of an existing listing, in order: photos already on it by
+ * Etsy id, and rendered jobs / own images as new uploads. Malformed entries
+ * are dropped individually.
+ */
+function sanitizeEditOrder(
+  raw: unknown,
+  jobs: JobSpec[],
+  ownImages: OwnImageSpec[],
+): ImagePlacement<ImageOrderEntry>[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ImagePlacement<ImageOrderEntry>[] = [];
+  for (const e of raw) {
+    if (!e || typeof e !== "object") continue;
+    const r = e as { kind?: unknown; index?: unknown; imageId?: unknown; altText?: unknown };
+    if (r.kind === "etsy" && typeof r.imageId === "number" && Number.isInteger(r.imageId) && r.imageId > 0) {
+      out.push({ kind: "existing", imageId: r.imageId, altText: typeof r.altText === "string" ? r.altText : "" });
+    } else if (r.kind === "job" && isIndex(r.index, jobs.length)) {
+      out.push({ kind: "new", item: { kind: "job", index: r.index }, altText: jobs[r.index].altText ?? "" });
+    } else if (r.kind === "own" && isIndex(r.index, ownImages.length)) {
+      out.push({ kind: "new", item: { kind: "own", index: r.index }, altText: ownImages[r.index].altText ?? "" });
+    }
+  }
+  return out;
+}
+
 
 /**
  * Batch-render every job and stream the results back as a ZIP.
@@ -169,10 +210,12 @@ function sanitizeImageOrder(raw: unknown, jobCount: number, ownCount: number): I
  *
  * With `payload.publishTo` the renders go to Etsy (first {@link MAX_LISTING_IMAGES},
  * sequential ranks) and the response is JSON, not a ZIP. `mode`:
- *   - "existing" — add to `listingId` (only replaces if `overwrite: true`)
+ *   - "existing" — add to `listingId` (only replaces if `overwrite: true`); with
+ *                  `editExisting`, the grid replaces the listing's photos/videos instead
+ *                  (reorder, remove, alt text, new files — see `listing-media-edit.ts`)
  *   - "copy"     — new draft seeded from `listingId`
  *   - "new"      — new draft from `newListing`, category/shipping borrowed from `listingId`
- * A live listing is never modified except an explicit "existing" + `overwrite`.
+ * A live listing is never modified except an explicit "existing" publish.
  *
  * "copy" and "new" both require `publishTo.howItsMade` (`who_made`/`is_supply`/
  * `when_made`/`production_partner_ids`) — always the caller's own choice, never
@@ -205,12 +248,6 @@ export async function POST(request: Request) {
     if (videoError) return NextResponse.json({ error: videoError }, { status: 400 });
   }
 
-  if (mockupFiles.length === 0 && ownImageFiles.length === 0) {
-    return NextResponse.json(
-      { error: "At least one `mockup` or `ownImage` file is required." },
-      { status: 400 },
-    );
-  }
   if (
     mockupFiles.length + designFiles.length + overlayFiles.length + ownImageFiles.length >
     MAX_FILES
@@ -230,6 +267,18 @@ export async function POST(request: Request) {
     payload = JSON.parse(String(form.get("payload") ?? "{}")) as RenderPayload;
   } catch {
     return NextResponse.json({ error: "`payload` is not valid JSON." }, { status: 400 });
+  }
+  const editExisting =
+    payload.editExisting === true &&
+    !!payload.publishTo &&
+    typeof payload.publishTo === "object" &&
+    payload.publishTo.mode !== "copy" &&
+    payload.publishTo.mode !== "new";
+  if (mockupFiles.length === 0 && ownImageFiles.length === 0 && !editExisting) {
+    return NextResponse.json(
+      { error: "At least one `mockup` or `ownImage` file is required." },
+      { status: 400 },
+    );
   }
 
   const mockups = Array.isArray(payload.mockups) ? payload.mockups : [];
@@ -257,7 +306,7 @@ export async function POST(request: Request) {
   }
   // A zip/download request always needs at least one job. A publish request
   // may consist entirely of user-uploaded photos with no rendered mockups.
-  if (jobs.length === 0 && !(ownImages.length > 0 && payload.publishTo)) {
+  if (jobs.length === 0 && !(ownImages.length > 0 && payload.publishTo) && !editExisting) {
     return NextResponse.json({ error: "`payload.jobs` is empty." }, { status: 400 });
   }
   if (jobs.length > MAX_JOBS) {
@@ -484,6 +533,107 @@ export async function POST(request: Request) {
       return NextResponse.json(
         { error: err instanceof Error ? err.message : "Etsy request failed." },
         { status: status >= 400 && status < 600 ? status : 502 },
+      );
+    }
+
+    if (editExisting) {
+      const desiredImages = sanitizeEditOrder(payload.imageOrder, jobs, ownImages);
+      if (desiredImages.length === 0) {
+        return NextResponse.json({ error: "A listing needs at least one photo." }, { status: 400 });
+      }
+      const desiredVideos = Array.isArray(payload.videoOrder)
+        ? parseMediaOrder({ images: [], videos: payload.videoOrder }, 0, videoFiles.length).videos
+        : null;
+
+      let current: Awaited<ReturnType<typeof fetchListingDetails>>[number] | undefined;
+      try {
+        [current] = await fetchListingDetails([targetListingId]);
+      } catch (err) {
+        const status = err instanceof EtsyApiError ? err.status : 502;
+        return NextResponse.json(
+          { error: err instanceof Error ? err.message : "Etsy request failed." },
+          { status: status >= 400 && status < 600 ? status : 502 },
+        );
+      }
+      if (!current) return NextResponse.json({ error: "Listing not found." }, { status: 404 });
+
+      const plan = planListingMediaEdit(
+        { images: current.images, videos: current.videos },
+        { images: desiredImages, videos: desiredVideos },
+      );
+      const toRender = [
+        ...new Set(
+          plan.placeImages.flatMap((p) => (p.kind === "new" && p.item.kind === "job" ? [p.item.index] : [])),
+        ),
+      ];
+      const rendered = new Map(
+        await Promise.all(toRender.map(async (idx) => [idx, await pool.run(buildInput(jobs[idx]))] as const)),
+      );
+      const entryName = (entry: ImageOrderEntry) =>
+        entry.kind === "job"
+          ? label(jobs[entry.index])
+          : ownImages[entry.index]?.name?.trim() || ownImageFiles[entry.index].name || `photo-${entry.index + 1}`;
+
+      const result = await applyListingMediaEdit({
+        shopId,
+        listingId: targetListingId,
+        currentImageCount: current.images.length,
+        currentVideoCount: current.videos.length,
+        plan,
+        uploadImage: async (entry, rank, altText) => {
+          if (entry.kind === "job") {
+            const res = rendered.get(entry.index);
+            if (!res || !res.ok) throw new Error(res ? res.error : "render failed");
+            return uploadListingImage({
+              shopId,
+              listingId: targetListingId,
+              bytes: new Uint8Array(res.bytes),
+              filename: uniqueName(baseName(jobs[entry.index]), res.ext),
+              contentType,
+              rank,
+              altText: altText || undefined,
+            });
+          }
+          const file = ownImageFiles[entry.index];
+          return uploadListingImage({
+            shopId,
+            listingId: targetListingId,
+            bytes: new Uint8Array(await file.arrayBuffer()),
+            filename: uniqueName(sanitize(entryName(entry)), extOf(file.name)),
+            contentType: file.type || "image/jpeg",
+            rank,
+            altText: altText || undefined,
+          });
+        },
+        uploadVideo: async (index) => {
+          const file = videoFiles[index];
+          await uploadListingVideo({
+            shopId,
+            listingId: targetListingId,
+            bytes: new Uint8Array(await file.arrayBuffer()),
+            filename: file.name || "video",
+            contentType: file.type || "application/octet-stream",
+          });
+        },
+        imageName: entryName,
+        videoName: (index) => videoFiles[index]?.name || `Video ${index + 1}`,
+      });
+
+      return NextResponse.json(
+        {
+          mode,
+          sourceListingId,
+          listingId: targetListingId,
+          createdDraft: false,
+          edited: true,
+          shopId,
+          uploaded: result.placed
+            .filter((p) => p.item)
+            .map((p) => ({ name: p.name, rank: p.rank, listingImageId: p.listingImageId, url: p.url })),
+          failed: result.failed,
+          skipped: result.skipped,
+        },
+        { status: result.failed.length > 0 && result.placed.length === 0 ? 502 : 200 },
       );
     }
 

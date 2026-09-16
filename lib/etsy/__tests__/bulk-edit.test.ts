@@ -480,7 +480,7 @@ describe("the editor's sidebar", () => {
     expect(isAttributeField("title")).toBe(false);
   });
 
-  test("Media is the read-only group — everything else can be written", () => {
+  test("Media is the one group outside the field patch — everything else is patched", () => {
     expect(ALL_BULK_FIELDS.filter(isReadOnlyField)).toEqual(["photos", "videos"]);
   });
 

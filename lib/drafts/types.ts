@@ -33,8 +33,11 @@ export interface DraftOwnImageMeta {
   name: string;
 }
 
-/** Matches `ImageSlotRef` in app/mockups/page.tsx. */
-export type DraftImageSlotRef = { kind: "job"; key: string } | { kind: "own"; id: string };
+/** Matches `ImageSlotRef` in app/components/listing-media/photo-order.ts. */
+export type DraftImageSlotRef =
+  | { kind: "job"; key: string }
+  | { kind: "own"; id: string }
+  | { kind: "etsy"; imageId: number };
 
 /** The editor's photo-grid state — everything except the binary files themselves. */
 export interface DraftPhotosData {
@@ -44,6 +47,8 @@ export interface DraftPhotosData {
   imageOrder: DraftImageSlotRef[];
   /** `mockupId::designId` keys of rendered combos the user removed from the grid. */
   removedJobKeys: string[];
+  /** Photos already on the edited listing that the user removed from the grid. */
+  removedEtsyImageIds: number[];
   altTextBySlot: Record<string, string>;
   activeTab: string;
 }
@@ -54,6 +59,7 @@ export const EMPTY_DRAFT_PHOTOS_DATA: DraftPhotosData = {
   ownImages: [],
   imageOrder: [],
   removedJobKeys: [],
+  removedEtsyImageIds: [],
   altTextBySlot: {},
   activeTab: "photos",
 };

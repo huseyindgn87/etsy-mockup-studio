@@ -9,6 +9,7 @@ describe("coercePhotosData", () => {
       ownImages: [{ id: "o1", name: "photo.jpg" }],
       imageOrder: [{ kind: "job", key: "m1::d1" }],
       removedJobKeys: ["m1::d2"],
+      removedEtsyImageIds: [7001],
       altTextBySlot: { "job:m1::d1": "A tee shirt" },
       activeTab: "variations",
     };
@@ -22,6 +23,7 @@ describe("coercePhotosData", () => {
       ownImages: [],
       imageOrder: [],
       removedJobKeys: [],
+      removedEtsyImageIds: [],
       altTextBySlot: {},
       activeTab: "photos",
     });
@@ -43,6 +45,11 @@ describe("coercePhotosData", () => {
   test("falls back altTextBySlot to {} when not an object", () => {
     expect(coercePhotosData({ altTextBySlot: "nope" }).altTextBySlot).toEqual({});
     expect(coercePhotosData({ altTextBySlot: null }).altTextBySlot).toEqual({});
+  });
+
+  test("keeps only positive integer removedEtsyImageIds", () => {
+    expect(coercePhotosData({ removedEtsyImageIds: [12, "13", -1, 1.5] }).removedEtsyImageIds).toEqual([12]);
+    expect(coercePhotosData({}).removedEtsyImageIds).toEqual([]);
   });
 
   test("keeps only string removedJobKeys", () => {

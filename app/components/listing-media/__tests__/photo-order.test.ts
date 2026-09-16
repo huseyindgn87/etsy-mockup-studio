@@ -11,6 +11,7 @@ import {
 
 const own = (id: string): ImageSlotRef => ({ kind: "own", id });
 const job = (key: string): ImageSlotRef => ({ kind: "job", key });
+const etsy = (imageId: number): ImageSlotRef => ({ kind: "etsy", imageId });
 
 describe("moveItem", () => {
   const ten = Array.from({ length: 10 }, (_, i) => i + 1);
@@ -55,7 +56,42 @@ describe("reconcileImageOrder", () => {
   });
 });
 
+describe("reconcileImageOrder for an existing listing's own photos", () => {
+  it("puts the listing's photos first, in rank order, ahead of anything added", () => {
+    expect(reconcileImageOrder([own("o1")], [], ["o1"], new Set(), [11, 12])).toEqual([etsy(11), etsy(12), own("o1")]);
+  });
+
+  it("keeps a restored order while the listing's photos are still loading", () => {
+    const restored = [etsy(12), own("o1"), etsy(11)];
+    expect(reconcileImageOrder(restored, [], ["o1"], new Set(), null)).toBe(restored);
+    expect(reconcileImageOrder(restored, [], ["o1"], new Set(), [11, 12])).toBe(restored);
+  });
+
+  it("keeps a removed photo out and drops one Etsy no longer has", () => {
+    expect(reconcileImageOrder([etsy(11), etsy(12), etsy(13)], [], [], new Set(), [11, 12], new Set([11]))).toEqual([
+      etsy(12),
+    ]);
+  });
+
+  it("appends a photo that appeared on Etsy after the grid was reordered", () => {
+    expect(reconcileImageOrder([etsy(12), etsy(11)], [], [], new Set(), [11, 12, 13])).toEqual([
+      etsy(12),
+      etsy(11),
+      etsy(13),
+    ]);
+  });
+});
+
 describe("publishImageOrder", () => {
+  it("sends the listing's own photos by id with their alt text, in grid order", () => {
+    const grid = moveItem([etsy(11), etsy(12), own("o1")], 2, 0);
+    expect(publishImageOrder(grid, [], [], ["o1"], { "etsy:12": "Side view", "own:o1": "ignored here" })).toEqual([
+      { kind: "own", index: 0 },
+      { kind: "etsy", imageId: 11, altText: "" },
+      { kind: "etsy", imageId: 12, altText: "Side view" },
+    ]);
+  });
+
   it("sends the reordered grid as the Etsy upload order", () => {
     const grid = [job("m1::d1"), own("o1"), job("m2::d1"), job("m1::d2")];
     const reordered = moveItem(grid, 0, grid.length - 1);
@@ -86,6 +122,22 @@ describe("draft persistence", () => {
     expect(restored.imageOrder).toEqual([job("m1::d2"), own("o1"), job("m1::d1")]);
     expect(restored.removedJobKeys).toEqual(["m2::d1"]);
     expect(restored.altTextBySlot).toEqual({ "own:o1": "Front view" });
+  });
+
+  it("round-trips an existing listing's reordered, removed and alt-texted photos", () => {
+    const saved = JSON.parse(
+      JSON.stringify({
+        imageOrder: [etsy(13), etsy(11)],
+        removedEtsyImageIds: [12],
+        altTextBySlot: withAltText({}, "etsy:13", "Back view"),
+      }),
+    );
+    const restored = coercePhotosData(saved);
+    expect(restored.imageOrder).toEqual([etsy(13), etsy(11)]);
+    expect(restored.removedEtsyImageIds).toEqual([12]);
+    expect(
+      reconcileImageOrder(restored.imageOrder, [], [], new Set(), [11, 12, 13], new Set(restored.removedEtsyImageIds)),
+    ).toEqual([etsy(13), etsy(11)]);
   });
 });
 
