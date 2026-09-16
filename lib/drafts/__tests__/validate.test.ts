@@ -8,6 +8,7 @@ describe("coercePhotosData", () => {
       designs: [{ id: "d1", name: "Logo" }],
       ownImages: [{ id: "o1", name: "photo.jpg" }],
       imageOrder: [{ kind: "job", key: "m1::d1" }],
+      removedJobKeys: ["m1::d2"],
       altTextBySlot: { "job:m1::d1": "A tee shirt" },
       activeTab: "variations",
     };
@@ -20,6 +21,7 @@ describe("coercePhotosData", () => {
       designs: [],
       ownImages: [],
       imageOrder: [],
+      removedJobKeys: [],
       altTextBySlot: {},
       activeTab: "photos",
     });
@@ -41,5 +43,10 @@ describe("coercePhotosData", () => {
   test("falls back altTextBySlot to {} when not an object", () => {
     expect(coercePhotosData({ altTextBySlot: "nope" }).altTextBySlot).toEqual({});
     expect(coercePhotosData({ altTextBySlot: null }).altTextBySlot).toEqual({});
+  });
+
+  test("keeps only string removedJobKeys", () => {
+    expect(coercePhotosData({ removedJobKeys: ["m1::d1", 4, null] }).removedJobKeys).toEqual(["m1::d1"]);
+    expect(coercePhotosData({ removedJobKeys: "m1::d1" }).removedJobKeys).toEqual([]);
   });
 });

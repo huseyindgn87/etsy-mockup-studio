@@ -42,6 +42,8 @@ export interface DraftPhotosData {
   designs: DraftDesignMeta[];
   ownImages: DraftOwnImageMeta[];
   imageOrder: DraftImageSlotRef[];
+  /** `mockupId::designId` keys of rendered combos the user removed from the grid. */
+  removedJobKeys: string[];
   altTextBySlot: Record<string, string>;
   activeTab: string;
 }
@@ -51,6 +53,7 @@ export const EMPTY_DRAFT_PHOTOS_DATA: DraftPhotosData = {
   designs: [],
   ownImages: [],
   imageOrder: [],
+  removedJobKeys: [],
   altTextBySlot: {},
   activeTab: "photos",
 };

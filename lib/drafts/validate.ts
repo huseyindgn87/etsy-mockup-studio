@@ -14,6 +14,9 @@ export function coercePhotosData(raw: unknown): DraftPhotosData {
     designs: Array.isArray(r.designs) ? (r.designs as DraftDesignMeta[]) : [],
     ownImages: Array.isArray(r.ownImages) ? (r.ownImages as DraftOwnImageMeta[]) : [],
     imageOrder: Array.isArray(r.imageOrder) ? r.imageOrder : [],
+    removedJobKeys: Array.isArray(r.removedJobKeys)
+      ? r.removedJobKeys.filter((k): k is string => typeof k === "string")
+      : [],
     altTextBySlot:
       r.altTextBySlot && typeof r.altTextBySlot === "object" ? r.altTextBySlot : {},
     activeTab: typeof r.activeTab === "string" ? r.activeTab : "photos",

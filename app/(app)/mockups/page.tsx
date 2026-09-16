@@ -19,21 +19,21 @@ import {
   uploadScheduleImages,
   type ScheduleImageSource,
 } from "./schedule-renders";
+import {
+  jobKey,
+  moveItem,
+  publishImageOrder,
+  reconcileImageOrder,
+  slotIdFor,
+  withAltText,
+  type ImageSlotRef,
+} from "./photo-order";
 import type { DraftPhotosData, DraftSource } from "@/lib/drafts/types";
 import { howItsMadeError } from "@/lib/etsy/listing-classification";
 import { personalizationQuestionsError } from "@/lib/etsy/listing-personalization";
+import { MAX_LISTING_IMAGES, checkImageFileBasics } from "@/lib/etsy/listing-image-limits";
 import {
-  ACCEPTED_IMAGE_EXTENSIONS,
-  MAX_ALT_TEXT_LENGTH,
-  MAX_LISTING_IMAGES,
-  checkImageFileBasics,
-} from "@/lib/etsy/listing-image-limits";
-import {
-  ACCEPTED_VIDEO_EXTENSIONS,
   MAX_LISTING_VIDEOS,
-  MAX_VIDEO_DURATION_SECONDS,
-  MAX_VIDEO_SIZE_BYTES,
-  MIN_VIDEO_DURATION_SECONDS,
   checkVideoDuration,
   checkVideoFileBasics,
 } from "@/lib/etsy/video-limits";
@@ -43,6 +43,7 @@ import ListingForm, {
   type ListingFormValue,
   type VariationToggleKey,
 } from "./ListingForm";
+import { PhotoEnlargeModal, PhotoGrid, VideoSection, type PhotoSlot } from "./ListingMedia";
 import ListingPreviewModal, { type PreviewMediaItem } from "./ListingPreviewModal";
 import MockupCanvas from "./MockupCanvas";
 import TemplatePicker from "./TemplatePicker";
@@ -207,25 +208,6 @@ interface OwnImage {
   url: string;
 }
 
-/**
- * One photo-grid slot: either a rendered mockup×design combo (identified by a
- * stable `mockupId::designId` key, since indices shift as mockups/designs are
- * added or removed) or a user-uploaded photo (identified by its `OwnImage.id`).
- * `imageOrder` state is a list of these — its order IS the Etsy upload/rank
- * order, slot 0 becoming the listing thumbnail.
- */
-type ImageSlotRef = { kind: "job"; key: string } | { kind: "own"; id: string };
-
-/** One photo-grid slot — a rendered mockup×design combo or a user-uploaded photo. */
-interface PhotoSlot {
-  slotId: string;
-  ref: ImageSlotRef;
-  thumbnailUrl: string | null;
-  label: string;
-}
-
-const jobKey = (mockupId: string, designId: string) => `${mockupId}::${designId}`;
-const slotIdFor = (ref: ImageSlotRef) => (ref.kind === "job" ? `job:${ref.key}` : `own:${ref.id}`);
 
 /** The joined value ids a field's `appliesTo`-scoped subset of one combination — matches `ListingForm`'s own key. */
 function comboKeyFor(appliesTo: number[], valueIds: number[]): string {
@@ -508,8 +490,11 @@ function MockupsPageInner() {
   // ---- photo grid: rendered mockups + user-uploaded photos, one Etsy image slot each ----
   const [ownImages, setOwnImages] = useState<OwnImage[]>([]);
   const [imageOrder, setImageOrder] = useState<ImageSlotRef[]>([]);
+  /** Rendered combos the user removed from the grid — kept out of `imageOrder`, persisted with the draft. */
+  const [removedJobKeys, setRemovedJobKeys] = useState<string[]>([]);
   const [altTextBySlot, setAltTextBySlot] = useState<Record<string, string>>({});
   const [enlargedSlotId, setEnlargedSlotId] = useState<string | null>(null);
+  const [enlargedFocusAltText, setEnlargedFocusAltText] = useState(false);
   const [jobThumbs, setJobThumbs] = useState<Record<string, string>>({});
 
   // ---- "Save draft" — see the effects below photoSlots, and lib/drafts/* ----
@@ -567,18 +552,39 @@ function MockupsPageInner() {
     setEnlargedSlotId((cur) => (cur === `own:${id}` ? null : cur));
   }, []);
 
+  function removeImageSlot(slotId: string) {
+    const ref = imageOrder.find((r) => slotIdFor(r) === slotId);
+    if (!ref) return;
+    if (ref.kind === "own") {
+      removeOwnImage(ref.id);
+      return;
+    }
+    setRemovedJobKeys((prev) => (prev.includes(ref.key) ? prev : [...prev, ref.key]));
+    setImageOrder((prev) => prev.filter((r) => slotIdFor(r) !== slotId));
+    setAltTextBySlot((prev) => {
+      const next = { ...prev };
+      delete next[slotId];
+      return next;
+    });
+    setEnlargedSlotId((cur) => (cur === slotId ? null : cur));
+  }
+
+  function openPhoto(slotId: string, focusAltText: boolean) {
+    setEnlargedFocusAltText(focusAltText);
+    setEnlargedSlotId(slotId);
+  }
+
   function setAltText(slotId: string, text: string) {
-    setAltTextBySlot((prev) => ({ ...prev, [slotId]: text.slice(0, MAX_ALT_TEXT_LENGTH) }));
+    setAltTextBySlot((prev) => withAltText(prev, slotId, text));
   }
 
   function moveImageSlot(from: number, to: number) {
-    setImageOrder((prev) => {
-      if (from < 0 || from >= prev.length || to < 0 || to >= prev.length || from === to) return prev;
-      const next = [...prev];
-      const [item] = next.splice(from, 1);
-      next.splice(to, 0, item);
-      return next;
-    });
+    setImageOrder((prev) => moveItem(prev, from, to));
+  }
+
+  function moveVideoSlot(from: number, to: number) {
+    setVideos((prev) => moveItem(prev, from, to));
+    setVideoErrors((prev) => moveItem(prev, from, to));
   }
 
   const psdInput = useRef<HTMLInputElement>(null);
@@ -852,32 +858,21 @@ function MockupsPageInner() {
   // upload/rank order) in sync as mockups/designs/own-images are added or
   // removed: refs that are still valid keep their position (so a manual drag
   // reorder survives), newly-appeared jobs/own images are appended at the
-  // end, and refs pointing at something removed are dropped.
+  // end, and refs pointing at something removed are dropped. A rendered combo
+  // removed from the grid stays out until its mockup or design is re-added.
   useEffect(() => {
     // Reconciling derived state against two other state values (not a DOM/
     // external-system sync) — an intentional synchronous update.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setImageOrder((prev) => {
-      const validJobKeys = new Set(currentJobRefs.map((r) => r.key));
-      const validOwnIds = new Set(ownImages.map((o) => o.id));
-      const kept = prev.filter((r) => (r.kind === "job" ? validJobKeys.has(r.key) : validOwnIds.has(r.id)));
-      const keptJobKeys = new Set(
-        kept.filter((r): r is { kind: "job"; key: string } => r.kind === "job").map((r) => r.key),
-      );
-      const keptOwnIds = new Set(
-        kept.filter((r): r is { kind: "own"; id: string } => r.kind === "own").map((r) => r.id),
-      );
-      const newJobs = currentJobRefs.filter((r) => !keptJobKeys.has(r.key));
-      const newOwn = ownImages
-        .filter((o) => !keptOwnIds.has(o.id))
-        .map((o): ImageSlotRef => ({ kind: "own", id: o.id }));
-      const next = [...kept, ...newJobs, ...newOwn];
-      if (next.length === prev.length && next.every((r, i) => slotIdFor(r) === slotIdFor(prev[i]))) {
-        return prev; // unchanged — avoid a pointless re-render
-      }
-      return next;
-    });
-  }, [currentJobRefs, ownImages]);
+    setImageOrder((prev) =>
+      reconcileImageOrder(
+        prev,
+        currentJobRefs.map((r) => r.key),
+        ownImages.map((o) => o.id),
+        new Set(removedJobKeys),
+      ),
+    );
+  }, [currentJobRefs, ownImages, removedJobKeys]);
 
   // Thumbnails for the photo grid: a small composite per mockup×design combo,
   // using the same `compose()` core as the live editor preview and the server
@@ -968,6 +963,7 @@ function MockupsPageInner() {
           source: DraftSource | null;
           activeTab: NavTab;
           imageOrder: ImageSlotRef[];
+          removedJobKeys?: string[];
           altTextBySlot: Record<string, string>;
           mockups: {
             id: string;
@@ -1054,6 +1050,7 @@ function MockupsPageInner() {
         setActiveTab(body.activeTab || "photos");
         setAltTextBySlot(body.altTextBySlot ?? {});
         setImageOrder(body.imageOrder ?? []);
+        setRemovedJobKeys(body.removedJobKeys ?? []);
         setMockups(restoredMockups);
         setDesigns(restoredDesigns);
         setOwnImages(restoredOwn);
@@ -1226,6 +1223,7 @@ function MockupsPageInner() {
           .filter((o) => uploadedAssetKeys.has(`own:${o.id}`))
           .map((o) => ({ id: o.id, name: o.file.name })),
         imageOrder,
+        removedJobKeys,
         altTextBySlot,
         activeTab,
       };
@@ -1268,6 +1266,7 @@ function MockupsPageInner() {
     ownImages,
     uploadedAssetKeys,
     imageOrder,
+    removedJobKeys,
     altTextBySlot,
     activeTab,
     listingForm,
@@ -1347,22 +1346,12 @@ function MockupsPageInner() {
         // Map each grid slot (stable key/id) to the numeric job/own-image
         // index the server payload above just built, in display order — this
         // is what turns a drag reorder into the actual Etsy rank order.
-        const jobIndexFor = (key: string): number | null => {
-          const [mockupId, designId] = key.split("::");
-          const i = included.findIndex((m) => m.id === mockupId);
-          const k = designs.findIndex((d) => d.id === designId);
-          return i < 0 || k < 0 ? null : i * designs.length + k;
-        };
-        payload.imageOrder = imageOrder
-          .map((ref) => {
-            if (ref.kind === "job") {
-              const index = jobIndexFor(ref.key);
-              return index == null ? null : { kind: "job" as const, index };
-            }
-            const index = ownImages.findIndex((o) => o.id === ref.id);
-            return index < 0 ? null : { kind: "own" as const, index };
-          })
-          .filter((e): e is { kind: "job" | "own"; index: number } => e != null);
+        payload.imageOrder = publishImageOrder(
+          imageOrder,
+          included.map((m) => m.id),
+          designs.map((d) => d.id),
+          ownImages.map((o) => o.id),
+        );
       }
 
       fd.set("payload", JSON.stringify(payload));
@@ -2198,13 +2187,21 @@ function MockupsPageInner() {
 
                 <PhotoGrid
                   slots={photoSlots}
+                  altTextBySlot={altTextBySlot}
                   onMove={moveImageSlot}
-                  onEnlarge={setEnlargedSlotId}
+                  onRemove={removeImageSlot}
+                  onEnlarge={(slotId) => openPhoto(slotId, false)}
+                  onEditAltText={(slotId) => openPhoto(slotId, true)}
                   onAddOwn={addOwnImages}
                 />
 
                 <div className="mt-8 border-t border-black/10 pt-6 dark:border-white/15">
-                  <VideoSection videos={videos} errors={videoErrors} onSelect={selectVideo} />
+                  <VideoSection
+                    videos={videos}
+                    errors={videoErrors}
+                    onSelect={selectVideo}
+                    onMove={moveVideoSlot}
+                  />
                 </div>
               </div>
             )}
@@ -2239,18 +2236,12 @@ function MockupsPageInner() {
           slot={enlargedSlot}
           index={photoSlots.findIndex((s) => s.slotId === enlargedSlot.slotId)}
           altText={altTextBySlot[enlargedSlot.slotId] ?? ""}
+          focusAltText={enlargedFocusAltText}
           onAltTextChange={(text) => setAltText(enlargedSlot.slotId, text)}
           onMakeThumbnail={() => {
             const from = photoSlots.findIndex((s) => s.slotId === enlargedSlot.slotId);
             if (from > 0) moveImageSlot(from, 0);
           }}
-          onRemove={
-            enlargedSlot.ref.kind === "own"
-              ? () => {
-                  removeOwnImage(enlargedSlot.ref.kind === "own" ? enlargedSlot.ref.id : "");
-                }
-              : undefined
-          }
           onClose={() => setEnlargedSlotId(null)}
         />
       )}
@@ -2302,325 +2293,6 @@ function Dropzone({
         hidden
         onChange={(e) => {
           onFiles([...(e.target.files ?? [])]);
-          e.target.value = "";
-        }}
-      />
-    </div>
-  );
-}
-
-/**
- * One video, uploaded to the target listing in the same publish call as the
- * rendered images (once the listing exists). Format and size are checked as
- * soon as a file is picked; duration is checked once the browser can decode
- * its metadata — an unreadable duration (an unusual codec) doesn't block the
- * file, since Etsy is still the final check.
- */
-/**
- * The listing's photo slots: rendered mockups (in mockup×design order) and
- * user-uploaded photos, filling Etsy's `MAX_LISTING_IMAGES` image slots.
- * Filled slots are draggable to reorder — that order becomes the Etsy upload
- * rank, so slot 1 is always the listing thumbnail. Empty slots are shown so
- * the user can see how many are left.
- */
-function PhotoGrid({
-  slots,
-  onMove,
-  onEnlarge,
-  onAddOwn,
-}: {
-  slots: PhotoSlot[];
-  onMove: (from: number, to: number) => void;
-  onEnlarge: (slotId: string) => void;
-  onAddOwn: (files: File[]) => void;
-}) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const emptyCount = Math.max(0, MAX_LISTING_IMAGES - slots.length);
-
-  return (
-    <div className="mt-6 space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h4 className="text-sm font-bold text-zinc-900 dark:text-zinc-50">
-          Photos{" "}
-          <span className="font-normal text-zinc-500">
-            ({slots.length}/{MAX_LISTING_IMAGES})
-          </span>
-        </h4>
-        <button
-          type="button"
-          onClick={() => inputRef.current?.click()}
-          className="h-8 rounded-full border border-black/10 px-3 text-xs font-medium hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
-        >
-          Upload your own
-        </button>
-        <input
-          ref={inputRef}
-          type="file"
-          accept={ACCEPTED_IMAGE_EXTENSIONS.map((e) => `.${e}`).join(",")}
-          multiple
-          hidden
-          onChange={(e) => {
-            onAddOwn([...(e.target.files ?? [])]);
-            e.target.value = "";
-          }}
-        />
-      </div>
-
-      <div className="grid grid-cols-4 gap-2 sm:grid-cols-6 md:grid-cols-8">
-        {slots.map((slot, i) => (
-          <button
-            key={slot.slotId}
-            type="button"
-            draggable
-            onClick={() => onEnlarge(slot.slotId)}
-            onDragStart={(e) => {
-              e.dataTransfer.effectAllowed = "move";
-              e.dataTransfer.setData("text/plain", String(i));
-            }}
-            onDragOver={(e) => e.preventDefault()}
-            onDrop={(e) => {
-              e.preventDefault();
-              const from = Number(e.dataTransfer.getData("text/plain"));
-              if (Number.isFinite(from)) onMove(from, i);
-            }}
-            title={slot.label}
-            className="group relative aspect-square cursor-grab overflow-hidden rounded-lg border border-black/10 bg-zinc-100 active:cursor-grabbing dark:border-white/15 dark:bg-zinc-900"
-          >
-            {slot.thumbnailUrl ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={slot.thumbnailUrl}
-                alt={slot.label}
-                className="h-full w-full object-cover"
-                draggable={false}
-              />
-            ) : (
-              <span className="flex h-full w-full items-center justify-center text-[10px] text-zinc-400">
-                Rendering…
-              </span>
-            )}
-            <span className="absolute left-1 top-1 rounded bg-black/60 px-1 text-[10px] font-medium text-white">
-              {i === 0 ? "Thumbnail" : i + 1}
-            </span>
-          </button>
-        ))}
-
-        {Array.from({ length: emptyCount }).map((_, i) => (
-          <div
-            key={`empty-${i}`}
-            className="flex aspect-square items-center justify-center rounded-lg border-2 border-dashed border-black/10 text-[10px] text-zinc-400 dark:border-white/15"
-          >
-            {slots.length + i + 1}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-/** Enlarged view of one photo-grid slot, with its alt-text field and character counter. */
-function PhotoEnlargeModal({
-  slot,
-  index,
-  altText,
-  onAltTextChange,
-  onMakeThumbnail,
-  onRemove,
-  onClose,
-}: {
-  slot: PhotoSlot;
-  index: number;
-  altText: string;
-  onAltTextChange: (text: string) => void;
-  onMakeThumbnail: () => void;
-  onRemove?: () => void;
-  onClose: () => void;
-}) {
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
-      onClick={onClose}
-    >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label={slot.label}
-        onClick={(e) => e.stopPropagation()}
-        className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl bg-white shadow-xl dark:bg-zinc-950 sm:flex-row"
-      >
-        <div className="flex min-h-0 flex-1 items-center justify-center bg-zinc-100 p-2 dark:bg-zinc-900">
-          {slot.thumbnailUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={slot.thumbnailUrl}
-              alt={slot.label}
-              className="max-h-[70vh] w-full object-contain sm:max-h-[80vh]"
-            />
-          ) : (
-            <p className="p-10 text-sm text-zinc-500">Rendering…</p>
-          )}
-        </div>
-
-        <div className="w-full space-y-3 p-4 sm:w-72">
-          <div className="flex items-start justify-between gap-2">
-            <p className="min-w-0 truncate text-sm font-medium text-zinc-900 dark:text-zinc-50">
-              {index === 0 ? "Listing thumbnail" : slot.label}
-            </p>
-            <button
-              type="button"
-              onClick={onClose}
-              aria-label="Close"
-              className="shrink-0 text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200"
-            >
-              ×
-            </button>
-          </div>
-
-          <label className="block text-sm">
-            <span className="flex justify-between text-xs text-zinc-500">
-              <span>Alt text</span>
-              <span className="font-mono">
-                {altText.length}/{MAX_ALT_TEXT_LENGTH}
-              </span>
-            </span>
-            <textarea
-              rows={4}
-              value={altText}
-              maxLength={MAX_ALT_TEXT_LENGTH}
-              onChange={(e) => onAltTextChange(e.target.value)}
-              placeholder="Describe this image for screen readers and search…"
-              className="mt-1 w-full resize-y rounded-lg border border-black/10 bg-white px-2 py-1.5 text-sm outline-none focus:border-primary dark:border-white/15 dark:bg-zinc-900"
-            />
-          </label>
-
-          <div className="flex flex-wrap gap-2">
-            {index > 0 && (
-              <button
-                type="button"
-                onClick={onMakeThumbnail}
-                className="h-8 rounded-full border border-black/10 px-3 text-xs font-medium hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
-              >
-                Make listing thumbnail
-              </button>
-            )}
-            {onRemove && (
-              <button
-                type="button"
-                onClick={() => {
-                  onRemove();
-                  onClose();
-                }}
-                className="h-8 rounded-full border border-red-200 px-3 text-xs font-medium text-red-600 hover:bg-red-50 dark:border-red-900 dark:hover:bg-red-950/50"
-              >
-                Remove
-              </button>
-            )}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/**
- * Video slots — one per `MAX_LISTING_VIDEOS`, matching Etsy's per-listing
- * video cap, each independently uploaded/removed. Format and size are
- * checked as soon as a file is picked; duration is checked once the browser
- * can decode its metadata — an unreadable duration (an unusual codec)
- * doesn't block the file, since Etsy is still the final check.
- */
-function VideoSection({
-  videos,
-  errors,
-  onSelect,
-}: {
-  videos: (File | null)[];
-  errors: (string | null)[];
-  onSelect: (slot: number, file: File | null) => void;
-}) {
-  return (
-    <div className="space-y-4">
-      <h3 className="text-base font-bold text-zinc-900 dark:text-zinc-50">Video</h3>
-      <p className="text-sm text-zinc-500">
-        Up to {MAX_LISTING_VIDEOS} videos, {Math.round(MAX_VIDEO_SIZE_BYTES / (1024 * 1024))} MB
-        each, {MIN_VIDEO_DURATION_SECONDS}-{MAX_VIDEO_DURATION_SECONDS} seconds long. Accepted
-        formats: {ACCEPTED_VIDEO_EXTENSIONS.join(", ").toUpperCase()}. Etsy removes audio on
-        upload.
-      </p>
-      <div className="flex flex-wrap gap-4">
-        {videos.map((video, i) => (
-          <VideoSlot
-            key={i}
-            slot={i}
-            video={video}
-            error={errors[i] ?? null}
-            onSelect={onSelect}
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function VideoSlot({
-  slot,
-  video,
-  error,
-  onSelect,
-}: {
-  slot: number;
-  video: File | null;
-  error: string | null;
-  onSelect: (slot: number, file: File | null) => void;
-}) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const url = useMemo(() => (video ? URL.createObjectURL(video) : null), [video]);
-  useEffect(() => {
-    return () => {
-      if (url) URL.revokeObjectURL(url);
-    };
-  }, [url]);
-
-  return (
-    <div className="w-64 space-y-2">
-      {error && <p className="text-xs font-medium text-red-600">{error}</p>}
-      {video && url ? (
-        <>
-          <video
-            src={url}
-            controls
-            className="w-full rounded-lg border border-black/10 dark:border-white/15"
-          />
-          <div className="flex items-center justify-between gap-2 text-xs text-zinc-500">
-            <span className="min-w-0 truncate">
-              {video.name} · {(video.size / (1024 * 1024)).toFixed(1)} MB
-            </span>
-            <button
-              type="button"
-              onClick={() => onSelect(slot, null)}
-              className="shrink-0 font-medium text-red-600 hover:underline"
-            >
-              Remove
-            </button>
-          </div>
-        </>
-      ) : (
-        <button
-          type="button"
-          onClick={() => inputRef.current?.click()}
-          className="flex h-36 w-full flex-col items-center justify-center gap-1 rounded-xl border-2 border-dashed border-black/15 px-4 text-sm text-zinc-500 hover:border-black/30 dark:border-white/20 dark:hover:border-white/40"
-        >
-          <span className="font-medium text-zinc-700 dark:text-zinc-300">Upload a video</span>
-          <span>Slot {slot + 1}</span>
-        </button>
-      )}
-      <input
-        ref={inputRef}
-        type="file"
-        accept="video/*"
-        hidden
-        onChange={(e) => {
-          onSelect(slot, e.target.files?.[0] ?? null);
           e.target.value = "";
         }}
       />
