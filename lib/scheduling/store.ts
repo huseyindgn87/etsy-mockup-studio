@@ -238,21 +238,37 @@ export async function rescheduleScheduledListing(
   return { ok: true, value: { summary: toSummary(row), superseded } };
 }
 
-/** Cancels a pending or failed schedule. The draft itself is untouched, and can be scheduled again. */
-export async function cancelScheduledListing(
-  scope: Scope,
-  id: string,
-): Promise<StoreResult<ScheduledListingSummary>> {
+export interface Cancelled {
+  summary: ScheduledListingSummary;
+  /** The images the cancelled schedule owned — nothing references them now, for the caller to delete. */
+  released: { renderSetId: string | null; images: ScheduledImage[] } | null;
+}
+
+/**
+ * Cancels a pending or failed schedule. The draft itself is untouched and can
+ * be scheduled again (which re-renders its images from scratch), so the
+ * cancelled schedule's own rendered images are dropped from the row and
+ * handed back for the caller to delete from storage.
+ */
+export async function cancelScheduledListing(scope: Scope, id: string): Promise<StoreResult<Cancelled>> {
+  const before = await findOwned(scope, id);
   const { count } = await prisma.scheduledListing.updateMany({
     where: { id, userId: scope.userId, shopId: scope.shopId, status: { in: [...EDITABLE_STATUSES] } },
-    data: { status: "cancelled", activeDraftId: null, nextAttemptAt: null },
+    data: { status: "cancelled", activeDraftId: null, nextAttemptAt: null, renderSetId: null, images: [] },
   });
   const row = await findOwned(scope, id);
   if (!row) return { ok: false, code: "not_found", error: "Scheduled listing not found." };
   if (count === 0) {
     return { ok: false, code: "conflict", error: `This listing is ${row.status} and can't be cancelled.` };
   }
-  return { ok: true, value: toSummary(row) };
+  const images = before ? coerceScheduledImages(before.images) : [];
+  return {
+    ok: true,
+    value: {
+      summary: toSummary(row),
+      released: images.length > 0 ? { renderSetId: before!.renderSetId, images } : null,
+    },
+  };
 }
 
 /** Whether any of the user's schedules uses this render set — its images must then stay put. */

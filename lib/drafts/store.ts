@@ -10,7 +10,8 @@
 
 import type { ListingDraft, Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db/prisma";
-import { ACTIVE_STATUSES, EDITABLE_STATUSES } from "@/lib/scheduling/types";
+import { deleteScheduledImages } from "@/lib/scheduling/render-storage";
+import { ACTIVE_STATUSES, EDITABLE_STATUSES, type ScheduledImage } from "@/lib/scheduling/types";
 import { deletePrefix, draftPrefix } from "@/lib/storage/r2";
 import { DRAFT_TTL_DAYS } from "./constants";
 import type { DraftSummary } from "./types";
@@ -69,12 +70,26 @@ export async function deleteDraft(userId: string, id: string): Promise<boolean> 
   const owned = await getDraftRow(userId, id);
   if (!owned) return false;
   // The row's FK would just null out `draftId`, leaving a pending schedule
-  // pointing at nothing — cancel it explicitly instead. Published history
-  // keeps its row (see prisma/schema.prisma's `ScheduledListing`).
+  // pointing at nothing — cancel it explicitly instead, and delete the images
+  // those schedules had rendered, since nothing will ever publish them now.
+  // Published history keeps its row (see prisma/schema.prisma's
+  // `ScheduledListing`), and so do its own already-deleted images.
+  const cancelled = await prisma.scheduledListing.findMany({
+    where: { draftId: id, userId, status: { in: [...EDITABLE_STATUSES] } },
+    select: { renderSetId: true, images: true },
+  });
   await prisma.scheduledListing.updateMany({
     where: { draftId: id, userId, status: { in: [...EDITABLE_STATUSES] } },
-    data: { status: "cancelled", activeDraftId: null },
+    data: { status: "cancelled", activeDraftId: null, renderSetId: null, images: [] },
   });
+  for (const schedule of cancelled) {
+    // Each key is re-checked against that schedule's own prefix before it is
+    // deleted, so this can never reach the user's own uploads.
+    await deleteScheduledImages(userId, {
+      renderSetId: schedule.renderSetId,
+      images: Array.isArray(schedule.images) ? (schedule.images as unknown as ScheduledImage[]) : [],
+    });
+  }
   // R2 cleanup is best-effort — an orphaned object is cheap; a draft the user
   // asked to delete but that a storage hiccup (or no R2 configured yet) leaves
   // stuck forever is a real, visible bug. Same tradeoff as sweepExpiredDrafts.

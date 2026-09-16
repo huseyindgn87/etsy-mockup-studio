@@ -13,6 +13,8 @@ interface Row {
 }
 
 const rows = new Map<string, Row>();
+/** The schedules the fake reports for whichever draft is being deleted. */
+const scheduledRows: { renderSetId: string | null; images: unknown }[] = [];
 let nextId = 1;
 
 vi.mock("@/lib/db/prisma", () => ({
@@ -48,6 +50,7 @@ vi.mock("@/lib/db/prisma", () => ({
       }),
     },
     scheduledListing: {
+      findMany: vi.fn(async () => scheduledRows),
       updateMany: vi.fn(async () => ({ count: 0 })),
     },
   },
@@ -56,12 +59,18 @@ vi.mock("@/lib/db/prisma", () => ({
 vi.mock("@/lib/storage/r2", () => ({
   deletePrefix: vi.fn(async () => {}),
   draftPrefix: (id: string) => `drafts/${id}/`,
+  isR2Configured: () => true,
+  deleteObjects: vi.fn(async () => {}),
+  listKeys: vi.fn(async () => []),
 }));
 
+import { SET_A } from "@/lib/scheduling/__tests__/fixtures";
+import { renderImageKey } from "@/lib/scheduling/render-keys";
 import { createDraft, deleteDraft, getDraftRow, listDrafts, saveDraft } from "../store";
 
 beforeEach(() => {
   rows.clear();
+  scheduledRows.length = 0;
   nextId = 1;
 });
 
@@ -117,8 +126,28 @@ describe("deleteDraft and scheduling", () => {
     expect(await deleteDraft("alice", id)).toBe(true);
     expect(updateMany).toHaveBeenCalledWith({
       where: { draftId: id, userId: "alice", status: { in: ["pending", "failed"] } },
-      data: { status: "cancelled", activeDraftId: null },
+      data: { status: "cancelled", activeDraftId: null, renderSetId: null, images: [] },
     });
     expect(await getDraftRow("alice", id)).toBeNull();
+  });
+
+  test("deletes the images those schedules had rendered, but never the user's own uploads", async () => {
+    const { prisma } = await import("@/lib/db/prisma");
+    const { deleteObjects } = await import("@/lib/storage/r2");
+    vi.mocked(prisma.scheduledListing.updateMany).mockClear();
+    vi.mocked(deleteObjects).mockClear();
+
+    const { id } = await createDraft("alice");
+    scheduledRows.push({
+      renderSetId: SET_A,
+      images: [
+        { key: renderImageKey("alice", SET_A, 0), filename: "a.jpg", contentType: "image/jpeg" },
+        // A user upload that has no business being here is refused anyway.
+        { key: `drafts/${id}/own/photo-1`, filename: "p.jpg", contentType: "image/jpeg" },
+      ],
+    });
+
+    expect(await deleteDraft("alice", id)).toBe(true);
+    expect(deleteObjects).toHaveBeenCalledWith([renderImageKey("alice", SET_A, 0)]);
   });
 });

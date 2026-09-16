@@ -416,10 +416,36 @@ describe("POST /api/schedule/[id]/cancel", () => {
     expect(db.drafts.has("draft-alice")).toBe(true);
   });
 
+  test("deletes the images it had rendered — and nothing else in storage", async () => {
+    const row = aliceRow();
+    stored.add("drafts/draft-alice/own/photo-1"); // the user's own upload
+    upload("alice", SET_B, 2); // another schedule's renders
+    upload("bob", SET_A, 1); // another user's renders
+
+    expect((await cancel(row.id)).status).toBe(200);
+
+    expect(deleteObjects).toHaveBeenCalledWith(storedImages("alice", 3).map((i) => i.key));
+    for (const image of storedImages("alice", 3)) expect(stored.has(image.key)).toBe(false);
+    expect(stored.has("drafts/draft-alice/own/photo-1")).toBe(true);
+    expect(stored.has(renderImageKey("alice", SET_B, 0))).toBe(true);
+    expect(stored.has(renderImageKey("bob", SET_A, 0))).toBe(true);
+    // The row no longer points at objects that are gone.
+    expect(db.scheduled.get(row.id)).toMatchObject({ renderSetId: null, images: [] });
+  });
+
+  test("a schedule with no rendered images cancels without touching storage", async () => {
+    const row = aliceRow({ status: "failed", images: [], renderSetId: null });
+    expect((await cancel(row.id)).status).toBe(200);
+    expect(deleteObjects).not.toHaveBeenCalled();
+  });
+
   test.each(["publishing", "published", "cancelled"])("409 for a %s schedule, unchanged", async (statusValue) => {
     const row = aliceRow({ status: statusValue, activeDraftId: null });
     expect((await cancel(row.id)).status).toBe(409);
     expect(db.scheduled.get(row.id)!.status).toBe(statusValue);
+    // A refused cancel deletes nothing.
+    expect(deleteObjects).not.toHaveBeenCalled();
+    for (const image of storedImages("alice", 3)) expect(stored.has(image.key)).toBe(true);
   });
 });
 

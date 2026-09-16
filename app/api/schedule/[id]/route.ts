@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { parseScheduleContent } from "@/lib/scheduling/content-request";
-import { deleteSupersededImages } from "@/lib/scheduling/render-storage";
+import { deleteScheduledImages } from "@/lib/scheduling/render-storage";
 import { resolveScheduleScope } from "@/lib/scheduling/request";
 import { rescheduleScheduledListing } from "@/lib/scheduling/store";
 import { parseScheduleTime } from "@/lib/scheduling/validate";
@@ -43,6 +43,6 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   if (!result.ok) {
     return NextResponse.json({ error: result.error }, { status: result.code === "not_found" ? 404 : 409 });
   }
-  if (result.value.superseded) await deleteSupersededImages(resolved.scope.userId, result.value.superseded);
+  if (result.value.superseded) await deleteScheduledImages(resolved.scope.userId, result.value.superseded);
   return NextResponse.json({ scheduledListing: result.value.summary });
 }
