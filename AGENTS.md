@@ -20,7 +20,7 @@ an actual `vitest run`, pending manual steps from the migrations folder and
 
 _Last updated 2026-09-16._
 
-- **HEAD:** 64a5c05 (plus the commit updating this file). `tsc --noEmit`, `eslint .`, `next build` clean; **623 vitest tests passing**.
+- **HEAD:** d88baba (plus the commit updating this file). `tsc --noEmit`, `eslint .`, `next build` clean; **626 vitest tests passing**.
 - **Shipped:**
   - Listing editor at `/mockups` (variations, photos + video, personalization, settings tab, price-by-variation).
   - `/listings` backed by a DB listings cache with on-demand refresh; multiple Etsy shop connections per user (refresh tokens encrypted at rest).
