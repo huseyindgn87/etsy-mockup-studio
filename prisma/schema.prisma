@@ -25,42 +25,48 @@ datasource db {
 /// lib/etsy/session.ts's `ownerUserId`) and every `ListingDraft` /
 /// `MockupTemplate` / `MockupCalibration` row.
 model User {
-  id            String    @id @default(cuid())
-  email         String    @unique
-  passwordHash  String
-  emailVerified DateTime?
-  name          String?
+  id                     String    @id @default(cuid())
+  email                  String    @unique
+  passwordHash           String
+  emailVerified          DateTime?
+  name                   String?
   /// Editable from /settings' "Contact information" card. Null until set.
-  firstName     String?
-  lastName      String?
-  image         String?
+  firstName              String?
+  lastName               String?
+  image                  String?
   /// "light" | "dark" (lib/account/theme.ts) — chosen in /settings. Rendered
   /// server-side as `<html data-theme>` by app/layout.tsx, so the stored
   /// theme is already applied in the first HTML byte (no flash). There is
   /// deliberately no "follow the OS" value.
-  theme         String    @default("light")
+  theme                  String    @default("light")
   /// Optional TOTP two-factor auth (lib/account/two-factor.ts). Secrets are
   /// AES-256-GCM encrypted with TWO_FACTOR_ENCRYPTION_KEY
   /// (lib/auth/two-factor-key.ts) — never stored in plain text.
   /// `twoFactorPendingSecret` holds a secret during setup, until a valid code
   /// promotes it to `twoFactorSecret`. `twoFactorLastUsedStep` is the TOTP time
   /// step of the last code accepted at sign-in, so a code can't be replayed.
-  twoFactorEnabled       Boolean @default(false)
+  twoFactorEnabled       Boolean   @default(false)
   twoFactorSecret        String?
   twoFactorPendingSecret String?
   twoFactorLastUsedStep  Int?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
 
-  recoveryCodes   TwoFactorRecoveryCode[]
-  accounts        Account[]
-  sessions        Session[]
-  drafts          ListingDraft[]
-  calibrations    MockupCalibration[]
-  templates       MockupTemplate[]
-  shopConnections EtsyShopConnection[]
-  listings        Listing[]
-  scheduledListings ScheduledListing[]
+  recoveryCodes                 TwoFactorRecoveryCode[]
+  accounts                      Account[]
+  sessions                      Session[]
+  drafts                        ListingDraft[]
+  calibrations                  MockupCalibration[]
+  templates                     MockupTemplate[]
+  shopConnections               EtsyShopConnection[]
+  listings                      Listing[]
+  scheduledListings             ScheduledListing[]
+  listingImages                 ListingImage[]
+  listingVideos                 ListingVideo[]
+  listingInventoryProperties    ListingInventoryProperty[]
+  listingInventoryValues        ListingInventoryValue[]
+  listingInventoryProducts      ListingInventoryProduct[]
+  listingInventoryProductValues ListingInventoryProductValue[]
 
   @@map("users")
 }
@@ -166,12 +172,12 @@ model MockupCalibration {
 ///
 /// Scoped to the signed-in `User`, not the Etsy account — see `MockupCalibration`.
 model ListingDraft {
-  id           String   @id @default(cuid())
-  userId       String
-  title        String   @default("")
-  hasThumbnail Boolean  @default(false)
-  formData     Json
-  photosData   Json
+  id              String   @id @default(cuid())
+  userId          String
+  title           String   @default("")
+  hasThumbnail    Boolean  @default(false)
+  formData        Json
+  photosData      Json
   /// The listing this draft was seeded from, if any — "copy" (publishes as a
   /// brand-new listing borrowing category/shipping/return-policy from
   /// `sourceListingId` at publish time, same as `getListingStructure`) or
@@ -183,10 +189,10 @@ model ListingDraft {
   /// already close to Int32's ~2.1B ceiling.
   sourceMode      String?
   sourceListingId String?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
   scheduledListings ScheduledListing[]
 
   @@index([userId, updatedAt])
@@ -292,11 +298,172 @@ model Listing {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  description                 String?
+  tags                        String[]  @default([])
+  materials                   String[]  @default([])
+  /// "physical" | "download" | "both"
+  listingType                 String?
+  /// "i_did" | "someone_else" | "collective"
+  whoMade                     String?
+  whenMade                    String?
+  isSupply                    Boolean?
+  /// Etsy Money: `priceAmount / priceDivisor` in `currencyCode`.
+  priceAmount                 Int?
+  priceDivisor                Int?
+  currencyCode                String?
+  shippingProfileId           String?
+  returnPolicyId              String?
+  itemWeight                  Float?
+  itemWeightUnit              String?
+  itemLength                  Float?
+  itemWidth                   Float?
+  itemHeight                  Float?
+  itemDimensionsUnit          String?
+  processingMin               Int?
+  processingMax               Int?
+  isPersonalizable            Boolean   @default(false)
+  personalizationIsRequired   Boolean   @default(false)
+  personalizationInstructions String?
+  personalizationCharCountMax Int?
+  syncedAt                    DateTime?
+
+  user                User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  images              ListingImage[]
+  videos              ListingVideo[]
+  inventoryProperties ListingInventoryProperty[]
+  inventoryProducts   ListingInventoryProduct[]
 
   @@unique([userId, shopId, listingId])
   @@index([userId, shopId, state])
   @@map("listings")
+}
+
+/// One photo of a cached `Listing`, in Etsy's rank order.
+model ListingImage {
+  id           String   @id @default(cuid())
+  userId       String
+  listingRowId String
+  etsyImageId  String?
+  url          String
+  altText      String?
+  rank         Int
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listing Listing @relation(fields: [listingRowId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([listingRowId, rank])
+  @@map("listing_images")
+}
+
+/// One video of a cached `Listing`, in slot order.
+model ListingVideo {
+  id           String   @id @default(cuid())
+  userId       String
+  listingRowId String
+  etsyVideoId  String?
+  url          String
+  thumbnailUrl String?
+  rank         Int
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listing Listing @relation(fields: [listingRowId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([listingRowId, rank])
+  @@map("listing_videos")
+}
+
+/// A variation property (e.g. "Size") of a cached `Listing`'s inventory grid.
+model ListingInventoryProperty {
+  id                 String   @id @default(cuid())
+  userId             String
+  listingRowId       String
+  etsyPropertyId     String
+  name               String
+  scaleId            String?
+  scaleName          String?
+  rank               Int
+  priceOnProperty    Boolean  @default(false)
+  quantityOnProperty Boolean  @default(false)
+  skuOnProperty      Boolean  @default(false)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  user    User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listing Listing                 @relation(fields: [listingRowId], references: [id], onDelete: Cascade)
+  values  ListingInventoryValue[]
+
+  @@unique([listingRowId, etsyPropertyId])
+  @@index([userId])
+  @@map("listing_inventory_properties")
+}
+
+/// One option (e.g. "Large") of a `ListingInventoryProperty`.
+model ListingInventoryValue {
+  id          String   @id @default(cuid())
+  userId      String
+  propertyId  String
+  etsyValueId String?
+  value       String
+  rank        Int
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user     User                           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  property ListingInventoryProperty       @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  products ListingInventoryProductValue[]
+
+  @@index([userId])
+  @@index([propertyId, rank])
+  @@map("listing_inventory_values")
+}
+
+/// One combination of a cached `Listing`'s inventory grid, with its own
+/// price, quantity, SKU and visibility (Etsy's product + its offering).
+model ListingInventoryProduct {
+  id               String   @id @default(cuid())
+  userId           String
+  listingRowId     String
+  etsyProductId    String?
+  etsyOfferingId   String?
+  sku              String?
+  priceAmount      Int
+  priceDivisor     Int
+  currencyCode     String
+  quantity         Int
+  isEnabled        Boolean  @default(true)
+  readinessStateId String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  user    User                           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listing Listing                        @relation(fields: [listingRowId], references: [id], onDelete: Cascade)
+  values  ListingInventoryProductValue[]
+
+  @@index([userId])
+  @@index([listingRowId])
+  @@map("listing_inventory_products")
+}
+
+/// Which property value a `ListingInventoryProduct` combination takes.
+model ListingInventoryProductValue {
+  userId    String
+  productId String
+  valueId   String
+
+  user    User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product ListingInventoryProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+  value   ListingInventoryValue   @relation(fields: [valueId], references: [id], onDelete: Cascade)
+
+  @@id([productId, valueId])
+  @@index([userId])
+  @@index([valueId])
+  @@map("listing_inventory_product_values")
 }
 
 /// A listing the user has asked to publish to Etsy at a later time

@@ -24,7 +24,8 @@ import { etsyFetch } from "@/lib/etsy/auth";
 import { EtsyApiError, readEtsyResponse } from "@/lib/etsy/listings";
 import { MAX_SKU_LENGTH } from "@/lib/etsy/bulk-edit";
 
-interface RawOffering {
+export interface RawOffering {
+  offering_id?: number;
   quantity?: number;
   is_enabled?: boolean;
   is_deleted?: boolean;
@@ -32,22 +33,24 @@ interface RawOffering {
   readiness_state_id?: number | null;
 }
 
-interface RawPropertyValue {
+export interface RawPropertyValue {
   property_id: number;
   property_name?: string;
   scale_id?: number | null;
+  scale_name?: string | null;
   value_ids?: (number | null)[];
   values?: string[];
 }
 
-interface RawProduct {
+export interface RawProduct {
+  product_id?: number;
   sku?: string;
   is_deleted?: boolean;
   offerings?: RawOffering[];
   property_values?: RawPropertyValue[];
 }
 
-interface RawInventory {
+export interface RawInventory {
   products?: RawProduct[];
   price_on_property?: number[];
   quantity_on_property?: number[];
@@ -77,7 +80,7 @@ export class VariationInventoryError extends Error {
   }
 }
 
-function liveProducts(inventory: RawInventory): RawProduct[] {
+export function liveProducts(inventory: RawInventory): RawProduct[] {
   return (inventory.products ?? []).filter((p) => !p.is_deleted);
 }
 
@@ -93,7 +96,7 @@ function isSimple(inventory: RawInventory): boolean {
   );
 }
 
-async function readInventory(listingId: number): Promise<RawInventory> {
+export async function readInventory(listingId: number): Promise<RawInventory> {
   return (await readEtsyResponse(
     await etsyFetch(`/listings/${listingId}/inventory`),
     `GET /listings/${listingId}/inventory`,

@@ -9,11 +9,19 @@ export interface ShopConnectionSummary {
   active: boolean;
 }
 
+type SyncStage = "listings" | "saving" | "inventory";
+
 type RefreshProgressEvent =
-  | { type: "status"; message: string }
-  | { type: "progress"; fetched: number; total: number; message: string }
-  | { type: "done"; inserted: number; updated: number; removed: number; total: number }
+  | { type: "status"; stage?: SyncStage; message: string }
+  | { type: "progress"; stage: SyncStage; fetched: number; total: number; message: string }
+  | { type: "done"; inserted: number; updated: number; removed: number; total: number; resumed: number }
   | { type: "error"; message: string };
+
+const STAGES: { id: SyncStage; label: string }[] = [
+  { id: "listings", label: "Fetching listings" },
+  { id: "saving", label: "Saving listings" },
+  { id: "inventory", label: "Fetching variations" },
+];
 
 type Phase = "refreshing" | "error";
 
@@ -37,6 +45,7 @@ export default function RefreshShopModal({
   const [shops, setShops] = useState<ShopConnectionSummary[] | null>(null);
   const [phase, setPhase] = useState<Phase>("refreshing");
   const [statusMessage, setStatusMessage] = useState("Preparing to refresh");
+  const [stage, setStage] = useState<SyncStage>("listings");
   const [fetched, setFetched] = useState(0);
   const [total, setTotal] = useState(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -68,6 +77,7 @@ export default function RefreshShopModal({
     const runId = ++runIdRef.current;
     setPhase("refreshing");
     setStatusMessage("Preparing to refresh");
+    setStage("listings");
     setFetched(0);
     setTotal(0);
     setErrorMessage(null);
@@ -75,8 +85,10 @@ export default function RefreshShopModal({
     const applyEvent = (event: RefreshProgressEvent) => {
       if (runIdRef.current !== runId) return; // superseded by a newer run (shop switch / retry)
       if (event.type === "status") {
+        if (event.stage) setStage(event.stage);
         setStatusMessage(event.message);
       } else if (event.type === "progress") {
+        setStage(event.stage);
         setFetched(event.fetched);
         setTotal(event.total);
         setStatusMessage(event.message);
@@ -135,6 +147,7 @@ export default function RefreshShopModal({
 
   if (!open) return null;
 
+  const stageIndex = Math.max(0, STAGES.findIndex((s) => s.id === stage));
   const activeShop = shops?.find((s) => s.shopId === targetShopId) ?? shops?.find((s) => s.active) ?? null;
   const otherShops = (shops ?? []).filter((s) => s.shopId !== (activeShop?.shopId ?? ""));
 
@@ -175,9 +188,25 @@ export default function RefreshShopModal({
                 aria-label="Refreshing"
                 className="mt-5 h-8 w-8 animate-spin rounded-full border-2 border-zinc-300 border-t-primary dark:border-zinc-700"
               />
-              <p className="mt-3 text-sm text-zinc-600 dark:text-zinc-400">
-                {total > 0 ? `Fetched ${fetched} of ${total} listings` : statusMessage}
+              <p className="mt-3 text-xs font-medium uppercase tracking-wide text-zinc-500">
+                Step {stageIndex + 1} of {STAGES.length} · {STAGES[stageIndex].label}
               </p>
+              <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">{statusMessage}</p>
+              {total > 0 && (
+                <div
+                  role="progressbar"
+                  aria-label={STAGES[stageIndex].label}
+                  aria-valuemin={0}
+                  aria-valuemax={total}
+                  aria-valuenow={fetched}
+                  className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800"
+                >
+                  <div
+                    className="h-full rounded-full bg-primary transition-[width]"
+                    style={{ width: `${Math.min(100, Math.round((fetched / total) * 100))}%` }}
+                  />
+                </div>
+              )}
             </>
           )}
 
