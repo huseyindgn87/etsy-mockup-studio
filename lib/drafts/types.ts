@@ -10,6 +10,7 @@
  */
 
 import type { Calibration } from "@/lib/mockup/types";
+import type { DraftVideoSlot } from "./videos";
 
 /** One uploaded PSD template, minus the raw bytes (kept in R2, re-parsed on restore). */
 export interface DraftMockupMeta {
@@ -51,6 +52,8 @@ export interface DraftPhotosData {
   removedEtsyImageIds: number[];
   altTextBySlot: Record<string, string>;
   activeTab: string;
+  /** The video slots in order (lib/drafts/videos.ts); `null` for a draft saved before videos were kept. */
+  videos: DraftVideoSlot[] | null;
 }
 
 export const EMPTY_DRAFT_PHOTOS_DATA: DraftPhotosData = {
@@ -62,6 +65,7 @@ export const EMPTY_DRAFT_PHOTOS_DATA: DraftPhotosData = {
   removedEtsyImageIds: [],
   altTextBySlot: {},
   activeTab: "photos",
+  videos: null,
 };
 
 /**
@@ -86,4 +90,4 @@ export interface DraftSummary {
 }
 
 /** The kinds of binary asset a draft can hold, one R2 object per (kind, itemId). */
-export type DraftAssetKind = "psd" | "design" | "own" | "thumbnail";
+export type DraftAssetKind = "psd" | "design" | "own" | "video" | "thumbnail";

@@ -36,6 +36,7 @@ import {
   type ExistingMediaState,
 } from "@/app/components/listing-media/existing-media";
 import { checkPickedVideo } from "@/app/components/listing-media/video-file";
+import { useUnsavedChangesGuard } from "@/app/components/unsaved-changes/useUnsavedChangesGuard";
 import VariationsCard from "./VariationsCard";
 import { INPUT_CLS, attributeChoicesAcross, labelFor, propertyForListing } from "./helpers";
 import {
@@ -477,6 +478,14 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
     ...mediaUpdates.map((l) => l.listingId),
   ]).size;
 
+  /** Listings, ticked or not, with an edit that no Sync has written yet. */
+  const unsavedCount = (listings ?? []).filter((l) => {
+    if (Object.keys(patchFor(l)).length > 0) return true;
+    const changed = mediaChanges(l, media[l.listingId]);
+    return changed.photos || changed.videos;
+  }).length;
+  const { dialog: unsavedDialog } = useUnsavedChangesGuard(unsavedCount);
+
   const mediaFor = (listing: BulkListingDetail) => media[listing.listingId] ?? initialExistingMedia(listing);
 
   function updateMedia(listing: BulkListingDetail, change: (state: ExistingMediaState) => ExistingMediaState) {
@@ -856,6 +865,7 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
           </div>
         </div>
       </div>
+      {unsavedDialog}
     </div>
   );
 }

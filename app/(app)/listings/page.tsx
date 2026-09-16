@@ -7,6 +7,7 @@ import {
   ChevronDown,
   Copy,
   Download,
+  ExternalLink,
   Pencil,
   RefreshCw,
   Share2,
@@ -780,13 +781,18 @@ export default function ListingsPage() {
                 {listings.map((listing) => (
                   <tr
                     key={listing.listingId}
-                    className={`group border-b border-black/5 last:border-0 transition-colors dark:border-white/10 ${
+                    data-testid={`listing-row-${listing.listingId}`}
+                    onClick={(e) => {
+                      if ((e.target as HTMLElement).closest("a, button, input, label")) return;
+                      router.push(editorUrl("existing", listing));
+                    }}
+                    className={`group cursor-pointer border-b border-black/5 last:border-0 transition-colors dark:border-white/10 ${
                       isSelected(selection, listing.listingId)
                         ? "bg-primary/[.06]"
                         : "hover:bg-zinc-100 dark:hover:bg-white/[.06]"
                     }`}
                   >
-                    <td className="px-4 py-3">
+                    <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
                       <input
                         type="checkbox"
                         aria-label={`Select ${listing.title}`}
@@ -798,13 +804,23 @@ export default function ListingsPage() {
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-3">
                         <ListingThumb url={listing.thumbnailUrl} size={40} />
-                        <a
-                          href={listing.url}
-                          target="_blank"
-                          rel="noreferrer"
+                        <Link
+                          href={editorUrl("existing", listing)}
                           className="line-clamp-2 max-w-xs text-zinc-800 hover:underline dark:text-zinc-100"
                         >
                           {listing.title}
+                        </Link>
+                        <a
+                          href={listing.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title="View on Etsy"
+                          aria-label={`View ${listing.title} on Etsy`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="inline-flex shrink-0 items-center gap-1 rounded-full border border-black/10 px-2 py-1 text-xs font-medium text-zinc-600 transition-colors hover:border-black/25 hover:text-zinc-900 dark:border-white/15 dark:text-zinc-400 dark:hover:border-white/30 dark:hover:text-zinc-100"
+                        >
+                          <ExternalLink size={12} aria-hidden="true" />
+                          Etsy
                         </a>
                       </div>
                     </td>

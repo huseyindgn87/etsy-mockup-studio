@@ -840,3 +840,68 @@ describe("search", () => {
     expect(savedUpdates()).toEqual([{ listingId: 103, patch: { title: "Kept" } }]);
   });
 });
+
+describe("leaving with unsaved edits", () => {
+  const reload = () => {
+    const event = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(event);
+    return event;
+  };
+
+  /** Stops the Cancel link's own navigation (no app router in tests) and records whether the click got that far. */
+  function sinkCancel() {
+    const cancel = screen.getByRole("link", { name: "Cancel" });
+    const reached = vi.fn();
+    cancel.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      reached();
+    });
+    return { cancel, reached };
+  }
+
+  test("nothing edited: Cancel and reload aren't warned about", async () => {
+    await renderEditor();
+    const { cancel, reached } = sinkCancel();
+    fireEvent.click(cancel);
+    expect(reached).toHaveBeenCalled();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(reload().defaultPrevented).toBe(false);
+  });
+
+  test("pending edits hold Cancel with a dialog naming how many listings, and warn on reload", async () => {
+    await renderEditor();
+    openField("Title", "Listings");
+    fireEvent.change(rowField("Title", 101), { target: { value: "Changed" } });
+    fireEvent.change(rowField("Title", 102), { target: { value: "Changed too" } });
+
+    const { cancel, reached } = sinkCancel();
+    fireEvent.click(cancel);
+    expect(reached).not.toHaveBeenCalled();
+    expect(screen.getByRole("alertdialog")).toHaveTextContent("2 listings have unsaved changes");
+    expect(reload().defaultPrevented).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Stay" }));
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(rowField("Title", 101)).toHaveValue("Changed");
+
+    fireEvent.click(cancel);
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    expect(reached).toHaveBeenCalledTimes(1);
+  });
+
+  test("no warning right after a successful Sync updates", async () => {
+    await renderEditor();
+    openField("Title", "Listings");
+    fireEvent.change(rowField("Title", 101), { target: { value: "Saved title" } });
+    expect(reload().defaultPrevented).toBe(true);
+
+    fireEvent.click(syncButton());
+    await waitFor(() => expect(syncButton()).toHaveTextContent(/^Sync updates$/));
+    expect(reload().defaultPrevented).toBe(false);
+    const { cancel, reached } = sinkCancel();
+    fireEvent.click(cancel);
+    expect(reached).toHaveBeenCalled();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+});

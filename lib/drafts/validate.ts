@@ -6,6 +6,7 @@
  */
 
 import type { DraftDesignMeta, DraftMockupMeta, DraftOwnImageMeta, DraftPhotosData } from "./types";
+import { coerceDraftVideos } from "./videos";
 
 export function coercePhotosData(raw: unknown): DraftPhotosData {
   const r = (raw ?? {}) as Partial<DraftPhotosData>;
@@ -23,5 +24,6 @@ export function coercePhotosData(raw: unknown): DraftPhotosData {
     altTextBySlot:
       r.altTextBySlot && typeof r.altTextBySlot === "object" ? r.altTextBySlot : {},
     activeTab: typeof r.activeTab === "string" ? r.activeTab : "photos",
+    videos: coerceDraftVideos(r.videos),
   };
 }

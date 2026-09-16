@@ -12,6 +12,10 @@ describe("coercePhotosData", () => {
       removedEtsyImageIds: [7001],
       altTextBySlot: { "job:m1::d1": "A tee shirt" },
       activeTab: "variations",
+      videos: [
+        { kind: "file", id: "v1", name: "clip.mp4" },
+        null,
+      ],
     };
     expect(coercePhotosData(input)).toEqual(input);
   });
@@ -26,6 +30,7 @@ describe("coercePhotosData", () => {
       removedEtsyImageIds: [],
       altTextBySlot: {},
       activeTab: "photos",
+      videos: null,
     });
     expect(coercePhotosData(undefined)).toEqual(coercePhotosData(null));
   });

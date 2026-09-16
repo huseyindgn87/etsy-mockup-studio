@@ -4,6 +4,7 @@ import { auth } from "@/auth";
 import { deleteDraft, getDraftRow, saveDraft } from "@/lib/drafts/store";
 import type { DraftMockupMeta, DraftSource } from "@/lib/drafts/types";
 import { coercePhotosData } from "@/lib/drafts/validate";
+import { restoredDraftVideos } from "@/lib/drafts/videos";
 import { draftAssetKey, getObject } from "@/lib/storage/r2";
 import { parsePsd } from "@/lib/mockup/psd";
 import { encodeRasterDataUrl } from "@/lib/mockup/server";
@@ -101,6 +102,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
     removedJobKeys: photosData.removedJobKeys,
     removedEtsyImageIds: photosData.removedEtsyImageIds,
     altTextBySlot: photosData.altTextBySlot,
+    videos: photosData.videos && restoredDraftVideos(id, photosData.videos),
     mockups,
     designs: photosData.designs.map((d) => ({
       id: d.id,

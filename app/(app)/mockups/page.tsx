@@ -31,6 +31,8 @@ import {
 import type { EtsyListingMedia } from "@/app/components/listing-media/existing-media";
 import { checkPickedVideo } from "@/app/components/listing-media/video-file";
 import type { DraftPhotosData, DraftSource } from "@/lib/drafts/types";
+import { draftVideoSlots, editorVideoSlots, type RestoredDraftVideoSlot } from "@/lib/drafts/videos";
+import { useUnsavedChangesGuard } from "@/app/components/unsaved-changes/useUnsavedChangesGuard";
 import { howItsMadeError } from "@/lib/etsy/listing-classification";
 import { personalizationQuestionsError } from "@/lib/etsy/listing-personalization";
 import { MAX_LISTING_IMAGES, checkImageFileBasics } from "@/lib/etsy/listing-image-limits";
@@ -464,7 +466,7 @@ function MockupsPageInner() {
       setVideoErrors((prev) => prev.map((e, i) => (i === slot ? videoError : e)));
       return;
     }
-    setVideos((prev) => prev.map((v, i) => (i === slot ? { kind: "file", file } : v)));
+    setVideos((prev) => prev.map((v, i) => (i === slot ? { kind: "file", id: uid(), file } : v)));
   }, []);
 
   // ---- photo grid: rendered mockups + user-uploaded photos, one Etsy image slot each ----
@@ -505,6 +507,21 @@ function MockupsPageInner() {
   /** `${kind}:${itemId}` for every binary file already confirmed uploaded to R2 — drives both what autosave persists and what the upload effect still needs to send. */
   const [uploadedAssetKeys, setUploadedAssetKeys] = useState<Set<string>>(new Set());
   const inFlightUploads = useRef<Set<string>>(new Set());
+  /** Set once a restored draft has supplied the video slots, so the listing's own Etsy videos don't replace them. */
+  const videosFromDraft = useRef(false);
+
+  // ---- unsaved changes: `editRevision` counts user edits; a successful draft
+  // save or Save to Etsy records the revision it covered ----
+  const [editRevision, setEditRevision] = useState(0);
+  const [savedRevision, setSavedRevision] = useState(0);
+  const [publishedRevision, setPublishedRevision] = useState<number | null>(null);
+  /** Wraps a user-edit handler so calling it counts as an edit. */
+  const edit =
+    <A extends unknown[], R>(fn: (...args: A) => R) =>
+    (...args: A): R => {
+      setEditRevision((n) => n + 1);
+      return fn(...args);
+    };
 
   const addOwnImages = useCallback((files: File[]): string[] => {
     setError(null);
@@ -586,7 +603,7 @@ function MockupsPageInner() {
         setEtsyMediaError(null);
         setEtsyMedia({ images: listing.images, videos: listing.videos });
         setVideos((prev) => {
-          if (prev.some((v) => v)) return prev;
+          if (videosFromDraft.current || prev.some((v) => v)) return prev;
           const next: (ListingVideoItem | null)[] = listing.videos
             .slice(0, MAX_LISTING_VIDEOS)
             .map((v) => ({ kind: "etsy", videoId: v.videoId, videoUrl: v.videoUrl, thumbnailUrl: v.thumbnailUrl }));
@@ -1011,6 +1028,7 @@ function MockupsPageInner() {
           removedJobKeys?: string[];
           removedEtsyImageIds?: number[];
           altTextBySlot: Record<string, string>;
+          videos?: RestoredDraftVideoSlot[] | null;
           mockups: {
             id: string;
             name: string;
@@ -1076,6 +1094,14 @@ function MockupsPageInner() {
           const file = new File([blob], o.name, { type: blob.type || "image/jpeg" });
           restoredOwn.push({ id: o.id, file, url: URL.createObjectURL(file) });
         }
+        const restoredVideos = body.videos
+          ? await editorVideoSlots(body.videos, async (url, name) => {
+              const r = await fetch(url);
+              if (!r.ok) return null;
+              const blob = await r.blob();
+              return new File([blob], name, { type: blob.type || "video/mp4" });
+            })
+          : null;
         if (cancelled) return;
 
         setListingForm({ ...EMPTY_LISTING_FORM, ...body.formData });
@@ -1112,6 +1138,11 @@ function MockupsPageInner() {
         setMockups(restoredMockups);
         setDesigns(restoredDesigns);
         setOwnImages(restoredOwn);
+        if (restoredVideos) {
+          videosFromDraft.current = true;
+          setVideos(restoredVideos);
+          setVideoErrors(Array(MAX_LISTING_VIDEOS).fill(null));
+        }
         setActiveId(restoredMockups[0]?.id ?? null);
         setPreviewDesignId(restoredDesigns[0]?.id ?? null);
 
@@ -1119,6 +1150,7 @@ function MockupsPageInner() {
         for (const m of restoredMockups) keys.add(`psd:${m.id}`);
         for (const d of restoredDesigns) keys.add(`design:${d.id}`);
         for (const o of restoredOwn) keys.add(`own:${o.id}`);
+        for (const v of restoredVideos ?? []) if (v?.kind === "file" && v.id) keys.add(`video:${v.id}`);
         setUploadedAssetKeys(keys);
 
         setDraftId(body.id);
@@ -1208,7 +1240,7 @@ function MockupsPageInner() {
 
   useEffect(() => {
     if (!draftId || draftStatus === "restoring") return;
-    async function uploadOne(kind: "psd" | "design" | "own", itemId: string, file: File) {
+    async function uploadOne(kind: "psd" | "design" | "own" | "video", itemId: string, file: File) {
       const mapKey = `${kind}:${itemId}`;
       if (uploadedAssetKeys.has(mapKey) || inFlightUploads.current.has(mapKey)) return;
       inFlightUploads.current.add(mapKey);
@@ -1228,7 +1260,8 @@ function MockupsPageInner() {
     for (const m of mockups) if (m.psdFile) void uploadOne("psd", m.id, m.psdFile);
     for (const d of designs) void uploadOne("design", d.id, d.file);
     for (const o of ownImages) void uploadOne("own", o.id, o.file);
-  }, [mockups, designs, ownImages, draftId, draftStatus, uploadedAssetKeys, retryTick]);
+    for (const v of videos) if (v?.kind === "file" && v.id) void uploadOne("video", v.id, v.file);
+  }, [mockups, designs, ownImages, videos, draftId, draftStatus, uploadedAssetKeys, retryTick]);
 
   /** True once the editor has anything worth saving — avoids creating a draft row for a blank, untouched session. */
   const hasDraftableContent = useCallback(
@@ -1238,8 +1271,10 @@ function MockupsPageInner() {
       listingForm.tags.length > 0 ||
       mockups.length > 0 ||
       designs.length > 0 ||
-      ownImages.length > 0,
-    [listingForm, mockups.length, designs.length, ownImages.length],
+      ownImages.length > 0 ||
+      videos.some((v) => v) ||
+      editRevision > 0,
+    [listingForm, mockups.length, designs.length, ownImages.length, videos, editRevision],
   );
 
   /** Saves now. Resolves to the draft's id, or `null` when there was nothing to save or saving failed. */
@@ -1298,6 +1333,7 @@ function MockupsPageInner() {
         removedEtsyImageIds,
         altTextBySlot,
         activeTab,
+        videos: draftVideoSlots(videos, (videoId) => uploadedAssetKeys.has(`video:${videoId}`)),
       };
 
       // Persisted with the draft itself (not just the editor URL) so
@@ -1322,6 +1358,7 @@ function MockupsPageInner() {
       if (!res.ok) throw new Error(await errorFrom(res));
       setDraftStatus("saved");
       setDraftError(null);
+      setSavedRevision(editRevision);
       return id;
     } catch (err) {
       setDraftStatus("error");
@@ -1342,12 +1379,25 @@ function MockupsPageInner() {
     removedEtsyImageIds,
     altTextBySlot,
     activeTab,
+    videos,
+    editRevision,
     listingForm,
     publishMode,
     targetListing,
     router,
     searchParams,
   ]);
+
+  const hasPendingUploads =
+    mockups.some((m) => m.psdFile && !uploadedAssetKeys.has(`psd:${m.id}`)) ||
+    designs.some((d) => !uploadedAssetKeys.has(`design:${d.id}`)) ||
+    ownImages.some((o) => !uploadedAssetKeys.has(`own:${o.id}`)) ||
+    videos.some((v) => v?.kind === "file" && !(v.id && uploadedAssetKeys.has(`video:${v.id}`)));
+  const hasUnsavedChanges =
+    draftStatus !== "restoring" &&
+    editRevision !== publishedRevision &&
+    (editRevision !== savedRevision || hasPendingUploads);
+  const { dialog: unsavedDialog } = useUnsavedChangesGuard(hasUnsavedChanges ? 1 : 0);
 
   // ---- autosave, debounced so a closed tab doesn't lose the work ----
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1613,6 +1663,7 @@ function MockupsPageInner() {
         skipped: body.skipped ?? 0,
         edited: !!body.edited,
       });
+      setPublishedRevision(editRevision);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Etsy upload failed.");
     } finally {
@@ -1625,6 +1676,7 @@ function MockupsPageInner() {
     buildBatchForm,
     publishBlocker,
     buildPublishTo,
+    editRevision,
   ]);
 
   // ---- "Schedule for later" — see app/(app)/schedule and lib/scheduling/* ----
@@ -2032,7 +2084,7 @@ function MockupsPageInner() {
                       label="Mockup PSDs"
                       accept=".psd"
                       inputRef={psdInput}
-                      onFiles={addPsds}
+                      onFiles={edit(addPsds)}
                     />
                     <button
                       type="button"
@@ -2055,7 +2107,7 @@ function MockupsPageInner() {
                             onDrop={(e) => {
                               e.preventDefault();
                               const from = Number(e.dataTransfer.getData("text/plain"));
-                              if (Number.isFinite(from)) moveMockup(from, i);
+                              if (Number.isFinite(from)) edit(moveMockup)(from, i);
                             }}
                           >
                             <div
@@ -2072,7 +2124,7 @@ function MockupsPageInner() {
                                 type="checkbox"
                                 checked={m.include}
                                 onChange={(e) =>
-                                  setMockups((prev) =>
+                                  edit(setMockups)((prev) =>
                                     prev.map((x) =>
                                       x.id === m.id
                                         ? { ...x, include: e.target.checked }
@@ -2096,7 +2148,7 @@ function MockupsPageInner() {
                               {m.tone && <ToneBadge tone={m.tone} />}
                               <button
                                 type="button"
-                                onClick={() => deleteMockup(m.id)}
+                                onClick={() => edit(deleteMockup)(m.id)}
                                 aria-label={`Delete ${m.name}`}
                                 className="text-zinc-400 hover:text-red-600"
                               >
@@ -2112,7 +2164,7 @@ function MockupsPageInner() {
                       label="Designs"
                       accept="image/*"
                       inputRef={designInput}
-                      onFiles={addDesigns}
+                      onFiles={edit(addDesigns)}
                     />
                     {designs.length > 0 && (
                       <ul className="grid grid-cols-3 gap-2">
@@ -2171,7 +2223,7 @@ function MockupsPageInner() {
                           calibration={active.calibration}
                           activeArea={areaIndex}
                           cornerMode={cornerMode}
-                          onAreaChange={onAreaChange}
+                          onAreaChange={edit(onAreaChange)}
                         />
                         <p className="mt-2 text-center text-xs text-zinc-500">
                           {active.psdW}×{active.psdH}px · drag the corners, grab inside the area to move it
@@ -2233,7 +2285,7 @@ function MockupsPageInner() {
                                 min={s.min}
                                 max={s.max}
                                 value={value}
-                                onChange={(e) => onSlider(s.key, Number(e.target.value))}
+                                onChange={(e) => edit(onSlider)(s.key, Number(e.target.value))}
                                 className="mt-1 w-full accent-primary"
                               />
                             </label>
@@ -2271,21 +2323,21 @@ function MockupsPageInner() {
                 <ListingMediaEditor
                   slots={photoSlots}
                   altTextBySlot={altTextBySlot}
-                  onMovePhoto={moveImageSlot}
-                  onRemovePhoto={removeImageSlot}
-                  onAltTextChange={setAltText}
-                  onAddPhotos={addOwnImages}
+                  onMovePhoto={edit(moveImageSlot)}
+                  onRemovePhoto={edit(removeImageSlot)}
+                  onAltTextChange={edit(setAltText)}
+                  onAddPhotos={edit(addOwnImages)}
                   videos={videos}
                   videoErrors={videoErrors}
-                  onSelectVideo={selectVideo}
-                  onMoveVideo={moveVideoSlot}
+                  onSelectVideo={edit(selectVideo)}
+                  onMoveVideo={edit(moveVideoSlot)}
                 />
               </div>
             )}
 
             <ListingForm
               value={listingForm}
-              onChange={setListingForm}
+              onChange={edit(setListingForm)}
               activeTab={isListingFormTab(activeTab) ? activeTab : null}
               onGoToTab={setActiveTab}
             />
@@ -2294,7 +2346,7 @@ function MockupsPageInner() {
       </div>
 
       {showTemplatePicker && (
-        <TemplatePicker onClose={() => setShowTemplatePicker(false)} onSelect={addFromTemplate} />
+        <TemplatePicker onClose={() => setShowTemplatePicker(false)} onSelect={edit(addFromTemplate)} />
       )}
 
       {showPreview && (
@@ -2308,6 +2360,7 @@ function MockupsPageInner() {
         />
       )}
 
+      {unsavedDialog}
     </div>
   );
 }

@@ -291,3 +291,37 @@ describe("browsing sends nothing that changes a listing", () => {
     expect(writeCalls()).toEqual([]);
   });
 });
+
+describe("opening a listing", () => {
+  const editorPath = "/mockups?mode=existing&listingId=100&title=Listing+100";
+
+  test("clicking a row opens our own editor for that listing, not Etsy", async () => {
+    await renderPage();
+    fireEvent.click(screen.getByTestId("listing-row-100").querySelectorAll("td")[3]);
+    expect(pushMock).toHaveBeenCalledWith(editorPath);
+    expect(pushMock.mock.calls.flat().join(" ")).not.toContain("etsy.com");
+  });
+
+  test("the title links to our editor too", async () => {
+    await renderPage();
+    expect(screen.getByRole("link", { name: "Listing 100" })).toHaveAttribute("href", editorPath);
+  });
+
+  test("View on Etsy opens the Etsy listing in a new tab without routing the row", async () => {
+    await renderPage();
+    const view = screen.getByRole("link", { name: "View Listing 100 on Etsy" });
+    expect(view).toHaveAttribute("href", "https://etsy.com/listing/100");
+    expect(view).toHaveAttribute("target", "_blank");
+    fireEvent.click(view);
+    expect(pushMock).not.toHaveBeenCalled();
+  });
+
+  test("clicking the checkbox selects the row and doesn't navigate", async () => {
+    await renderPage();
+    const checkbox = screen.getByLabelText("Select Listing 100");
+    fireEvent.click(checkbox);
+    expect(checkbox).toBeChecked();
+    fireEvent.click(checkbox.closest("td")!);
+    expect(pushMock).not.toHaveBeenCalled();
+  });
+});

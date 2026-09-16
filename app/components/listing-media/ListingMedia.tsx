@@ -359,7 +359,8 @@ export function PhotoEnlargeModal({
 
 /** A filled video slot: a file picked in this session, or a video already on the Etsy listing. */
 export type ListingVideoItem =
-  | { kind: "file"; file: File }
+  /** `id` names a picked file's stored copy once the editor saves it with a draft. */
+  | { kind: "file"; id?: string; file: File }
   | { kind: "etsy"; videoId: number; videoUrl: string; thumbnailUrl: string };
 
 /**
