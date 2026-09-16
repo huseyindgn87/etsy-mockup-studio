@@ -99,6 +99,8 @@ const fakePrisma = {
 };
 
 import { GET as GET_BULK } from "@/app/api/etsy/listings/bulk/route";
+import { GET as GET_ATTRIBUTES } from "@/app/api/etsy/listings/bulk/attributes/route";
+import { GET as GET_INVENTORY } from "@/app/api/etsy/listings/bulk/inventory/route";
 import { POST as SAVE } from "@/app/api/etsy/listings/bulk/save/route";
 import { POST as DELETE_LISTINGS } from "@/app/api/etsy/listings/bulk/delete/route";
 import { POST as COPY } from "@/app/api/etsy/listings/bulk/copy/route";
@@ -235,6 +237,24 @@ async function loadBulk(ids: string) {
   );
   return { status: res.status, body: await res.json() };
 }
+async function loadAttributes(ids: string) {
+  const res = await GET_ATTRIBUTES(
+    new NextRequest(`http://localhost/api/etsy/listings/bulk/attributes?ids=${ids}`),
+  );
+  return { status: res.status, body: await res.json() };
+}
+async function loadInventory(ids: string) {
+  const res = await GET_INVENTORY(
+    new NextRequest(`http://localhost/api/etsy/listings/bulk/inventory?ids=${ids}`),
+  );
+  return { status: res.status, body: await res.json() };
+}
+
+/** The body of the one write made with `method`, as parsed form params. */
+function writtenForm(method: string): URLSearchParams {
+  const call = etsyFetchMock.mock.calls.find(([, init]) => init?.method === method)!;
+  return new URLSearchParams(call[1]!.body as string);
+}
 
 describe("nothing reaches Etsy before an explicit save", () => {
   test("loading the bulk editor only ever reads", async () => {
@@ -368,6 +388,199 @@ describe("inventory fields go through the inventory record", () => {
     expect(body.results[0].error).toMatch(/variation separately/i);
     // Nothing was written to the inventory.
     expect(etsyFetchMock.mock.calls.some(([, init]) => init?.method === "PUT")).toBe(false);
+  });
+});
+
+describe("the listing fields the wider editor adds", () => {
+  test("materials, About and category all reach updateListing under Etsy's own names", async () => {
+    const { body } = await save([
+      {
+        listingId: 101,
+        patch: {
+          materials: ["Cotton", "Linen"],
+          whoMade: "i_did",
+          whenMade: "made_to_order",
+          isSupply: false,
+          taxonomyId: 1071,
+          returnPolicyId: 55,
+        },
+      },
+    ]);
+    expect(body.saved).toBe(1);
+
+    const form = writtenForm("PATCH");
+    expect(form.getAll("materials")).toEqual(["Cotton", "Linen"]);
+    expect(form.get("who_made")).toBe("i_did");
+    expect(form.get("when_made")).toBe("made_to_order");
+    expect(form.get("is_supply")).toBe("false");
+    expect(form.get("taxonomy_id")).toBe("1071");
+    expect(form.get("return_policy_id")).toBe("55");
+  });
+
+  test("item weight and size are sent with the units they were measured in", async () => {
+    await save([
+      {
+        listingId: 101,
+        patch: {
+          itemWeight: 12.5,
+          itemWeightUnit: "oz",
+          itemLength: 4,
+          itemWidth: 3,
+          itemDimensionsUnit: "in",
+        },
+      },
+    ]);
+    const form = writtenForm("PATCH");
+    expect(form.get("item_weight")).toBe("12.5");
+    expect(form.get("item_weight_unit")).toBe("oz");
+    expect(form.get("item_length")).toBe("4");
+    expect(form.get("item_width")).toBe("3");
+    expect(form.get("item_dimensions_unit")).toBe("in");
+    // A dimension the user didn't set is left alone rather than zeroed.
+    expect(form.has("item_height")).toBe(false);
+  });
+
+  test("production partners are sent as repeated ids", async () => {
+    await save([{ listingId: 101, patch: { productionPartnerIds: [66, 67] } }]);
+    expect(writtenForm("PATCH").getAll("production_partner_ids")).toEqual(["66", "67"]);
+  });
+});
+
+describe("attributes go to Etsy's own property endpoint", () => {
+  test("one PUT per property, carrying value ids and names together", async () => {
+    const { body } = await save([
+      {
+        listingId: 101,
+        patch: {
+          attributes: [
+            { propertyId: 200, valueIds: [1], values: ["Red"] },
+            { propertyId: 100, valueIds: [7], values: ["M"], scaleId: 19 },
+          ],
+        },
+      },
+    ]);
+    expect(body.saved).toBe(1);
+
+    const puts = etsyFetchMock.mock.calls.filter(
+      ([path, init]) => init?.method === "PUT" && String(path).includes("/properties/"),
+    );
+    expect(puts).toHaveLength(2);
+    expect(puts[0][0]).toBe(`/shops/${SHOP_A}/listings/101/properties/200`);
+
+    const colour = new URLSearchParams(puts[0][1]!.body as string);
+    expect(colour.getAll("value_ids")).toEqual(["1"]);
+    expect(colour.getAll("values")).toEqual(["Red"]);
+
+    const size = new URLSearchParams(puts[1][1]!.body as string);
+    expect(size.get("scale_id")).toBe("19");
+  });
+});
+
+describe("personalization goes to its own resource", () => {
+  test("sent as a full replace, with the multi-question flag Etsy requires", async () => {
+    const { body } = await save([
+      {
+        listingId: 101,
+        patch: {
+          personalization: [
+            { fieldType: "text_input", questionText: "Name?", required: true, maxAllowedCharacters: 50 },
+          ],
+        },
+      },
+    ]);
+    expect(body.saved).toBe(1);
+
+    const [path, init] = etsyFetchMock.mock.calls.find(([p]) =>
+      String(p).includes("/personalization"),
+    )!;
+    expect(path).toBe(
+      `/shops/${SHOP_A}/listings/101/personalization?supports_multiple_personalization_questions=true`,
+    );
+    const sent = JSON.parse(init!.body as string);
+    expect(sent.personalization_questions[0]).toMatchObject({
+      question_text: "Name?",
+      question_type: "text_input",
+      required: true,
+    });
+  });
+});
+
+describe("a variation grid replaces the inventory", () => {
+  const variations = {
+    products: [
+      {
+        propertyValues: [{ propertyId: 200, name: "Color", valueIds: [1], values: ["Red"] }],
+        price: 10,
+        quantity: 2,
+        sku: "R",
+        enabled: true,
+      },
+      {
+        propertyValues: [{ propertyId: 200, name: "Color", valueIds: [2], values: ["Blue"] }],
+        price: 12,
+        quantity: 1,
+        sku: "B",
+        enabled: false,
+      },
+    ],
+    priceOnProperty: [200],
+  };
+
+  test("every combination is sent, disabled ones included", async () => {
+    const { body } = await save([{ listingId: 101, patch: { variations } }]);
+    expect(body.saved).toBe(1);
+
+    const put = etsyFetchMock.mock.calls.find(
+      ([path, init]) => init?.method === "PUT" && String(path).includes("/inventory"),
+    )!;
+    expect(put[0]).toBe("/listings/101/inventory?max_variations_supported=3");
+    const sent = JSON.parse(put[1]!.body as string);
+    expect(sent.products).toHaveLength(2);
+    expect(sent.products[0].offerings[0]).toMatchObject({ price: 10, quantity: 2, is_enabled: true });
+    expect(sent.products[1].offerings[0]).toMatchObject({ is_enabled: false });
+    expect(sent.price_on_property).toEqual([200]);
+  });
+
+  test("the single-product write is skipped, so the grid isn't flattened straight after", async () => {
+    await save([{ listingId: 101, patch: { variations, price: 99 } }]);
+    // The simple path would have to read the inventory first; the grid path never does.
+    expect(etsyCalls()).not.toContain("GET /listings/101/inventory");
+    const puts = etsyFetchMock.mock.calls.filter(
+      ([path, init]) => init?.method === "PUT" && String(path).includes("/inventory"),
+    );
+    expect(puts).toHaveLength(1);
+  });
+});
+
+describe("the on-demand reads are scoped like every other bulk route", () => {
+  test("attributes are read only for the caller's own listings", async () => {
+    const { status, body } = await loadAttributes("101");
+    expect(status).toBe(200);
+    expect(Object.keys(body.attributes)).toEqual(["101"]);
+    expect(etsyWrites()).toEqual([]);
+  });
+
+  test("another user's listing yields no attributes and no Etsy call", async () => {
+    signInAs("bob", SHOP_A);
+    const { body } = await loadAttributes("101");
+    expect(body.attributes).toEqual({});
+    expect(body.missing).toEqual([101]);
+    expect(etsyFetchMock).not.toHaveBeenCalled();
+  });
+
+  test("another user's listing yields no inventory and no Etsy call", async () => {
+    signInAs("bob", SHOP_A);
+    const { body } = await loadInventory("101");
+    expect(body.inventories).toEqual({});
+    expect(body.missing).toEqual([101]);
+    expect(etsyFetchMock).not.toHaveBeenCalled();
+  });
+
+  test("both refuse a signed-out caller", async () => {
+    authMock.mockResolvedValue(null);
+    expect((await loadAttributes("101")).status).toBe(401);
+    expect((await loadInventory("101")).status).toBe(401);
+    expect(etsyFetchMock).not.toHaveBeenCalled();
   });
 });
 

@@ -1,0 +1,433 @@
+"use client";
+
+import { useState } from "react";
+import {
+  applyKindFor,
+  MAX_TAG_LENGTH,
+  WEIGHT_UNITS,
+  DIMENSION_UNITS,
+  type BulkFieldKey,
+} from "@/lib/etsy/bulk-edit";
+import { TEXT_TRANSFORM_MODES, type TextTransformMode } from "@/lib/etsy/bulk-text";
+import { WHEN_MADE_VALUES, WHO_MADE_OPTIONS, formatWhenMade } from "@/lib/etsy/listing-classification";
+import { INPUT_CLS, labelFor } from "./helpers";
+import type { BulkOptions } from "./types";
+
+/**
+ * What an Apply press asks the editor to do to every *ticked* row. Resolving
+ * it per row is the editor's job, not this control's: a transform depends on
+ * each row's current text, an append on its current list, and an attribute
+ * value on the property that row's own category has.
+ */
+export type ApplyInstruction =
+  | { kind: "transform"; mode: TextTransformMode; value: string; find: string }
+  | { kind: "append"; value: string }
+  | { kind: "attribute"; valueName: string }
+  | { kind: "set"; value: string }
+  | { kind: "about"; whoMade: string; whenMade: string; isSupply: boolean }
+  | { kind: "partners"; ids: number[] }
+  | { kind: "weight"; weight: string; unit: string }
+  | { kind: "size"; length: string; width: string; height: string; unit: string };
+
+/**
+ * The control above the listing rows: one value, one Apply button, written
+ * only to rows whose checkbox is ticked. Which control appears depends on the
+ * field — a mode dropdown plus text for Title and Description, a plain text
+ * input that *adds* a tag for Tags, a dropdown of Etsy's valid values for the
+ * dropdown-backed fields.
+ *
+ * Fields edited per listing only (Media, Variations, Personalization) get no
+ * control here at all.
+ */
+export default function BulkApplyControl({
+  field,
+  options,
+  attributeChoices,
+  targetedCount,
+  onApply,
+}: {
+  field: BulkFieldKey;
+  options: BulkOptions;
+  /** Value names this attribute offers across the selection. */
+  attributeChoices: string[];
+  targetedCount: number;
+  onApply: (instruction: ApplyInstruction) => void;
+}) {
+  const kind = applyKindFor(field);
+  const label = labelFor(field);
+
+  const [mode, setMode] = useState<TextTransformMode>("before");
+  const [text, setText] = useState("");
+  const [find, setFind] = useState("");
+  const [choice, setChoice] = useState("");
+  const [whoMade, setWhoMade] = useState<string>(WHO_MADE_OPTIONS[0].value);
+  const [whenMade, setWhenMade] = useState<string>(WHEN_MADE_VALUES[0]);
+  const [isSupply, setIsSupply] = useState(false);
+  const [partnerIds, setPartnerIds] = useState<number[]>([]);
+  const [unit, setUnit] = useState("");
+  const [size, setSize] = useState({ length: "", width: "", height: "" });
+
+  if (kind === "none") return null;
+
+  const applyId = `apply-all-${field}`;
+  const ariaLabel = `${label} to apply to all`;
+
+  function submit() {
+    if (kind === "transform") {
+      if (mode === "replace" ? !find : !text) return;
+      onApply({ kind: "transform", mode, value: text, find });
+      return;
+    }
+    if (kind === "append") {
+      if (!text.trim()) return;
+      onApply({ kind: "append", value: text.trim() });
+      setText("");
+      return;
+    }
+    if (field === "about") {
+      onApply({ kind: "about", whoMade, whenMade, isSupply });
+      return;
+    }
+    if (field === "productionPartners") {
+      onApply({ kind: "partners", ids: partnerIds });
+      return;
+    }
+    if (field === "itemWeight") {
+      if (!text.trim() || !unit) return;
+      onApply({ kind: "weight", weight: text.trim(), unit });
+      return;
+    }
+    if (field === "itemSize") {
+      if (!unit) return;
+      onApply({ kind: "size", ...size, unit });
+      return;
+    }
+    if (kind === "select" && isAttribute(field)) {
+      if (!choice) return;
+      onApply({ kind: "attribute", valueName: choice });
+      return;
+    }
+    if (kind === "select") {
+      if (!choice) return;
+      onApply({ kind: "set", value: choice });
+      return;
+    }
+    if (!text.trim()) return;
+    onApply({ kind: "set", value: text.trim() });
+  }
+
+  return (
+    <section
+      aria-label={`Apply to all selected — ${label}`}
+      className="mt-4 rounded-xl border border-dashed border-black/15 bg-white p-4 dark:border-white/20 dark:bg-zinc-950"
+    >
+      <div className="flex items-center justify-between">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+          Apply to all selected
+        </h2>
+        <span className="text-xs text-zinc-500">
+          {targetedCount} listing{targetedCount === 1 ? "" : "s"} ticked
+        </span>
+      </div>
+
+      <div className="mt-2 flex flex-wrap items-end gap-2">
+        {kind === "transform" && (
+          <>
+            <label className="text-sm">
+              <span className="block text-xs text-zinc-500">Mode</span>
+              <select
+                aria-label={`${label} mode`}
+                value={mode}
+                onChange={(e) => setMode(e.target.value as TextTransformMode)}
+                className={`${INPUT_CLS} mt-1 h-9 w-44`}
+              >
+                {TEXT_TRANSFORM_MODES.map((m) => (
+                  <option key={m.value} value={m.value}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {mode === "replace" && (
+              <label className="min-w-[10rem] flex-1 text-sm">
+                <span className="block text-xs text-zinc-500">Find</span>
+                <input
+                  type="text"
+                  aria-label={`${label} find text`}
+                  value={find}
+                  onChange={(e) => setFind(e.target.value)}
+                  className={`${INPUT_CLS} mt-1 h-9`}
+                />
+              </label>
+            )}
+            <label className="min-w-[10rem] flex-1 text-sm">
+              <span className="block text-xs text-zinc-500">
+                {mode === "replace" ? "Replace with" : "Text"}
+              </span>
+              <input
+                type="text"
+                id={applyId}
+                aria-label={ariaLabel}
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                className={`${INPUT_CLS} mt-1 h-9`}
+              />
+            </label>
+          </>
+        )}
+
+        {kind === "append" && (
+          <label className="min-w-[12rem] flex-1 text-sm">
+            <span className="block text-xs text-zinc-500">
+              {field === "tags" ? "Tag to add" : "Material to add"}
+            </span>
+            <input
+              type="text"
+              id={applyId}
+              aria-label={ariaLabel}
+              value={text}
+              maxLength={field === "tags" ? MAX_TAG_LENGTH : undefined}
+              onChange={(e) => setText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  submit();
+                }
+              }}
+              className={`${INPUT_CLS} mt-1 h-9`}
+            />
+          </label>
+        )}
+
+        {field === "about" && (
+          <>
+            <label className="text-sm">
+              <span className="block text-xs text-zinc-500">Who made it</span>
+              <select
+                aria-label="Who made it to apply to all"
+                value={whoMade}
+                onChange={(e) => setWhoMade(e.target.value)}
+                className={`${INPUT_CLS} mt-1 h-9 w-48`}
+              >
+                {WHO_MADE_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="text-sm">
+              <span className="block text-xs text-zinc-500">What is it</span>
+              <select
+                aria-label="What is it to apply to all"
+                value={isSupply ? "supply" : "product"}
+                onChange={(e) => setIsSupply(e.target.value === "supply")}
+                className={`${INPUT_CLS} mt-1 h-9 w-44`}
+              >
+                <option value="product">A finished product</option>
+                <option value="supply">A supply or tool</option>
+              </select>
+            </label>
+            <label className="text-sm">
+              <span className="block text-xs text-zinc-500">When was it made</span>
+              <select
+                aria-label="When was it made to apply to all"
+                value={whenMade}
+                onChange={(e) => setWhenMade(e.target.value)}
+                className={`${INPUT_CLS} mt-1 h-9 w-44`}
+              >
+                {WHEN_MADE_VALUES.map((v) => (
+                  <option key={v} value={v}>
+                    {formatWhenMade(v)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </>
+        )}
+
+        {field === "productionPartners" && (
+          <label className="min-w-[14rem] flex-1 text-sm">
+            <span className="block text-xs text-zinc-500">Production partners</span>
+            <select
+              multiple
+              id={applyId}
+              aria-label={ariaLabel}
+              value={partnerIds.map(String)}
+              onChange={(e) =>
+                setPartnerIds([...e.target.selectedOptions].map((o) => Number(o.value)))
+              }
+              className={`${INPUT_CLS} mt-1 h-20 py-1`}
+            >
+              {options.productionPartners.map((p) => (
+                <option key={p.productionPartnerId} value={p.productionPartnerId}>
+                  {p.partnerName}
+                  {p.location ? ` · ${p.location}` : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+
+        {field === "itemWeight" && (
+          <>
+            <label className="w-32 text-sm">
+              <span className="block text-xs text-zinc-500">Weight</span>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                id={applyId}
+                aria-label={ariaLabel}
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                className={`${INPUT_CLS} mt-1 h-9`}
+              />
+            </label>
+            <label className="w-28 text-sm">
+              <span className="block text-xs text-zinc-500">Unit</span>
+              <select
+                aria-label="Item weight unit to apply to all"
+                value={unit}
+                onChange={(e) => setUnit(e.target.value)}
+                className={`${INPUT_CLS} mt-1 h-9`}
+              >
+                <option value="">Choose…</option>
+                {WEIGHT_UNITS.map((u) => (
+                  <option key={u} value={u}>
+                    {u}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </>
+        )}
+
+        {field === "itemSize" && (
+          <>
+            {(["length", "width", "height"] as const).map((dimension) => (
+              <label key={dimension} className="w-24 text-sm">
+                <span className="block text-xs capitalize text-zinc-500">{dimension}</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  aria-label={`Item ${dimension} to apply to all`}
+                  value={size[dimension]}
+                  onChange={(e) => setSize((prev) => ({ ...prev, [dimension]: e.target.value }))}
+                  className={`${INPUT_CLS} mt-1 h-9`}
+                />
+              </label>
+            ))}
+            <label className="w-28 text-sm">
+              <span className="block text-xs text-zinc-500">Unit</span>
+              <select
+                aria-label="Item size unit to apply to all"
+                value={unit}
+                onChange={(e) => setUnit(e.target.value)}
+                className={`${INPUT_CLS} mt-1 h-9`}
+              >
+                <option value="">Choose…</option>
+                {DIMENSION_UNITS.map((u) => (
+                  <option key={u} value={u}>
+                    {u}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </>
+        )}
+
+        {kind === "select" && !["about", "productionPartners"].includes(field) && (
+          <label className="min-w-[14rem] flex-1 text-sm">
+            <span className="block text-xs text-zinc-500">{label}</span>
+            <select
+              id={applyId}
+              aria-label={ariaLabel}
+              value={choice}
+              onChange={(e) => setChoice(e.target.value)}
+              className={`${INPUT_CLS} mt-1 h-9`}
+            >
+              <option value="">Choose…</option>
+              {selectChoices(field, options, attributeChoices).map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+
+        {kind === "value" && (
+          <label className="min-w-[10rem] flex-1 text-sm">
+            <span className="block text-xs text-zinc-500">{label}</span>
+            <input
+              type={field === "price" || field === "quantity" ? "number" : "text"}
+              min={field === "price" || field === "quantity" ? "0" : undefined}
+              step={field === "price" ? "0.01" : undefined}
+              id={applyId}
+              aria-label={ariaLabel}
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              className={`${INPUT_CLS} mt-1 h-9`}
+            />
+          </label>
+        )}
+
+        <button
+          type="button"
+          onClick={submit}
+          className="h-9 shrink-0 rounded-full border border-black/10 px-4 text-xs font-medium transition-colors hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
+        >
+          Apply
+        </button>
+      </div>
+
+      {field === "tags" && (
+        <p className="mt-2 text-xs text-zinc-500">
+          Adds the tag to each ticked listing&apos;s existing tags — nothing is replaced or removed.
+        </p>
+      )}
+    </section>
+  );
+}
+
+function isAttribute(field: BulkFieldKey): boolean {
+  return field.startsWith("attr_");
+}
+
+/** The valid Etsy values one dropdown-backed field offers. */
+function selectChoices(
+  field: BulkFieldKey,
+  options: BulkOptions,
+  attributeChoices: string[],
+): { value: string; label: string }[] {
+  if (isAttribute(field)) {
+    return attributeChoices.map((name) => ({ value: name, label: name }));
+  }
+  switch (field) {
+    case "shopSectionId":
+      return options.sections.map((s) => ({ value: String(s.shopSectionId), label: s.title }));
+    case "shippingProfileId":
+      return options.shippingProfiles.map((p) => ({
+        value: String(p.shippingProfileId),
+        label: p.title,
+      }));
+    case "readinessStateId":
+      return options.processingProfiles.map((p) => ({
+        value: String(p.readinessStateId),
+        label: `${p.displayLabel || `${p.minProcessingDays}-${p.maxProcessingDays} days`} · ${
+          p.readinessState === "made_to_order" ? "Made to order" : "Ready to ship"
+        }`,
+      }));
+    case "returnPolicyId":
+      return options.returnPolicies.map((p) => ({
+        value: String(p.returnPolicyId),
+        label: p.label,
+      }));
+    case "taxonomyId":
+      return options.taxonomy.map((t) => ({ value: String(t.id), label: t.path }));
+    default:
+      return [];
+  }
+}

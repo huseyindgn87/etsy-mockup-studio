@@ -1,13 +1,22 @@
 import { describe, expect, test } from "vitest";
 import {
-  BULK_SECTIONS,
+  ALL_BULK_FIELDS,
+  ATTRIBUTE_FIELDS,
+  BULK_GROUPS,
   CHARACTER_LIMITS,
-  isEmptyPatch,
+  DIMENSION_UNITS,
   MAX_BULK_UPDATES,
+  MAX_MATERIAL_LENGTH,
   MAX_SKU_LENGTH,
   MAX_TAGS,
   MAX_TAG_LENGTH,
   MAX_TITLE_LENGTH,
+  WEIGHT_UNITS,
+  applyKindFor,
+  findAttributeProperty,
+  isAttributeField,
+  isEmptyPatch,
+  isReadOnlyField,
   normalizeTags,
   parseBulkPatch,
   parseBulkUpdates,
@@ -25,6 +34,9 @@ const err = (raw: unknown) => {
   if (parsed.ok) throw new Error("expected the patch to be rejected");
   return parsed.error;
 };
+
+/** A valid About trio — Etsy requires all three together. */
+const ABOUT = { whoMade: "i_did", whenMade: "made_to_order", isSupply: false };
 
 describe("character limits", () => {
   test("a title at Etsy's limit is accepted, one over is refused", () => {
@@ -65,13 +77,20 @@ describe("character limits", () => {
   });
 });
 
-describe("tag normalisation", () => {
+describe("tag and material normalisation", () => {
   test("drops blanks and case-insensitive duplicates, keeping order", () => {
     expect(normalizeTags(["Miami", " ", "miami", "Skyline"])).toEqual(["Miami", "Skyline"]);
   });
 
   test("never returns more than Etsy allows", () => {
     expect(normalizeTags(Array.from({ length: 30 }, (_, i) => `t${i}`))).toHaveLength(MAX_TAGS);
+  });
+
+  test("materials are normalised the same way", () => {
+    expect(ok({ materials: ["Cotton", "cotton", " "] }).materials).toEqual(["Cotton"]);
+    expect(ok({ materials: ["x".repeat(MAX_MATERIAL_LENGTH + 10)] }).materials![0]).toHaveLength(
+      MAX_MATERIAL_LENGTH,
+    );
   });
 });
 
@@ -81,10 +100,24 @@ describe("values Etsy's spec doesn't document a way to clear", () => {
     expect(err({ tags: ["   "] })).toMatch(/can't be emptied/i);
   });
 
+  test("emptying the material list is refused the same way", () => {
+    expect(err({ materials: [] })).toMatch(/can't be emptied/i);
+  });
+
   test("there is no 'no section' value — only moving into a real section", () => {
     expect(err({ shopSectionId: null })).toMatch(/valid shop section/i);
     expect(err({ shopSectionId: 0 })).toMatch(/valid shop section/i);
     expect(ok({ shopSectionId: 12 }).shopSectionId).toBe(12);
+  });
+
+  test("an attribute can't be cleared from here", () => {
+    expect(err({ attributes: [{ propertyId: 200, valueIds: [], values: [] }] })).toMatch(
+      /can't be emptied/i,
+    );
+  });
+
+  test("a variation grid can't be emptied from here", () => {
+    expect(err({ variations: { products: [] } })).toMatch(/can't be emptied/i);
   });
 });
 
@@ -103,6 +136,9 @@ describe("field validation", () => {
     ["quantity", { quantity: -1 }, /0 or more/i],
     ["quantity", { quantity: 1.5 }, /whole number/i],
     ["shipping profile", { shippingProfileId: 0 }, /valid shipping profile/i],
+    ["return policy", { returnPolicyId: 0 }, /valid return policy/i],
+    ["processing profile", { readinessStateId: 0 }, /valid processing profile/i],
+    ["category", { taxonomyId: 0 }, /valid category/i],
   ])("%s is checked", (_label, raw, message) => {
     expect(err(raw)).toMatch(message);
   });
@@ -128,23 +164,172 @@ describe("field validation", () => {
   });
 });
 
-describe("splitting a patch across Etsy's two writes", () => {
-  test("listing fields and inventory fields go their separate ways", () => {
-    const { listing, inventory } = splitPatch({
+describe("About — Etsy requires who, what and when together", () => {
+  test("all three together are accepted", () => {
+    expect(ok(ABOUT)).toEqual(ABOUT);
+  });
+
+  test("one on its own is refused rather than sent as a partial change", () => {
+    expect(err({ whoMade: "i_did" })).toMatch(/must be set together/i);
+    expect(err({ whoMade: "i_did", whenMade: "made_to_order" })).toMatch(/must be set together/i);
+  });
+
+  test("values outside Etsy's enums are refused", () => {
+    expect(err({ ...ABOUT, whoMade: "my_cat" })).toMatch(/who made this item/i);
+    expect(err({ ...ABOUT, whenMade: "last_tuesday" })).toMatch(/when this item was made/i);
+  });
+
+  test("'someone else made it' with no production partner is refused, as Etsy requires", () => {
+    expect(
+      err({ whoMade: "someone_else", whenMade: "2020_2026", isSupply: false, productionPartnerIds: [] }),
+    ).toMatch(/production partner/i);
+  });
+});
+
+describe("item weight and size", () => {
+  test("a weight needs a unit, and the unit must be one Etsy lists", () => {
+    expect(ok({ itemWeight: 12, itemWeightUnit: "oz" })).toEqual({
+      itemWeight: 12,
+      itemWeightUnit: "oz",
+    });
+    expect(err({ itemWeight: 12 })).toMatch(/unit for the item weight/i);
+    expect(err({ itemWeight: 12, itemWeightUnit: "stone" })).toMatch(WEIGHT_UNITS.join(", "));
+  });
+
+  test("a size needs a unit too", () => {
+    expect(err({ itemLength: 4 })).toMatch(/unit for the item size/i);
+    expect(err({ itemLength: 4, itemDimensionsUnit: "parsec" })).toMatch(DIMENSION_UNITS.join(", "));
+  });
+
+  test("Etsy requires a measurement above zero, and documents no way to clear one", () => {
+    expect(err({ itemWeight: 0, itemWeightUnit: "oz" })).toMatch(/greater than 0/i);
+    expect(err({ itemLength: -1, itemDimensionsUnit: "in" })).toMatch(/greater than 0/i);
+  });
+});
+
+describe("attributes", () => {
+  test("value ids and names must line up", () => {
+    expect(err({ attributes: [{ propertyId: 200, valueIds: [1, 2], values: ["Red"] }] })).toMatch(
+      /matching value ids and names/i,
+    );
+  });
+
+  test("one property can't appear twice in one edit", () => {
+    expect(
+      err({
+        attributes: [
+          { propertyId: 200, valueIds: [1], values: ["Red"] },
+          { propertyId: 200, valueIds: [2], values: ["Blue"] },
+        ],
+      }),
+    ).toMatch(/appears twice/i);
+  });
+
+  test("a valid attribute keeps its scale", () => {
+    expect(ok({ attributes: [{ propertyId: 100, valueIds: [7], values: ["M"], scaleId: 19 }] }).attributes).toEqual(
+      [{ propertyId: 100, valueIds: [7], values: ["M"], scaleId: 19 }],
+    );
+  });
+
+  test("each Optional field resolves to a property by name, not a hard-coded id", () => {
+    const properties = [
+      { propertyId: 200, name: "primary_color", displayName: "Primary color" },
+      { propertyId: 52047899002, name: "size", displayName: "Size" },
+    ];
+    expect(findAttributeProperty("attr_primary_color", properties)?.propertyId).toBe(200);
+    expect(findAttributeProperty("attr_size", properties)?.propertyId).toBe(52047899002);
+    // A category without that property simply has none — never a wrong guess.
+    expect(findAttributeProperty("attr_neckline", properties)).toBeNull();
+  });
+});
+
+describe("personalization", () => {
+  test("a valid question is accepted", () => {
+    const patch = ok({
+      personalization: [
+        { fieldType: "text_input", questionText: "Name?", required: true, maxAllowedCharacters: 50 },
+      ],
+    });
+    expect(patch.personalization).toHaveLength(1);
+    expect(patch.personalization![0]).toMatchObject({ questionText: "Name?", required: true });
+  });
+
+  test("Etsy's own field constraints are enforced", () => {
+    expect(err({ personalization: [{ fieldType: "text_input", questionText: "" }] })).toMatch(
+      /label\/prompt/i,
+    );
+    expect(err({ personalization: [{ fieldType: "carrier_pigeon" }] })).toMatch(/field type/i);
+  });
+
+  test("an empty list is valid — it clears the listing's personalization", () => {
+    expect(ok({ personalization: [] }).personalization).toEqual([]);
+  });
+});
+
+describe("variations", () => {
+  const product = {
+    propertyValues: [{ propertyId: 200, name: "Color", valueIds: [1], values: ["Red"] }],
+    price: 10,
+    quantity: 2,
+    enabled: true,
+  };
+
+  test("a grid is accepted with its on-property lists", () => {
+    const patch = ok({ variations: { products: [product], priceOnProperty: [200] } });
+    expect(patch.variations!.products).toHaveLength(1);
+    expect(patch.variations!.priceOnProperty).toEqual([200]);
+  });
+
+  test("a malformed row fails the save rather than being dropped from a live listing", () => {
+    expect(
+      err({ variations: { products: [{ propertyValues: [{ propertyId: 200, valueIds: [1], values: [] }] }] } }),
+    ).toMatch(/value ids or names/i);
+    expect(err({ variations: { products: [{ ...product, price: 0 }] } })).toMatch(/greater than 0/i);
+  });
+
+  test("a disabled combination is kept — Etsy requires every combination", () => {
+    const patch = ok({ variations: { products: [{ ...product, enabled: false }] } });
+    expect(patch.variations!.products[0].enabled).toBe(false);
+  });
+});
+
+describe("splitting a patch across Etsy's separate writes", () => {
+  test("each half goes to the call that can write it", () => {
+    const { listing, inventory, attributes, personalization, variations } = splitPatch({
       title: "New",
       tags: ["a"],
+      materials: ["Cotton"],
       shippingProfileId: 3,
+      returnPolicyId: 8,
+      itemWeight: 5,
+      itemWeightUnit: "oz",
       price: 9.5,
       quantity: 2,
       sku: "SKU-1",
+      readinessStateId: 4,
+      attributes: [{ propertyId: 200, valueIds: [1], values: ["Red"] }],
+      personalization: [],
+      variations: null as never,
     });
-    expect(listing).toEqual({ title: "New", tags: ["a"], shippingProfileId: 3 });
-    expect(inventory).toEqual({ price: 9.5, quantity: 2, sku: "SKU-1" });
+    expect(listing).toEqual({
+      title: "New",
+      tags: ["a"],
+      materials: ["Cotton"],
+      shippingProfileId: 3,
+      returnPolicyId: 8,
+      itemWeight: 5,
+      itemWeightUnit: "oz",
+    });
+    expect(inventory).toEqual({ price: 9.5, quantity: 2, sku: "SKU-1", readinessStateId: 4 });
+    expect(attributes).toHaveLength(1);
+    expect(personalization).toEqual([]);
+    expect(variations).toBeNull();
   });
 
   test("a listing-only patch needs no inventory call", () => {
-    const { inventory } = splitPatch({ title: "New" });
+    const { inventory, attributes } = splitPatch({ title: "New" });
     expect(isEmptyPatch(inventory)).toBe(true);
+    expect(attributes).toEqual([]);
   });
 });
 
@@ -233,21 +418,84 @@ describe("per-row targeting — each listing carries only its own changes", () =
 });
 
 describe("the editor's sidebar", () => {
-  test("lists the sections the screen is specified to have, in order", () => {
-    expect(BULK_SECTIONS.map((s) => s.label)).toEqual([
-      "Title",
-      "Description",
-      "Tags",
+  test("lists the groups the screen is specified to have, in order", () => {
+    expect(BULK_GROUPS.map((g) => g.label)).toEqual([
+      "AI Edits",
       "Media",
-      "Listing details",
+      "Listings",
       "Optional",
       "Inventory",
       "Shipping",
     ]);
   });
 
-  test("every editable field belongs to exactly one section", () => {
-    const fields = BULK_SECTIONS.flatMap((s) => s.fields);
-    expect(new Set(fields).size).toBe(fields.length);
+  test("AI Edits sits at the top and doesn't collapse; the rest do", () => {
+    expect(BULK_GROUPS[0]).toMatchObject({ label: "AI Edits", collapsible: false });
+    expect(BULK_GROUPS.slice(1).every((g) => g.collapsible)).toBe(true);
+  });
+
+  test("each group lists exactly the fields specified, in order", () => {
+    const fieldsOf = (key: string) =>
+      BULK_GROUPS.find((g) => g.key === key)!.fields.map((f) => f.label);
+    expect(fieldsOf("ai")).toEqual(["Title", "Description", "Tags"]);
+    expect(fieldsOf("media")).toEqual(["Photos", "Videos"]);
+    expect(fieldsOf("listings")).toEqual([
+      "Title",
+      "Description",
+      "Tags",
+      "Materials",
+      "About",
+      "Production partner",
+      "Category",
+      "Section",
+      "Personalization",
+    ]);
+    expect(fieldsOf("optional")).toEqual([
+      "Primary color",
+      "Secondary color",
+      "Holiday",
+      "Occasion",
+      "Materials",
+      "Size",
+      "Sustainability",
+      "Sleeve length",
+      "Neckline",
+      "Clothing style",
+      "Graphic",
+    ]);
+    expect(fieldsOf("inventory")).toEqual(["Variations", "Price", "Quantity", "SKU"]);
+    expect(fieldsOf("shipping")).toEqual([
+      "Processing profile",
+      "Shipping profile",
+      "Item weight",
+      "Item size",
+      "Return policy",
+    ]);
+  });
+
+  test("every Optional field is an attribute, and no other field is", () => {
+    const optional = BULK_GROUPS.find((g) => g.key === "optional")!.fields.map((f) => f.key);
+    expect(optional).toEqual(ATTRIBUTE_FIELDS.map((a) => a.key));
+    expect(optional.every(isAttributeField)).toBe(true);
+    expect(isAttributeField("title")).toBe(false);
+  });
+
+  test("Media is the read-only group — everything else can be written", () => {
+    expect(ALL_BULK_FIELDS.filter(isReadOnlyField)).toEqual(["photos", "videos"]);
+  });
+
+  test("each field's bulk control matches what it can sensibly apply", () => {
+    expect(applyKindFor("title")).toBe("transform");
+    expect(applyKindFor("description")).toBe("transform");
+    // Tags add to a list; they never overwrite one.
+    expect(applyKindFor("tags")).toBe("append");
+    expect(applyKindFor("materials")).toBe("append");
+    expect(applyKindFor("attr_primary_color")).toBe("select");
+    expect(applyKindFor("returnPolicyId")).toBe("select");
+    expect(applyKindFor("price")).toBe("value");
+    // Edited per listing only.
+    expect(applyKindFor("variations")).toBe("none");
+    expect(applyKindFor("personalization")).toBe("none");
+    expect(applyKindFor("photos")).toBe("none");
   });
 });

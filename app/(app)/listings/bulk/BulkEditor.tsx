@@ -1,156 +1,111 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  BULK_SECTIONS,
-  CHARACTER_LIMITS,
+  BULK_GROUPS,
+  MAX_MATERIALS,
+  MAX_MATERIAL_LENGTH,
   MAX_TAGS,
   MAX_TAG_LENGTH,
-  remainingCharacters,
+  applyKindFor,
+  isAttributeField,
+  isReadOnlyField,
+  type BulkAttributeValue,
   type BulkFieldKey,
   type BulkListingPatch,
 } from "@/lib/etsy/bulk-edit";
-
-/** One listing as `GET /api/etsy/listings/bulk` returns it. */
-interface BulkListingDetail {
-  listingId: number;
-  title: string;
-  description: string;
-  tags: string[];
-  state: string;
-  url: string;
-  thumbnailUrl: string | null;
-  shopSectionId: number | null;
-  shippingProfileId: number | null;
-  shouldAutoRenew: boolean;
-  isTaxable: boolean;
-  price: number | null;
-  quantity: number;
-  sku: string;
-  hasVariations: boolean;
-}
-
-interface SectionOption {
-  shopSectionId: number;
-  title: string;
-}
-interface ShippingProfileOption {
-  shippingProfileId: number;
-  title: string;
-}
-interface SaveResult {
-  listingId: number;
-  ok: boolean;
-  error?: string;
-}
-
-/** The editable value of one field, in the shape the inputs use. */
-type FieldValue = string | boolean | string[];
+import { appendToList, applyTextTransform } from "@/lib/etsy/bulk-text";
+import { toVariationPatch, type VariationGrid } from "@/lib/etsy/variation-grid";
+import type { PersonalizationQuestionInput } from "@/lib/etsy/listing-personalization";
+import BulkApplyControl, { type ApplyInstruction } from "./BulkApplyControl";
+import BulkFieldInput, { INVENTORY_LOCKED } from "./BulkFieldInput";
+import BulkSidebar from "./BulkSidebar";
+import MediaStrip from "./MediaStrip";
+import VariationsCard from "./VariationsCard";
+import { INPUT_CLS, attributeChoicesAcross, labelFor, propertyForListing } from "./helpers";
+import {
+  EMPTY_OPTIONS,
+  type AboutValue,
+  type AttributeValue,
+  type BulkListingDetail,
+  type BulkOptions,
+  type FieldSelection,
+  type FieldValue,
+  type ListingAttribute,
+  type SaveResult,
+  type SizeValue,
+  type TaxonomyOption,
+  type TaxonomyProperty,
+  type WeightValue,
+} from "./types";
 
 async function errorFrom(res: Response): Promise<string> {
   const body = (await res.json().catch(() => null)) as { error?: string } | null;
   return body?.error || `Request failed (${res.status})`;
 }
 
-/** The listing's own stored value for `field`, as the inputs represent it. */
-function originalValue(listing: BulkListingDetail, field: BulkFieldKey): FieldValue {
-  switch (field) {
-    case "title":
-      return listing.title;
-    case "description":
-      return listing.description;
-    case "tags":
-      return listing.tags;
-    case "shopSectionId":
-      return listing.shopSectionId == null ? "" : String(listing.shopSectionId);
-    case "shippingProfileId":
-      return listing.shippingProfileId == null ? "" : String(listing.shippingProfileId);
-    case "shouldAutoRenew":
-      return listing.shouldAutoRenew;
-    case "isTaxable":
-      return listing.isTaxable;
-    case "price":
-      return listing.price == null ? "" : listing.price.toFixed(2);
-    case "quantity":
-      return String(listing.quantity);
-    case "sku":
-      return listing.sku;
-  }
+interface TaxonomyNode {
+  id: number;
+  name: string;
+  children: TaxonomyNode[];
 }
 
-/**
- * Turn one edited field into its patch entry, or null when the typed value
- * isn't usable yet (an empty number box, an unpicked dropdown) — an
- * in-progress value is simply not part of the save.
- */
-function patchEntry(field: BulkFieldKey, value: FieldValue): BulkListingPatch | null {
-  switch (field) {
-    case "title":
-      return typeof value === "string" && value.trim() ? { title: value.trim() } : null;
-    case "description":
-      return typeof value === "string" ? { description: value } : null;
-    case "tags":
-      return Array.isArray(value) && value.length > 0 ? { tags: value } : null;
-    case "shopSectionId": {
-      const id = Number.parseInt(String(value), 10);
-      return Number.isInteger(id) && id > 0 ? { shopSectionId: id } : null;
-    }
-    case "shippingProfileId": {
-      const id = Number.parseInt(String(value), 10);
-      return Number.isInteger(id) && id > 0 ? { shippingProfileId: id } : null;
-    }
-    case "shouldAutoRenew":
-      return typeof value === "boolean" ? { shouldAutoRenew: value } : null;
-    case "isTaxable":
-      return typeof value === "boolean" ? { isTaxable: value } : null;
-    case "price": {
-      const price = Number.parseFloat(String(value));
-      return Number.isFinite(price) && price > 0 ? { price } : null;
-    }
-    case "quantity": {
-      const quantity = Number.parseInt(String(value), 10);
-      return Number.isInteger(quantity) && quantity >= 0 ? { quantity } : null;
-    }
-    case "sku":
-      return typeof value === "string" ? { sku: value } : null;
+/** Etsy's category tree, flattened to the full paths the pickers show. */
+function flattenTaxonomy(nodes: TaxonomyNode[], prefix = ""): TaxonomyOption[] {
+  const out: TaxonomyOption[] = [];
+  for (const node of nodes) {
+    const path = prefix ? `${prefix} > ${node.name}` : node.name;
+    out.push({ id: node.id, path });
+    out.push(...flattenTaxonomy(node.children ?? [], path));
   }
+  return out;
 }
 
+/** Deep enough for the shapes a field value can take. */
 function sameValue(a: FieldValue, b: FieldValue): boolean {
-  if (Array.isArray(a) && Array.isArray(b)) {
-    return a.length === b.length && a.every((v, i) => v === b[i]);
-  }
-  return a === b;
+  if (typeof a !== "object" && typeof b !== "object") return a === b;
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
-const inputCls =
-  "w-full rounded-lg border border-black/10 bg-white px-2 text-sm outline-none focus:border-primary dark:border-white/15 dark:bg-zinc-950";
+const numberOr = (value: number | null, digits = 2): string =>
+  value == null ? "" : digits > 0 ? value.toFixed(digits) : String(value);
 
 /**
  * The bulk editor: every selected listing on its own row, each edited
- * individually, with an explicit "apply to all" for writing one value across
- * the lot. Nothing reaches Etsy until Save all changes is pressed.
+ * individually, with an explicit per-field control for writing one value
+ * across the ticked rows. Nothing reaches Etsy until Sync updates is pressed.
  */
 export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
   const [listings, setListings] = useState<BulkListingDetail[] | null>(null);
   const [missing, setMissing] = useState<number[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [sections, setSections] = useState<SectionOption[]>([]);
-  const [shippingProfiles, setShippingProfiles] = useState<ShippingProfileOption[]>([]);
+  const [options, setOptions] = useState<BulkOptions>(EMPTY_OPTIONS);
+  const [attributes, setAttributes] = useState<Record<number, ListingAttribute[]>>({});
+  const [grids, setGrids] = useState<Record<number, VariationGrid>>({});
+  const [gridsLoaded, setGridsLoaded] = useState(false);
+  /**
+   * What has already been asked for. A ref rather than state: it only guards
+   * a fetch from being repeated, and nothing rendered reads it.
+   */
+  const requested = useRef({ attributes: false, grids: false, taxonomies: new Set<number>() });
 
-  const [activeSection, setActiveSection] = useState(BULK_SECTIONS[0].key);
+  const [selection, setSelection] = useState<FieldSelection>({
+    group: BULK_GROUPS[0].key,
+    field: BULK_GROUPS[0].fields[0].key,
+  });
   const [search, setSearch] = useState("");
   /** Which listings a save writes to. Every selected listing starts included. */
   const [targeted, setTargeted] = useState<Record<number, boolean>>({});
   /** Edited values, per listing and field. Absent means "untouched". */
   const [edited, setEdited] = useState<Record<number, Partial<Record<BulkFieldKey, FieldValue>>>>({});
-  const [applyToAll, setApplyToAll] = useState<Partial<Record<BulkFieldKey, FieldValue>>>({});
   const [saving, setSaving] = useState(false);
   const [results, setResults] = useState<SaveResult[] | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [scheduleNote, setScheduleNote] = useState(false);
 
   const idsKey = listingIds.join(",");
+  const field = selection.field;
 
   useEffect(() => {
     if (listingIds.length === 0) {
@@ -178,45 +133,261 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
     return () => controller.abort();
   }, [idsKey, listingIds.length]);
 
+  // The option lists every dropdown draws on. Each is independent — one
+  // failing (a shop with no return policies, say) leaves the rest usable.
   useEffect(() => {
-    fetch("/api/etsy/sections")
-      .then((res) => (res.ok ? res.json() : null))
-      .then((body: { sections?: SectionOption[] } | null) => setSections(body?.sections ?? []))
-      .catch(() => setSections([]));
-    fetch("/api/etsy/shipping-profiles")
-      .then((res) => (res.ok ? res.json() : null))
-      .then((body: { profiles?: ShippingProfileOption[] } | null) =>
-        setShippingProfiles(body?.profiles ?? []),
-      )
-      .catch(() => setShippingProfiles([]));
+    const load = <T,>(url: string, pick: (body: Record<string, unknown>) => T, apply: (value: T) => void) => {
+      fetch(url)
+        .then((res) => (res.ok ? res.json() : null))
+        .then((body: Record<string, unknown> | null) => {
+          if (body) apply(pick(body));
+        })
+        .catch(() => {});
+    };
+    load("/api/etsy/sections", (b) => (b.sections ?? []) as BulkOptions["sections"], (sections) =>
+      setOptions((prev) => ({ ...prev, sections })),
+    );
+    load("/api/etsy/shipping-profiles", (b) => (b.profiles ?? []) as BulkOptions["shippingProfiles"], (shippingProfiles) =>
+      setOptions((prev) => ({ ...prev, shippingProfiles })),
+    );
+    load("/api/etsy/processing-profiles", (b) => (b.profiles ?? []) as BulkOptions["processingProfiles"], (processingProfiles) =>
+      setOptions((prev) => ({ ...prev, processingProfiles })),
+    );
+    load("/api/etsy/return-policies", (b) => (b.policies ?? []) as BulkOptions["returnPolicies"], (returnPolicies) =>
+      setOptions((prev) => ({ ...prev, returnPolicies })),
+    );
+    load("/api/etsy/production-partners", (b) => (b.partners ?? []) as BulkOptions["productionPartners"], (productionPartners) =>
+      setOptions((prev) => ({ ...prev, productionPartners })),
+    );
+    load("/api/etsy/taxonomy", (b) => flattenTaxonomy((b.tree ?? []) as TaxonomyNode[]), (taxonomy) =>
+      setOptions((prev) => ({ ...prev, taxonomy })),
+    );
   }, []);
 
-  const section = BULK_SECTIONS.find((s) => s.key === activeSection) ?? BULK_SECTIONS[0];
+  // Attributes cost one Etsy call per listing, so they're only fetched once
+  // the Optional group is actually opened.
+  const attributeFieldSelected = isAttributeField(field);
+  useEffect(() => {
+    if (!attributeFieldSelected || requested.current.attributes) return;
+    if (listings == null || listings.length === 0) return;
+    requested.current.attributes = true;
+    fetch(`/api/etsy/listings/bulk/attributes?ids=${idsKey}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((body: { attributes?: Record<string, ListingAttribute[]> } | null) => {
+        const raw = body?.attributes ?? {};
+        setAttributes(
+          Object.fromEntries(Object.entries(raw).map(([id, list]) => [Number(id), list])),
+        );
+      })
+      .catch(() => {});
+  }, [attributeFieldSelected, listings, idsKey]);
 
-  const valueOf = useCallback(
-    (listing: BulkListingDetail, field: BulkFieldKey): FieldValue =>
-      edited[listing.listingId]?.[field] ?? originalValue(listing, field),
-    [edited],
+  // Each distinct category in the selection has its own property list — that's
+  // what makes an attribute's valid values row-specific.
+  const taxonomyIdsKey = useMemo(
+    () => [...new Set((listings ?? []).map((l) => l.taxonomyId).filter((id): id is number => id != null))].join(","),
+    [listings],
+  );
+  useEffect(() => {
+    if (!attributeFieldSelected || !taxonomyIdsKey) return;
+    for (const raw of taxonomyIdsKey.split(",")) {
+      const taxonomyId = Number(raw);
+      if (requested.current.taxonomies.has(taxonomyId)) continue;
+      requested.current.taxonomies.add(taxonomyId);
+      fetch(`/api/etsy/taxonomy/${taxonomyId}/properties`)
+        .then((res) => (res.ok ? res.json() : null))
+        .then((body: { properties?: TaxonomyProperty[] } | null) => {
+          setOptions((current) => ({
+            ...current,
+            propertiesByTaxonomy: {
+              ...current.propertiesByTaxonomy,
+              [taxonomyId]: body?.properties ?? [],
+            },
+          }));
+        })
+        .catch(() => {});
+    }
+  }, [attributeFieldSelected, taxonomyIdsKey]);
+
+  // Same for the variation grids.
+  useEffect(() => {
+    if (field !== "variations" || requested.current.grids) return;
+    if (listings == null || listings.length === 0) return;
+    requested.current.grids = true;
+    fetch(`/api/etsy/listings/bulk/inventory?ids=${idsKey}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((body: { inventories?: Record<string, VariationGrid> } | null) => {
+        const raw = body?.inventories ?? {};
+        setGrids(Object.fromEntries(Object.entries(raw).map(([id, grid]) => [Number(id), grid])));
+      })
+      .catch(() => {})
+      // Only once the read has actually come back does a card stop saying
+      // "Loading…" — otherwise an empty map reads as "no inventory record".
+      .finally(() => setGridsLoaded(true));
+  }, [field, listings, idsKey]);
+
+  /** The listing's own stored value for `field`, as the inputs represent it. */
+  const originalValue = useCallback(
+    (listing: BulkListingDetail, key: BulkFieldKey): FieldValue => {
+      switch (key) {
+        case "title":
+          return listing.title;
+        case "description":
+          return listing.description;
+        case "tags":
+          return listing.tags;
+        case "materials":
+          return listing.materials;
+        case "about":
+          return {
+            whoMade: listing.whoMade,
+            whenMade: listing.whenMade,
+            isSupply: listing.isSupply,
+            productionPartnerIds: listing.productionPartnerIds,
+          } satisfies AboutValue;
+        case "productionPartners":
+          return listing.productionPartnerIds.map(String);
+        case "personalization":
+          return listing.personalizationQuestions;
+        case "taxonomyId":
+          return listing.taxonomyId == null ? "" : String(listing.taxonomyId);
+        case "shopSectionId":
+          return listing.shopSectionId == null ? "" : String(listing.shopSectionId);
+        case "shippingProfileId":
+          return listing.shippingProfileId == null ? "" : String(listing.shippingProfileId);
+        case "returnPolicyId":
+          return listing.returnPolicyId == null ? "" : String(listing.returnPolicyId);
+        case "readinessStateId":
+          return listing.readinessStateId == null ? "" : String(listing.readinessStateId);
+        case "price":
+          return numberOr(listing.price);
+        case "quantity":
+          return String(listing.quantity);
+        case "sku":
+          return listing.sku;
+        case "itemWeight":
+          return {
+            weight: numberOr(listing.itemWeight),
+            unit: listing.itemWeightUnit ?? "",
+          } satisfies WeightValue;
+        case "itemSize":
+          return {
+            length: numberOr(listing.itemLength),
+            width: numberOr(listing.itemWidth),
+            height: numberOr(listing.itemHeight),
+            unit: listing.itemDimensionsUnit ?? "",
+          } satisfies SizeValue;
+        case "photos":
+        case "videos":
+        case "variations":
+          return "";
+        default: {
+          if (!isAttributeField(key)) return "";
+          const property = propertyForListing(key, listing, options);
+          if (!property) return { propertyId: 0, valueIds: [], values: [], scaleId: null } satisfies AttributeValue;
+          const current = (attributes[listing.listingId] ?? []).find(
+            (a) => a.propertyId === property.propertyId,
+          );
+          return {
+            propertyId: property.propertyId,
+            valueIds: current?.valueIds ?? [],
+            values: current?.values ?? [],
+            scaleId: current?.scaleId ?? null,
+          } satisfies AttributeValue;
+        }
+      }
+    },
+    [attributes, options],
   );
 
-  function setValue(listingId: number, field: BulkFieldKey, value: FieldValue) {
-    setEdited((prev) => ({
-      ...prev,
-      [listingId]: { ...prev[listingId], [field]: value },
-    }));
+  const valueOf = useCallback(
+    (listing: BulkListingDetail, key: BulkFieldKey): FieldValue =>
+      edited[listing.listingId]?.[key] ?? originalValue(listing, key),
+    [edited, originalValue],
+  );
+
+  function setValue(listingId: number, key: BulkFieldKey, value: FieldValue) {
+    setEdited((prev) => ({ ...prev, [listingId]: { ...prev[listingId], [key]: value } }));
   }
 
-  /** Write one value into every targeted listing — the explicit apply-to-all. */
-  function applyValueToAll(field: BulkFieldKey, value: FieldValue) {
+  /** Can this listing take an edit to this field at all? */
+  const editable = useCallback(
+    (listing: BulkListingDetail, key: BulkFieldKey): boolean => {
+      if (isReadOnlyField(key)) return false;
+      if (INVENTORY_LOCKED.has(key) && listing.hasVariations) return false;
+      return true;
+    },
+    [],
+  );
+
+  /** Write one instruction into every ticked listing — the explicit apply-to-all. */
+  function applyToTicked(instruction: ApplyInstruction) {
     setEdited((prev) => {
       const next = { ...prev };
       for (const listing of listings ?? []) {
-        if (!targeted[listing.listingId]) continue;
-        if (INVENTORY_LOCKED.has(field) && listing.hasVariations) continue;
-        next[listing.listingId] = { ...next[listing.listingId], [field]: value };
+        if (!targeted[listing.listingId] || !editable(listing, field)) continue;
+        const current = next[listing.listingId]?.[field] ?? originalValue(listing, field);
+        const resolved = resolveInstruction(instruction, listing, current);
+        if (resolved === null) continue;
+        next[listing.listingId] = { ...next[listing.listingId], [field]: resolved };
       }
       return next;
     });
+  }
+
+  /** What one instruction means for one row — null when it can't apply there. */
+  function resolveInstruction(
+    instruction: ApplyInstruction,
+    listing: BulkListingDetail,
+    current: FieldValue,
+  ): FieldValue | null {
+    switch (instruction.kind) {
+      case "transform":
+        return applyTextTransform(String(current), instruction);
+      case "append": {
+        const list = Array.isArray(current) ? (current as string[]) : [];
+        return field === "tags"
+          ? appendToList(list, instruction.value, { max: MAX_TAGS, trimTo: MAX_TAG_LENGTH })
+          : appendToList(list, instruction.value, { max: MAX_MATERIALS, trimTo: MAX_MATERIAL_LENGTH });
+      }
+      case "attribute": {
+        // Matched by name: the same value has a different id on each category.
+        const property = propertyForListing(field, listing, options);
+        if (!property) return null;
+        const picked = property.possibleValues.find(
+          (v) => v.valueId != null && v.name === instruction.valueName,
+        );
+        if (!picked || picked.valueId == null) return null;
+        return {
+          propertyId: property.propertyId,
+          valueIds: [picked.valueId],
+          values: [picked.name],
+          scaleId: picked.scaleId,
+        } satisfies AttributeValue;
+      }
+      case "about": {
+        const about = current as AboutValue;
+        return {
+          ...about,
+          whoMade: instruction.whoMade,
+          whenMade: instruction.whenMade,
+          isSupply: instruction.isSupply,
+        } satisfies AboutValue;
+      }
+      case "partners":
+        return instruction.ids.map(String);
+      case "weight":
+        return { weight: instruction.weight, unit: instruction.unit } satisfies WeightValue;
+      case "size":
+        return {
+          length: instruction.length,
+          width: instruction.width,
+          height: instruction.height,
+          unit: instruction.unit,
+        } satisfies SizeValue;
+      case "set":
+        return instruction.value;
+    }
   }
 
   /** The patch that would be written to one listing: only fields actually changed. */
@@ -225,15 +396,30 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
       const patch: BulkListingPatch = {};
       const rowEdits = edited[listing.listingId];
       if (!rowEdits) return patch;
-      for (const [field, value] of Object.entries(rowEdits) as [BulkFieldKey, FieldValue][]) {
-        if (sameValue(value, originalValue(listing, field))) continue;
-        if (INVENTORY_LOCKED.has(field) && listing.hasVariations) continue;
-        const entry = patchEntry(field, value);
-        if (entry) Object.assign(patch, entry);
+
+      const attributeEntries: BulkAttributeValue[] = [];
+      for (const [key, value] of Object.entries(rowEdits) as [BulkFieldKey, FieldValue][]) {
+        if (!editable(listing, key)) continue;
+        if (sameValue(value, originalValue(listing, key))) continue;
+
+        if (isAttributeField(key)) {
+          const attribute = value as AttributeValue;
+          if (attribute.propertyId > 0 && attribute.valueIds.length > 0) {
+            attributeEntries.push({
+              propertyId: attribute.propertyId,
+              valueIds: attribute.valueIds,
+              values: attribute.values,
+              scaleId: attribute.scaleId,
+            });
+          }
+          continue;
+        }
+        Object.assign(patch, patchEntry(key, value) ?? {});
       }
+      if (attributeEntries.length > 0) patch.attributes = attributeEntries;
       return patch;
     },
-    [edited],
+    [edited, editable, originalValue],
   );
 
   const updates = useMemo(() => {
@@ -243,11 +429,30 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
       .filter((u) => Object.keys(u.patch).length > 0);
   }, [listings, targeted, patchFor]);
 
+  /** How many listings have a pending change per field, for the sidebar badges. */
+  const pendingByField = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const listing of listings ?? []) {
+      if (!targeted[listing.listingId]) continue;
+      for (const [key, value] of Object.entries(edited[listing.listingId] ?? {}) as [
+        BulkFieldKey,
+        FieldValue,
+      ][]) {
+        if (!editable(listing, key)) continue;
+        if (sameValue(value, originalValue(listing, key))) continue;
+        counts[key] = (counts[key] ?? 0) + 1;
+      }
+    }
+    return counts;
+  }, [listings, edited, targeted, editable, originalValue]);
+
   const visible = useMemo(() => {
     const needle = search.trim().toLowerCase();
     const all = listings ?? [];
     return needle ? all.filter((l) => l.title.toLowerCase().includes(needle)) : all;
   }, [listings, search]);
+
+  const targetedCount = (listings ?? []).filter((l) => targeted[l.listingId]).length;
 
   async function save() {
     setSaving(true);
@@ -262,31 +467,10 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
       if (!res.ok) throw new Error(await errorFrom(res));
       const body = (await res.json()) as { results: SaveResult[] };
       setResults(body.results);
-      // Saved values are now the listings' own values — clear the edits that landed.
+      // Saved values are now the listings' own values — clear the edits that
+      // landed so the rows stop showing them as pending.
       const savedIds = new Set(body.results.filter((r) => r.ok).map((r) => r.listingId));
-      setListings((prev) =>
-        (prev ?? []).map((l) => {
-          if (!savedIds.has(l.listingId)) return l;
-          const patch = patchFor(l);
-          return {
-            ...l,
-            ...(patch.title !== undefined ? { title: patch.title } : {}),
-            ...(patch.description !== undefined ? { description: patch.description } : {}),
-            ...(patch.tags !== undefined ? { tags: patch.tags } : {}),
-            ...(patch.shopSectionId !== undefined ? { shopSectionId: patch.shopSectionId } : {}),
-            ...(patch.shippingProfileId !== undefined
-              ? { shippingProfileId: patch.shippingProfileId }
-              : {}),
-            ...(patch.shouldAutoRenew !== undefined
-              ? { shouldAutoRenew: patch.shouldAutoRenew }
-              : {}),
-            ...(patch.isTaxable !== undefined ? { isTaxable: patch.isTaxable } : {}),
-            ...(patch.price !== undefined ? { price: patch.price } : {}),
-            ...(patch.quantity !== undefined ? { quantity: patch.quantity } : {}),
-            ...(patch.sku !== undefined ? { sku: patch.sku } : {}),
-          };
-        }),
-      );
+      setListings((prev) => (prev ?? []).map((l) => (savedIds.has(l.listingId) ? applySaved(l, patchFor(l)) : l)));
       setEdited((prev) => {
         const next = { ...prev };
         for (const id of savedIds) delete next[id];
@@ -301,11 +485,13 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
 
   const resultFor = (listingId: number) => results?.find((r) => r.listingId === listingId);
   const count = (listings ?? []).length;
+  const label = labelFor(field);
+  const showApplyControl = applyKindFor(field) !== "none" && !isReadOnlyField(field);
 
   return (
     <div className="min-h-screen bg-zinc-50 font-sans dark:bg-black">
       <div className="mx-auto w-full max-w-[96rem] px-4 py-8 sm:px-6">
-        {/* ---- header ---- */}
+        {/* ---- top bar ---- */}
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h1 className="text-xl font-semibold tracking-tight text-black dark:text-zinc-50">
             {listings == null ? "Loading listings…" : `Editing ${count} listing${count === 1 ? "" : "s"}`}
@@ -319,19 +505,37 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
             </Link>
             <button
               type="button"
+              onClick={() => setScheduleNote((open) => !open)}
+              aria-expanded={scheduleNote}
+              className="inline-flex h-9 items-center rounded-full border border-black/[.08] px-4 text-sm font-medium transition-colors hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-white/[.06]"
+            >
+              Schedule
+            </button>
+            <button
+              type="button"
               onClick={save}
               disabled={saving || updates.length === 0}
               className="inline-flex h-9 items-center rounded-full bg-primary px-4 text-sm font-medium text-white transition-colors hover:bg-primary-dark disabled:opacity-40"
             >
-              {saving
-                ? "Saving…"
-                : `Save all changes${updates.length > 0 ? ` (${updates.length})` : ""}`}
+              {saving ? "Syncing…" : `Sync updates${updates.length > 0 ? ` (${updates.length})` : ""}`}
             </button>
           </div>
         </div>
         <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-          Changes are written to Etsy only when you save. Untick a row to leave that listing alone.
+          Changes are written to Etsy only when you press Sync updates. Untick a row to leave that
+          listing alone.
         </p>
+
+        {scheduleNote && (
+          <div className="mt-4 rounded-xl border border-black/10 bg-white px-4 py-3 text-sm dark:border-white/15 dark:bg-zinc-950">
+            Scheduling covers publishing a <em>new</em> listing from a draft — a scheduled job holds
+            the images it will upload. An edit to listings that are already live has nothing to
+            render ahead of time, so it isn&apos;t schedulable yet.{" "}
+            <Link href="/schedule" className="font-medium text-primary underline underline-offset-2">
+              See scheduled listings
+            </Link>
+          </div>
+        )}
 
         {loadError && (
           <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-300">
@@ -350,58 +554,41 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
           </div>
         )}
         {results && (
-          <div role="status" className="mt-4 rounded-xl border border-black/10 bg-white px-4 py-3 text-sm dark:border-white/15 dark:bg-zinc-950">
+          <div
+            role="status"
+            className="mt-4 rounded-xl border border-black/10 bg-white px-4 py-3 text-sm dark:border-white/15 dark:bg-zinc-950"
+          >
             Saved {results.filter((r) => r.ok).length} of {results.length} listings.
             {results.some((r) => !r.ok) && " Rows that failed keep their changes below."}
           </div>
         )}
 
         <div className="mt-6 flex flex-col gap-6 lg:flex-row">
-          {/* ---- left sidebar: which field group is being edited ---- */}
-          <aside className="lg:w-52 lg:shrink-0">
-            <nav className="space-y-0.5">
-              {BULK_SECTIONS.map((s) => (
-                <button
-                  key={s.key}
-                  type="button"
-                  onClick={() => setActiveSection(s.key)}
-                  className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition-colors ${
-                    activeSection === s.key
-                      ? "bg-black text-white dark:bg-white dark:text-black"
-                      : "text-zinc-600 hover:bg-black/[.04] dark:text-zinc-400 dark:hover:bg-white/[.06]"
-                  }`}
-                >
-                  {s.label}
-                </button>
-              ))}
-            </nav>
+          <aside className="lg:w-56 lg:shrink-0">
+            <BulkSidebar selection={selection} onSelect={setSelection} pendingByField={pendingByField} />
           </aside>
 
-          {/* ---- main: one row per listing ---- */}
           <div className="min-w-0 flex-1">
-            <label className="block text-sm">
+            <h2 className="text-sm font-semibold text-zinc-800 dark:text-zinc-100">{label}</h2>
+
+            <label className="mt-2 block text-sm">
               <span className="sr-only">Search listings</span>
               <input
                 type="search"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search these listings by title…"
-                className={`${inputCls} h-10`}
+                className={`${INPUT_CLS} h-10`}
               />
             </label>
 
-            {section.fields.length > 0 && (
-              <ApplyToAll
-                section={section.label}
-                fields={section.fields}
-                values={applyToAll}
-                sections={sections}
-                shippingProfiles={shippingProfiles}
-                onChange={(field, value) => setApplyToAll((p) => ({ ...p, [field]: value }))}
-                onApply={(field) => {
-                  const value = applyToAll[field];
-                  if (value !== undefined) applyValueToAll(field, value);
-                }}
+            {showApplyControl && (
+              <BulkApplyControl
+                field={field}
+                options={options}
+                attributeChoices={attributeChoicesAcross(field, listings ?? [], options)}
+                targetedCount={targetedCount}
+                onApply={applyToTicked}
               />
             )}
 
@@ -464,21 +651,29 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
                       </div>
                     </div>
 
-                    <div className="mt-3 space-y-3 pl-7">
-                      {section.fields.length === 0 ? (
-                        <MediaSection listing={listing} />
+                    <div className="mt-3 pl-7">
+                      {field === "photos" || field === "videos" ? (
+                        <MediaStrip listing={listing} kind={field} />
+                      ) : field === "variations" ? (
+                        <VariationsCard
+                          listing={listing}
+                          grid={
+                            (edited[listing.listingId]?.variations as VariationGrid | undefined) ??
+                            grids[listing.listingId] ??
+                            null
+                          }
+                          loading={!gridsLoaded}
+                          processingProfiles={options.processingProfiles}
+                          onChange={(grid) => setValue(listing.listingId, "variations", grid as FieldValue)}
+                        />
                       ) : (
-                        section.fields.map((field) => (
-                          <FieldInput
-                            key={field}
-                            field={field}
-                            listing={listing}
-                            value={valueOf(listing, field)}
-                            sections={sections}
-                            shippingProfiles={shippingProfiles}
-                            onChange={(value) => setValue(listing.listingId, field, value)}
-                          />
-                        ))
+                        <BulkFieldInput
+                          field={field}
+                          listing={listing}
+                          value={valueOf(listing, field)}
+                          options={options}
+                          onChange={(value) => setValue(listing.listingId, field, value)}
+                        />
                       )}
                     </div>
                   </div>
@@ -492,376 +687,142 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
   );
 }
 
-/** Inventory fields a variation listing can't take from a single row. */
-const INVENTORY_LOCKED = new Set<BulkFieldKey>(["price", "quantity", "sku"]);
-
-const FIELD_LABELS: Record<BulkFieldKey, string> = {
-  title: "Title",
-  description: "Description",
-  tags: "Tags",
-  shopSectionId: "Shop section",
-  shouldAutoRenew: "Renew automatically",
-  isTaxable: "Charge tax",
-  price: "Price",
-  quantity: "Quantity",
-  sku: "SKU",
-  shippingProfileId: "Shipping profile",
-};
-
-/** Media has nothing safely bulk-editable — show what's there and link to the editor. */
-function MediaSection({ listing }: { listing: BulkListingDetail }) {
-  return (
-    <p className="text-xs text-zinc-500 dark:text-zinc-400">
-      Photos are edited per listing.{" "}
-      <Link
-        href={`/mockups?mode=existing&listingId=${listing.listingId}&title=${encodeURIComponent(listing.title)}`}
-        className="font-medium text-primary underline underline-offset-2"
-      >
-        Open in the listing editor
-      </Link>{" "}
-      to add or replace images.
-    </p>
-  );
-}
-
-/** The counter shown under a field Etsy actually limits. */
-function CharacterCounter({ field, value }: { field: BulkFieldKey; value: string }) {
-  const remaining = remainingCharacters(field, value);
-  if (remaining == null) return null;
-  return (
-    <span
-      className={`mt-0.5 block text-right font-mono text-[11px] ${
-        remaining < 0 ? "text-red-600 dark:text-red-400" : "text-zinc-500"
-      }`}
-    >
-      {remaining} left
-    </span>
-  );
-}
-
-function FieldInput({
-  field,
-  listing,
-  value,
-  sections,
-  shippingProfiles,
-  onChange,
-}: {
-  field: BulkFieldKey;
-  listing: BulkListingDetail;
-  value: FieldValue;
-  sections: SectionOption[];
-  shippingProfiles: ShippingProfileOption[];
-  onChange: (value: FieldValue) => void;
-}) {
-  const label = FIELD_LABELS[field];
-  const id = `${field}-${listing.listingId}`;
-  // Every row shows the same visible "Title"/"Price"/… caption, so the
-  // control's own accessible name carries the listing it belongs to —
-  // otherwise a screen reader (and a test) hears one field repeated N times.
-  const ariaLabel = `${label} for ${listing.title}`;
-
-  if (INVENTORY_LOCKED.has(field) && listing.hasVariations) {
-    return (
-      <p className="text-xs text-zinc-500 dark:text-zinc-400">
-        {label} varies by variation on this listing — edit it in the listing editor.
-      </p>
-    );
-  }
-
-  if (field === "tags") {
-    return (
-      <TagsInput
-        id={id}
-        ariaLabel={ariaLabel}
-        tags={Array.isArray(value) ? value : []}
-        onChange={(tags) => onChange(tags)}
-      />
-    );
-  }
-
-  if (field === "description") {
-    return (
-      <label htmlFor={id} className="block text-sm">
-        <span className="text-xs text-zinc-500">{label}</span>
-        <textarea
-          id={id}
-          aria-label={ariaLabel}
-          rows={4}
-          value={String(value)}
-          onChange={(e) => onChange(e.target.value)}
-          className={`${inputCls} mt-1 resize-y py-2`}
-        />
-      </label>
-    );
-  }
-
-  if (field === "shouldAutoRenew" || field === "isTaxable") {
-    return (
-      <label htmlFor={id} className="flex items-center gap-2 text-sm">
-        <input
-          id={id}
-          aria-label={ariaLabel}
-          type="checkbox"
-          checked={value === true}
-          onChange={(e) => onChange(e.target.checked)}
-          className="h-4 w-4 cursor-pointer accent-primary"
-        />
-        <span className="text-xs text-zinc-500">{label}</span>
-      </label>
-    );
-  }
-
-  if (field === "shopSectionId" || field === "shippingProfileId") {
-    const options =
-      field === "shopSectionId"
-        ? sections.map((s) => ({ value: String(s.shopSectionId), label: s.title }))
-        : shippingProfiles.map((p) => ({ value: String(p.shippingProfileId), label: p.title }));
-    return (
-      <label htmlFor={id} className="block text-sm">
-        <span className="text-xs text-zinc-500">{label}</span>
-        <select
-          id={id}
-          aria-label={ariaLabel}
-          value={String(value)}
-          onChange={(e) => onChange(e.target.value)}
-          className={`${inputCls} mt-1 h-9`}
-        >
-          <option value="">Keep as is</option>
-          {options.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
-          ))}
-        </select>
-      </label>
-    );
-  }
-
-  const numeric = field === "price" || field === "quantity";
-  const limit = CHARACTER_LIMITS[field];
-  // The counter sits outside the <label> deliberately: inside, its text
-  // becomes part of the field's accessible name ("Title140 left").
-  return (
-    <div className="text-sm">
-      <label htmlFor={id} className="block text-xs text-zinc-500">
-        {label}
-      </label>
-      <input
-        id={id}
-        aria-label={ariaLabel}
-        type={numeric ? "number" : "text"}
-        inputMode={field === "quantity" ? "numeric" : undefined}
-        step={field === "price" ? "0.01" : undefined}
-        min={numeric ? "0" : undefined}
-        maxLength={limit}
-        value={String(value)}
-        onChange={(e) => onChange(e.target.value)}
-        className={`${inputCls} mt-1 h-9`}
-      />
-      <CharacterCounter field={field} value={String(value)} />
-    </div>
-  );
-}
-
-/** Tag chips with Etsy's own count and per-tag length caps. */
-function TagsInput({
-  id,
-  ariaLabel,
-  tags,
-  onChange,
-}: {
-  id: string;
-  ariaLabel: string;
-  tags: string[];
-  onChange: (tags: string[]) => void;
-}) {
-  const [draft, setDraft] = useState("");
-
-  function addTag() {
-    const tag = draft.trim().slice(0, MAX_TAG_LENGTH);
-    setDraft("");
-    if (!tag || tags.length >= MAX_TAGS) return;
-    if (tags.some((t) => t.toLowerCase() === tag.toLowerCase())) return;
-    onChange([...tags, tag]);
-  }
-
-  return (
-    <div className="text-sm">
-      <span className="flex justify-between text-xs text-zinc-500">
-        <span>Tags</span>
-        <span className="font-mono">
-          {tags.length}/{MAX_TAGS}
-        </span>
-      </span>
-      <div className="mt-1 flex flex-wrap items-center gap-1.5 rounded-lg border border-black/10 p-1.5 dark:border-white/15">
-        {tags.map((tag) => (
-          <span
-            key={tag}
-            className="flex items-center gap-1 rounded-full bg-black/[.06] px-2 py-0.5 text-xs dark:bg-white/10"
-          >
-            {tag}
-            <button
-              type="button"
-              onClick={() => onChange(tags.filter((t) => t !== tag))}
-              aria-label={`Remove ${tag} tag`}
-              className="text-zinc-500 hover:text-red-600"
-            >
-              ×
-            </button>
-          </span>
-        ))}
-        {tags.length < MAX_TAGS && (
-          <input
-            id={id}
-            aria-label={ariaLabel}
-            type="text"
-            value={draft}
-            maxLength={MAX_TAG_LENGTH}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === ",") {
-                e.preventDefault();
-                addTag();
-              }
-            }}
-            onBlur={addTag}
-            placeholder={tags.length === 0 ? "Type a tag, press Enter…" : ""}
-            className="min-w-[100px] flex-1 border-none bg-transparent px-1 py-0.5 text-sm outline-none"
-          />
-        )}
-      </div>
-      <span className="mt-0.5 block text-right font-mono text-[11px] text-zinc-500">
-        {MAX_TAG_LENGTH - draft.length} left in this tag
-      </span>
-    </div>
-  );
-}
-
 /**
- * The explicit "write this value to every ticked listing" control — separate
- * from the per-row inputs, so one value is only ever spread across listings
- * when the user asks for it by name.
+ * Turn one edited field into its patch entry, or null when the typed value
+ * isn't usable yet (an empty number box, an unpicked dropdown) — an
+ * in-progress value is simply not part of the save.
  */
-function ApplyToAll({
-  section,
-  fields,
-  values,
-  sections,
-  shippingProfiles,
-  onChange,
-  onApply,
-}: {
-  section: string;
-  fields: readonly BulkFieldKey[];
-  values: Partial<Record<BulkFieldKey, FieldValue>>;
-  sections: SectionOption[];
-  shippingProfiles: ShippingProfileOption[];
-  onChange: (field: BulkFieldKey, value: FieldValue) => void;
-  onApply: (field: BulkFieldKey) => void;
-}) {
-  return (
-    <section
-      aria-label={`Apply to all selected — ${section}`}
-      className="mt-4 rounded-xl border border-dashed border-black/15 bg-white p-4 dark:border-white/20 dark:bg-zinc-950"
-    >
-      <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
-        Apply to all selected
-      </h2>
-      <div className="mt-2 space-y-2">
-        {fields.map((field) => {
-          const value = values[field];
-          const id = `apply-all-${field}`;
-          const ariaLabel = `${FIELD_LABELS[field]} to apply to all`;
-          return (
-            <div key={field} className="flex flex-wrap items-end gap-2">
-              <div className="min-w-[12rem] flex-1">
-                {field === "tags" ? (
-                  <TagsInput
-                    id={id}
-                    ariaLabel={ariaLabel}
-                    tags={Array.isArray(value) ? value : []}
-                    onChange={(tags) => onChange(field, tags)}
-                  />
-                ) : field === "shouldAutoRenew" || field === "isTaxable" ? (
-                  <label htmlFor={id} className="flex items-center gap-2 text-sm">
-                    <input
-                      id={id}
-                      aria-label={ariaLabel}
-                      type="checkbox"
-                      checked={value === true}
-                      onChange={(e) => onChange(field, e.target.checked)}
-                      className="h-4 w-4 cursor-pointer accent-primary"
-                    />
-                    <span className="text-xs text-zinc-500">{FIELD_LABELS[field]}</span>
-                  </label>
-                ) : field === "shopSectionId" || field === "shippingProfileId" ? (
-                  <label htmlFor={id} className="block text-sm">
-                    <span className="text-xs text-zinc-500">{FIELD_LABELS[field]}</span>
-                    <select
-                      id={id}
-                      aria-label={ariaLabel}
-                      value={String(value ?? "")}
-                      onChange={(e) => onChange(field, e.target.value)}
-                      className={`${inputCls} mt-1 h-9`}
-                    >
-                      <option value="">Choose…</option>
-                      {(field === "shopSectionId"
-                        ? sections.map((s) => ({ value: String(s.shopSectionId), label: s.title }))
-                        : shippingProfiles.map((p) => ({
-                            value: String(p.shippingProfileId),
-                            label: p.title,
-                          }))
-                      ).map((o) => (
-                        <option key={o.value} value={o.value}>
-                          {o.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : field === "description" ? (
-                  <label htmlFor={id} className="block text-sm">
-                    <span className="text-xs text-zinc-500">{FIELD_LABELS[field]}</span>
-                    <textarea
-                      id={id}
-                      aria-label={ariaLabel}
-                      rows={3}
-                      value={String(value ?? "")}
-                      onChange={(e) => onChange(field, e.target.value)}
-                      className={`${inputCls} mt-1 resize-y py-2`}
-                    />
-                  </label>
-                ) : (
-                  <div className="text-sm">
-                    <label htmlFor={id} className="block text-xs text-zinc-500">
-                      {FIELD_LABELS[field]}
-                    </label>
-                    <input
-                      id={id}
-                      aria-label={ariaLabel}
-                      type={field === "price" || field === "quantity" ? "number" : "text"}
-                      step={field === "price" ? "0.01" : undefined}
-                      min={field === "price" || field === "quantity" ? "0" : undefined}
-                      maxLength={CHARACTER_LIMITS[field]}
-                      value={String(value ?? "")}
-                      onChange={(e) => onChange(field, e.target.value)}
-                      className={`${inputCls} mt-1 h-9`}
-                    />
-                    <CharacterCounter field={field} value={String(value ?? "")} />
-                  </div>
-                )}
-              </div>
-              <button
-                type="button"
-                onClick={() => onApply(field)}
-                className="h-9 shrink-0 rounded-full border border-black/10 px-3 text-xs font-medium transition-colors hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
-              >
-                Apply {FIELD_LABELS[field].toLowerCase()} to all
-              </button>
-            </div>
-          );
-        })}
-      </div>
-    </section>
-  );
+function patchEntry(field: BulkFieldKey, value: FieldValue): BulkListingPatch | null {
+  const asId = (): number | null => {
+    const id = Number.parseInt(String(value), 10);
+    return Number.isInteger(id) && id > 0 ? id : null;
+  };
+  switch (field) {
+    case "title":
+      return typeof value === "string" && value.trim() ? { title: value.trim() } : null;
+    case "description":
+      return typeof value === "string" ? { description: value } : null;
+    case "tags":
+      return Array.isArray(value) && value.length > 0 ? { tags: value as string[] } : null;
+    case "materials":
+      return Array.isArray(value) && value.length > 0 ? { materials: value as string[] } : null;
+    case "about": {
+      const about = value as AboutValue;
+      return about.whoMade && about.whenMade
+        ? { whoMade: about.whoMade, whenMade: about.whenMade, isSupply: about.isSupply }
+        : null;
+    }
+    case "productionPartners": {
+      const ids = (Array.isArray(value) ? (value as string[]) : [])
+        .map((id) => Number.parseInt(id, 10))
+        .filter((id) => Number.isInteger(id) && id > 0);
+      return { productionPartnerIds: ids };
+    }
+    case "personalization":
+      return Array.isArray(value)
+        ? { personalization: value as PersonalizationQuestionInput[] }
+        : null;
+    case "taxonomyId": {
+      const id = asId();
+      return id == null ? null : { taxonomyId: id };
+    }
+    case "shopSectionId": {
+      const id = asId();
+      return id == null ? null : { shopSectionId: id };
+    }
+    case "shippingProfileId": {
+      const id = asId();
+      return id == null ? null : { shippingProfileId: id };
+    }
+    case "returnPolicyId": {
+      const id = asId();
+      return id == null ? null : { returnPolicyId: id };
+    }
+    case "readinessStateId": {
+      const id = asId();
+      return id == null ? null : { readinessStateId: id };
+    }
+    case "price": {
+      const price = Number.parseFloat(String(value));
+      return Number.isFinite(price) && price > 0 ? { price } : null;
+    }
+    case "quantity": {
+      const quantity = Number.parseInt(String(value), 10);
+      return Number.isInteger(quantity) && quantity >= 0 ? { quantity } : null;
+    }
+    case "sku":
+      return typeof value === "string" ? { sku: value } : null;
+    case "itemWeight": {
+      const weight = value as WeightValue;
+      const parsed = Number.parseFloat(weight.weight);
+      return Number.isFinite(parsed) && parsed > 0 && weight.unit
+        ? { itemWeight: parsed, itemWeightUnit: weight.unit as BulkListingPatch["itemWeightUnit"] }
+        : null;
+    }
+    case "itemSize": {
+      const size = value as SizeValue;
+      if (!size.unit) return null;
+      const patch: BulkListingPatch = {
+        itemDimensionsUnit: size.unit as BulkListingPatch["itemDimensionsUnit"],
+      };
+      const dimensions = [
+        ["length", "itemLength"],
+        ["width", "itemWidth"],
+        ["height", "itemHeight"],
+      ] as const;
+      let any = false;
+      for (const [from, to] of dimensions) {
+        const parsed = Number.parseFloat(size[from]);
+        if (Number.isFinite(parsed) && parsed > 0) {
+          Object.assign(patch, { [to]: parsed });
+          any = true;
+        }
+      }
+      return any ? patch : null;
+    }
+    case "variations": {
+      const grid = value as unknown as VariationGrid;
+      return grid && Array.isArray(grid.combinations) && grid.combinations.length > 0
+        ? { variations: toVariationPatch(grid) }
+        : null;
+    }
+    default:
+      return null;
+  }
+}
+
+/** Fold a saved patch back into the row, so it stops reading as pending. */
+function applySaved(listing: BulkListingDetail, patch: BulkListingPatch): BulkListingDetail {
+  return {
+    ...listing,
+    ...(patch.title !== undefined ? { title: patch.title } : {}),
+    ...(patch.description !== undefined ? { description: patch.description } : {}),
+    ...(patch.tags !== undefined ? { tags: patch.tags } : {}),
+    ...(patch.materials !== undefined ? { materials: patch.materials } : {}),
+    ...(patch.whoMade !== undefined ? { whoMade: patch.whoMade } : {}),
+    ...(patch.whenMade !== undefined ? { whenMade: patch.whenMade } : {}),
+    ...(patch.isSupply !== undefined ? { isSupply: patch.isSupply } : {}),
+    ...(patch.productionPartnerIds !== undefined
+      ? { productionPartnerIds: patch.productionPartnerIds }
+      : {}),
+    ...(patch.taxonomyId !== undefined ? { taxonomyId: patch.taxonomyId } : {}),
+    ...(patch.shopSectionId !== undefined ? { shopSectionId: patch.shopSectionId } : {}),
+    ...(patch.personalization !== undefined
+      ? { personalizationQuestions: patch.personalization }
+      : {}),
+    ...(patch.shippingProfileId !== undefined ? { shippingProfileId: patch.shippingProfileId } : {}),
+    ...(patch.returnPolicyId !== undefined ? { returnPolicyId: patch.returnPolicyId } : {}),
+    ...(patch.readinessStateId !== undefined ? { readinessStateId: patch.readinessStateId } : {}),
+    ...(patch.itemWeight !== undefined ? { itemWeight: patch.itemWeight } : {}),
+    ...(patch.itemWeightUnit !== undefined ? { itemWeightUnit: patch.itemWeightUnit } : {}),
+    ...(patch.itemLength !== undefined ? { itemLength: patch.itemLength } : {}),
+    ...(patch.itemWidth !== undefined ? { itemWidth: patch.itemWidth } : {}),
+    ...(patch.itemHeight !== undefined ? { itemHeight: patch.itemHeight } : {}),
+    ...(patch.itemDimensionsUnit !== undefined
+      ? { itemDimensionsUnit: patch.itemDimensionsUnit }
+      : {}),
+    ...(patch.price !== undefined ? { price: patch.price } : {}),
+    ...(patch.quantity !== undefined ? { quantity: patch.quantity } : {}),
+    ...(patch.sku !== undefined ? { sku: patch.sku } : {}),
+  };
 }
