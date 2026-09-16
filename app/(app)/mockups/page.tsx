@@ -32,6 +32,7 @@ import type { EtsyListingMedia } from "@/app/components/listing-media/existing-m
 import { checkPickedVideo } from "@/app/components/listing-media/video-file";
 import type { DraftPhotosData, DraftSource } from "@/lib/drafts/types";
 import { draftVideoSlots, editorVideoSlots, type RestoredDraftVideoSlot } from "@/lib/drafts/videos";
+import { draftSnapshotKey } from "@/lib/drafts/snapshot";
 import { useUnsavedChangesGuard } from "@/app/components/unsaved-changes/useUnsavedChangesGuard";
 import { howItsMadeError } from "@/lib/etsy/listing-classification";
 import { personalizationQuestionsError } from "@/lib/etsy/listing-personalization";
@@ -497,6 +498,12 @@ function MockupsPageInner() {
   const [copySourceListingId, setCopySourceListingId] = useState(() =>
     searchParams.get("mode") === "copy" && !searchParams.get("draftId")
       ? (Number.parseInt(searchParams.get("listingId") ?? "", 10) || null)
+      : null,
+  );
+  /** The existing listing whose saved fields are being loaded into the form — autosave and the unsaved-changes count wait for it. */
+  const [hydrateListingId, setHydrateListingId] = useState<number | null>(() =>
+    publishModeFromParams(searchParams) === "existing" && !searchParams.get("draftId")
+      ? (targetListingFromParams(searchParams)?.listingId ?? null)
       : null,
   );
   const [draftId, setDraftId] = useState<string | null>(null);
@@ -1135,6 +1142,9 @@ function MockupsPageInner() {
         ) {
           setCopySourceListingId(body.source.listingId);
         }
+        if (body.source?.mode === "existing" && !body.formData?.title) {
+          setHydrateListingId(body.source.listingId);
+        }
         setMockups(restoredMockups);
         setDesigns(restoredDesigns);
         setOwnImages(restoredOwn);
@@ -1169,6 +1179,29 @@ function MockupsPageInner() {
     // above, to restore a saved copy/existing identity; neither is otherwise
     // touched again after mount.
   }, [initialDraftId]);
+
+  // ---- "existing" mode: the listing's saved fields, from the listings cache, once ----
+  useEffect(() => {
+    if (hydrateListingId == null) return;
+    const controller = new AbortController();
+    fetch(`/api/etsy/listings/${hydrateListingId}/editor`, { signal: controller.signal })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(await errorFrom(res));
+        return (await res.json()) as { form: ListingFormValue; warning: string | null };
+      })
+      .then((body) => {
+        if (controller.signal.aborted) return;
+        setListingForm({ ...EMPTY_LISTING_FORM, ...body.form });
+        if (body.warning) setError(body.warning);
+        setHydrateListingId(null);
+      })
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) return;
+        setError(`Couldn't load this listing's details: ${err instanceof Error ? err.message : "request failed"}`);
+        setHydrateListingId(null);
+      });
+    return () => controller.abort();
+  }, [hydrateListingId]);
 
   // ---- "copy" mode: prefill title/description/tags/price/section/photos
   // from the source listing, once. GET-only (`getListingCopySource`) — the
@@ -1277,9 +1310,64 @@ function MockupsPageInner() {
     [listingForm, mockups.length, designs.length, ownImages.length, videos, editRevision],
   );
 
+  /** What a draft save writes (bar the thumbnail) — compared by value to tell a real change from a re-render. */
+  const draftPayload = useMemo(() => {
+    const photosData: DraftPhotosData = {
+      mockups: mockups
+        .filter((m) => uploadedAssetKeys.has(`psd:${m.id}`))
+        .map((m) => ({
+          id: m.id,
+          name: m.name,
+          contentHash: m.contentHash,
+          calibration: m.calibration,
+          include: m.include,
+        })),
+      designs: designs
+        .filter((d) => uploadedAssetKeys.has(`design:${d.id}`))
+        .map((d) => ({ id: d.id, name: d.name })),
+      ownImages: ownImages
+        .filter((o) => uploadedAssetKeys.has(`own:${o.id}`))
+        .map((o) => ({ id: o.id, name: o.file.name })),
+      imageOrder,
+      removedJobKeys,
+      removedEtsyImageIds,
+      altTextBySlot,
+      activeTab,
+      videos: draftVideoSlots(videos, (videoId) => uploadedAssetKeys.has(`video:${videoId}`)),
+    };
+
+    // Persisted with the draft itself (not just the editor URL) so
+    // resuming from "My drafts" still knows this is a copy/edit — see the
+    // restore effect above, which reads it back as `body.source`.
+    const source: DraftSource | null =
+      (publishMode === "copy" || publishMode === "existing") && targetListing
+        ? { mode: publishMode, listingId: targetListing.listingId }
+        : null;
+
+    return { title: listingForm.title, formData: listingForm, photosData, source };
+  }, [
+    mockups,
+    designs,
+    ownImages,
+    uploadedAssetKeys,
+    imageOrder,
+    removedJobKeys,
+    removedEtsyImageIds,
+    altTextBySlot,
+    activeTab,
+    videos,
+    listingForm,
+    publishMode,
+    targetListing,
+  ]);
+  const draftSnapshot = useMemo(() => draftSnapshotKey(draftPayload), [draftPayload]);
+  /** The content last saved — or, until the first user edit, the content as loaded. Autosave only runs when it differs. */
+  const lastSavedSnapshot = useRef<string | null>(null);
+  const loadSettled = draftStatus !== "restoring" && hydrateListingId == null;
+
   /** Saves now. Resolves to the draft's id, or `null` when there was nothing to save or saving failed. */
   const saveDraftNow = useCallback(async (): Promise<string | null> => {
-    if (draftStatus === "restoring") return null;
+    if (!loadSettled) return null;
     if (!draftId && !hasDraftableContent()) return null;
     setDraftStatus("saving");
     try {
@@ -1312,50 +1400,16 @@ function MockupsPageInner() {
         }
       }
 
-      const photosData: DraftPhotosData = {
-        mockups: mockups
-          .filter((m) => uploadedAssetKeys.has(`psd:${m.id}`))
-          .map((m) => ({
-            id: m.id,
-            name: m.name,
-            contentHash: m.contentHash,
-            calibration: m.calibration,
-            include: m.include,
-          })),
-        designs: designs
-          .filter((d) => uploadedAssetKeys.has(`design:${d.id}`))
-          .map((d) => ({ id: d.id, name: d.name })),
-        ownImages: ownImages
-          .filter((o) => uploadedAssetKeys.has(`own:${o.id}`))
-          .map((o) => ({ id: o.id, name: o.file.name })),
-        imageOrder,
-        removedJobKeys,
-        removedEtsyImageIds,
-        altTextBySlot,
-        activeTab,
-        videos: draftVideoSlots(videos, (videoId) => uploadedAssetKeys.has(`video:${videoId}`)),
-      };
-
-      // Persisted with the draft itself (not just the editor URL) so
-      // resuming from "My drafts" still knows this is a copy/edit — see the
-      // restore effect above, which reads it back as `body.source`.
-      const source: DraftSource | null =
-        (publishMode === "copy" || publishMode === "existing") && targetListing
-          ? { mode: publishMode, listingId: targetListing.listingId }
-          : null;
-
       const res = await fetch(`/api/drafts/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          title: listingForm.title,
-          formData: listingForm,
-          photosData,
-          source,
+          ...draftPayload,
           ...(hasThumbnail !== undefined ? { hasThumbnail } : {}),
         }),
       });
       if (!res.ok) throw new Error(await errorFrom(res));
+      lastSavedSnapshot.current = draftSnapshot;
       setDraftStatus("saved");
       setDraftError(null);
       setSavedRevision(editRevision);
@@ -1366,24 +1420,13 @@ function MockupsPageInner() {
       return null;
     }
   }, [
+    loadSettled,
     draftId,
-    draftStatus,
     hasDraftableContent,
     photoSlots,
-    mockups,
-    designs,
-    ownImages,
-    uploadedAssetKeys,
-    imageOrder,
-    removedJobKeys,
-    removedEtsyImageIds,
-    altTextBySlot,
-    activeTab,
-    videos,
+    draftPayload,
+    draftSnapshot,
     editRevision,
-    listingForm,
-    publishMode,
-    targetListing,
     router,
     searchParams,
   ]);
@@ -1394,23 +1437,28 @@ function MockupsPageInner() {
     ownImages.some((o) => !uploadedAssetKeys.has(`own:${o.id}`)) ||
     videos.some((v) => v?.kind === "file" && !(v.id && uploadedAssetKeys.has(`video:${v.id}`)));
   const hasUnsavedChanges =
-    draftStatus !== "restoring" &&
+    loadSettled &&
     editRevision !== publishedRevision &&
     (editRevision !== savedRevision || hasPendingUploads);
   const { dialog: unsavedDialog } = useUnsavedChangesGuard(hasUnsavedChanges ? 1 : 0);
 
   // ---- autosave, debounced so a closed tab doesn't lose the work ----
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Only after a user edit, and only when the content differs from what was
+  // loaded or last saved: opening a listing or draft never writes it back.
   useEffect(() => {
-    if (draftStatus === "restoring") return;
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => {
-      void saveDraftNow();
+    if (loadSettled && editRevision === 0) lastSavedSnapshot.current = draftSnapshot;
+  }, [loadSettled, editRevision, draftSnapshot]);
+  const saveDraftRef = useRef(saveDraftNow);
+  useEffect(() => {
+    saveDraftRef.current = saveDraftNow;
+  }, [saveDraftNow]);
+  useEffect(() => {
+    if (!loadSettled || editRevision === 0 || draftSnapshot === lastSavedSnapshot.current) return;
+    const t = setTimeout(() => {
+      void saveDraftRef.current();
     }, 2000);
-    return () => {
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-    };
-  }, [saveDraftNow, draftStatus]);
+    return () => clearTimeout(t);
+  }, [loadSettled, editRevision, draftSnapshot]);
 
   const buildBatchForm = useCallback(
     (publishTo?: Record<string, unknown>) => {
@@ -1878,7 +1926,9 @@ function MockupsPageInner() {
           <div className="min-w-0">
             <p className="truncate text-xs text-zinc-500">{shopName ?? "Your shop"}</p>
             <p className="truncate text-sm font-semibold text-black dark:text-zinc-50">
-              {listingForm.title.trim() || "Untitled listing"}
+              {listingForm.title.trim() ||
+                (hydrateListingId != null ? targetListing?.title : null) ||
+                "Untitled listing"}
             </p>
           </div>
 
@@ -1887,6 +1937,7 @@ function MockupsPageInner() {
               className={`text-xs ${draftStatus === "error" ? "text-red-600 dark:text-red-400" : "text-zinc-400 dark:text-zinc-500"}`}
             >
               {draftStatus === "restoring" && "Loading draft…"}
+              {draftStatus !== "restoring" && hydrateListingId != null && "Loading listing…"}
               {draftStatus === "saving" && "Saving…"}
               {draftStatus === "saved" && "Saved"}
               {draftStatus === "error" && (draftError || "Could not save draft")}
@@ -1894,7 +1945,7 @@ function MockupsPageInner() {
             <button
               type="button"
               onClick={() => void saveDraftNow()}
-              disabled={draftStatus === "saving" || draftStatus === "restoring"}
+              disabled={draftStatus === "saving" || !loadSettled}
               className="h-9 rounded-full border border-black/10 px-4 text-sm font-medium transition-colors hover:bg-black/[.04] disabled:opacity-40 dark:border-white/15 dark:hover:bg-white/[.06]"
             >
               Save draft
@@ -2335,12 +2386,16 @@ function MockupsPageInner() {
               </div>
             )}
 
-            <ListingForm
-              value={listingForm}
-              onChange={edit(setListingForm)}
-              activeTab={isListingFormTab(activeTab) ? activeTab : null}
-              onGoToTab={setActiveTab}
-            />
+            {hydrateListingId != null && isListingFormTab(activeTab) ? (
+              <p className="text-sm text-zinc-500">Loading listing…</p>
+            ) : (
+              <ListingForm
+                value={listingForm}
+                onChange={edit(setListingForm)}
+                activeTab={isListingFormTab(activeTab) ? activeTab : null}
+                onGoToTab={setActiveTab}
+              />
+            )}
           </div>
         </div>
       </div>

@@ -68,6 +68,9 @@ export interface BulkListingDetail {
   itemDimensionsUnit: DimensionUnit | null;
   shouldAutoRenew: boolean;
   isTaxable: boolean;
+  /** Shown at the top of the shop home (`featured_rank` set). */
+  featured: boolean;
+  shopId: number | null;
   /** Major currency units, or null when Etsy omits the price. */
   price: number | null;
   quantity: number;
@@ -96,6 +99,7 @@ interface RawPersonalizationQuestion {
 
 interface RawBatchListing {
   listing_id: number;
+  shop_id?: number;
   title?: string;
   description?: string;
   tags?: string[];
@@ -127,6 +131,7 @@ interface RawBatchListing {
   item_dimensions_unit?: string | null;
   should_auto_renew?: boolean;
   is_taxable?: boolean;
+  featured_rank?: number | null;
   price?: { amount: number; divisor: number; currency_code: string };
   quantity?: number;
   skus?: string[];
@@ -203,6 +208,8 @@ function mapDetail(raw: RawBatchListing): BulkListingDetail {
     itemDimensionsUnit: (raw.item_dimensions_unit || null) as DimensionUnit | null,
     shouldAutoRenew: raw.should_auto_renew === true,
     isTaxable: raw.is_taxable !== false,
+    featured: typeof raw.featured_rank === "number" && raw.featured_rank > 0,
+    shopId: positiveOrNull(raw.shop_id),
     price: raw.price && raw.price.divisor ? raw.price.amount / raw.price.divisor : null,
     quantity: typeof raw.quantity === "number" ? raw.quantity : 0,
     sku: (raw.skus ?? []).find((s) => s.trim().length > 0) ?? "",
