@@ -166,6 +166,70 @@ export async function listAllStoredListings(
   };
 }
 
+/**
+ * The stored rows for `listingIds` that really belong to this user and shop —
+ * the ownership gate every bulk action runs first. An id that isn't the
+ * caller's is simply absent from the result (never "forbidden"), so ids can't
+ * be probed; the caller reports it as "not found" against that row.
+ */
+export async function listStoredListingsByIds(
+  userId: string,
+  shopId: string,
+  listingIds: number[],
+): Promise<StoredListing[]> {
+  if (listingIds.length === 0) return [];
+  const rows = await prisma.listing.findMany({
+    where: { userId, shopId, listingId: { in: listingIds.map(String) }, removedAt: null },
+  });
+  const byId = new Map(rows.map((row) => [Number(row.listingId), toStoredListing(row)]));
+  // Caller's order — the bulk editor lists rows in the order they were selected.
+  return listingIds.map((id) => byId.get(id)).filter((l): l is StoredListing => l != null);
+}
+
+/**
+ * Mirror a just-saved bulk edit into the cached row, so the listings table
+ * reflects it without waiting for a full refresh. Only the columns the table
+ * actually shows are written.
+ *
+ * `price` is deliberately left alone: the cache stores it as a display string
+ * ("$19.99") built from Etsy's own currency code, which a bulk edit's bare
+ * number can't reproduce — the next refresh picks the new price up.
+ */
+export async function applyStoredListingPatch(
+  userId: string,
+  shopId: string,
+  listingId: number,
+  patch: { title?: string; sku?: string; quantity?: number; shopSectionId?: number },
+): Promise<void> {
+  const data: { title?: string; sku?: string; quantity?: number; shopSectionId?: number } = {};
+  if (patch.title !== undefined) data.title = patch.title;
+  if (patch.sku !== undefined) data.sku = patch.sku;
+  if (patch.quantity !== undefined) data.quantity = patch.quantity;
+  if (patch.shopSectionId !== undefined) data.shopSectionId = patch.shopSectionId;
+  if (Object.keys(data).length === 0) return;
+
+  await prisma.listing.updateMany({
+    where: { userId, shopId, listingId: String(listingId) },
+    data,
+  });
+}
+
+/**
+ * Mark listings deleted on Etsy as removed here too. Rows are never deleted
+ * (same as a refresh that no longer finds them), so the history survives.
+ */
+export async function markStoredListingsRemoved(
+  userId: string,
+  shopId: string,
+  listingIds: number[],
+): Promise<void> {
+  if (listingIds.length === 0) return;
+  await prisma.listing.updateMany({
+    where: { userId, shopId, listingId: { in: listingIds.map(String) }, removedAt: null },
+    data: { removedAt: new Date() },
+  });
+}
+
 /** Stored listing count for every state, for the listings page's sidebar filters. */
 export async function getStoredListingStateCounts(
   userId: string,
