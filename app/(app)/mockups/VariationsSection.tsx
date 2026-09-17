@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useMemo, useState, type KeyboardEvent } from "react";
+import { useId, useMemo, useState, type KeyboardEvent, type ReactNode } from "react";
 import { EditorSectionCard } from "./editor-sections";
 import type { ListingFormValue } from "./ListingForm";
 import type { TaxonomyNode, TaxonomyProperty } from "@/lib/etsy/taxonomy";
@@ -79,30 +79,54 @@ function variationPartial(state: VariationState, photos: Record<string, string>)
 }
 
 /**
- * The Variations section: cascading category dropdowns, then an inner tab bar
- * (Variations, Price, … Processing) over one combination model shared by
- * every tab. The Variations tab edits up to three property columns; the
- * others edit each combination's price, quantity, SKU, visibility, photo and
- * processing profile.
+ * The Variations section: cascading category dropdowns above the variation
+ * block — an inner tab bar (Variations, Price, … Processing) over one
+ * combination model shared by every tab. The Variations tab edits up to three
+ * property columns; the others edit each combination's price, quantity, SKU,
+ * visibility, photo and processing profile.
  */
 export default function VariationsSection({
   value,
   patch,
   taxonomyTree,
   taxonomyError,
-  variationProperties,
-  propertiesLoading,
-  propertiesError,
-  processingProfiles = null,
-  photoSlots = NO_PHOTOS,
-  currencyCode = null,
-  showErrors = false,
-  errorJump = 0,
-}: {
-  value: ListingFormValue;
-  patch: (partial: Partial<ListingFormValue>) => void;
+  ...block
+}: Omit<VariationBlockProps, "collapsible" | "renderAbove" | "initialTab" | "label" | "photosNote"> & {
   taxonomyTree: TaxonomyNode[] | null;
   taxonomyError: string | null;
+}) {
+  return (
+    <EditorSectionCard section="variations" className="space-y-4">
+      <VariationBlock
+        value={value}
+        patch={patch}
+        {...block}
+        collapsible
+        renderAbove={({ expanded, commit }) =>
+          expanded && (
+            <TaxonomyCascade
+              tree={taxonomyTree}
+              error={taxonomyError}
+              taxonomyId={value.taxonomyId}
+              taxonomyPath={value.taxonomyPath}
+              onSelect={(taxonomy) =>
+                commit(clearedVariationState(), "Changing the category", { ...taxonomy, properties: {} })
+              }
+            />
+          )
+        }
+      />
+    </EditorSectionCard>
+  );
+}
+
+export type VariationSubTab = SubTab;
+
+type CommitVariation = (next: VariationState, what: string, extra?: Partial<ListingFormValue>) => void;
+
+export interface VariationBlockProps {
+  value: ListingFormValue;
+  patch: (partial: Partial<ListingFormValue>) => void;
   variationProperties: TaxonomyProperty[];
   propertiesLoading: boolean;
   propertiesError: string | null;
@@ -114,8 +138,40 @@ export default function VariationsSection({
   showErrors?: boolean;
   /** Each change opens the tab and row of the first error. */
   errorJump?: number;
-}) {
-  const [tab, setTab] = useState<SubTab>("variations");
+  /** The sub-tab shown first. */
+  initialTab?: SubTab;
+  /** Adds the Show less / Show more toggle beside the tab bar. */
+  collapsible?: boolean;
+  /** Rendered above the tab bar, e.g. the category cascade. */
+  renderAbove?: (api: { expanded: boolean; commit: CommitVariation }) => ReactNode;
+  /** Shown on the Photos tab instead of its controls, where photos can't be assigned. */
+  photosNote?: string;
+  /** The tab bar's accessible name. */
+  label?: string;
+}
+
+/**
+ * The variation editor itself — tab bar, panels and the confirm-before-delete
+ * dialog — shared by the listing editor and every row of the bulk editor.
+ */
+export function VariationBlock({
+  value,
+  patch,
+  variationProperties,
+  propertiesLoading,
+  propertiesError,
+  processingProfiles = null,
+  photoSlots = NO_PHOTOS,
+  currencyCode = null,
+  showErrors = false,
+  errorJump = 0,
+  initialTab = "variations",
+  collapsible = false,
+  renderAbove,
+  photosNote,
+  label = "Variation details",
+}: VariationBlockProps) {
+  const [tab, setTab] = useState<SubTab>(initialTab);
   const [expanded, setExpanded] = useState(true);
   const [pending, setPending] = useState<PendingChange | null>(null);
   const [combinationsFor] = useState(createCombinationCache);
@@ -143,7 +199,7 @@ export default function VariationsSection({
   }
 
   /** Applies a structural edit, asking first when it would delete combination data. */
-  function commit(next: VariationState, what: string, extra: Partial<ListingFormValue> = {}) {
+  const commit: CommitVariation = (next, what, extra = {}) => {
     const partial = { ...variationPartial(next, value.variationPhotos), ...extra };
     const loss = combinationDataLoss(value, next);
     const photosBefore = Object.keys(prunedVariationPhotos(value.variations, value.variationPhotos)).length;
@@ -157,7 +213,7 @@ export default function VariationsSection({
     } else {
       patch(partial);
     }
-  }
+  };
 
   const confirm = (message: string, partial: Partial<ListingFormValue>) => setPending({ message, partial });
   const panelProps = { value, patch, confirm, model };
@@ -178,21 +234,11 @@ export default function VariationsSection({
   }
 
   return (
-    <EditorSectionCard section="variations" className="space-y-4">
-      {expanded && (
-        <TaxonomyCascade
-          tree={taxonomyTree}
-          error={taxonomyError}
-          taxonomyId={value.taxonomyId}
-          taxonomyPath={value.taxonomyPath}
-          onSelect={(taxonomy) =>
-            commit(clearedVariationState(), "Changing the category", { ...taxonomy, properties: {} })
-          }
-        />
-      )}
+    <>
+      {renderAbove?.({ expanded, commit })}
 
       <div className="flex items-end justify-between gap-3 border-b border-black/10 dark:border-white/15">
-        <div role="tablist" aria-label="Variation details" className="-mb-px flex overflow-x-auto">
+        <div role="tablist" aria-label={label} className="-mb-px flex overflow-x-auto">
           {VARIATION_SUB_TABS.map((t, i) => (
             <button
               key={t.key}
@@ -223,15 +269,17 @@ export default function VariationsSection({
             </button>
           ))}
         </div>
-        <button
-          type="button"
-          aria-expanded={expanded}
-          aria-controls={`${bodyId}-panel`}
-          onClick={() => setExpanded((x) => !x)}
-          className="mb-1.5 shrink-0 text-sm font-medium text-primary hover:underline"
-        >
-          {expanded ? "Show less" : "Show more"}
-        </button>
+        {collapsible && (
+          <button
+            type="button"
+            aria-expanded={expanded}
+            aria-controls={`${bodyId}-panel`}
+            onClick={() => setExpanded((x) => !x)}
+            className="mb-1.5 shrink-0 text-sm font-medium text-primary hover:underline"
+          >
+            {expanded ? "Show less" : "Show more"}
+          </button>
+        )}
       </div>
 
       {expanded && (
@@ -253,7 +301,11 @@ export default function VariationsSection({
           ) : tab === "visibility" ? (
             <VisibilityPanel {...panelProps} errors={errorsByTab.get("visibility")!} jump={jumpFor("visibility")} />
           ) : tab === "photos" ? (
+            photosNote ? (
+            <p className="text-sm text-zinc-500">{photosNote}</p>
+          ) : (
             <PhotosPanel {...panelProps} errors={errorsByTab.get("photos")!} jump={jumpFor("photos")} photoSlots={photoSlots} />
+          )
           ) : (
             <FieldTabPanel
               key={tab}
@@ -278,9 +330,10 @@ export default function VariationsSection({
           }}
         />
       )}
-    </EditorSectionCard>
+    </>
   );
 }
+
 
 function TaxonomyCascade({
   tree,

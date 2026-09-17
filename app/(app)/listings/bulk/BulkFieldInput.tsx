@@ -34,6 +34,7 @@ import type {
   BulkOptions,
   FieldValue,
   SizeValue,
+  TaxonomyProperty,
   WeightValue,
 } from "./types";
 
@@ -226,40 +227,15 @@ export default function BulkFieldInput({
         </p>
       );
     }
-    const attribute = value as AttributeValue;
-    const selected = attribute.values[0] ?? "";
     return (
-      <label htmlFor={id} className="block text-sm">
-        <span className="text-xs text-zinc-500">{property.displayName}</span>
-        <select
-          id={id}
-          aria-label={ariaLabel}
-          value={selected}
-          onChange={(e) => {
-            const picked = property.possibleValues.find((v) => v.name === e.target.value);
-            onChange(
-              picked && picked.valueId != null
-                ? {
-                    propertyId: property.propertyId,
-                    valueIds: [picked.valueId],
-                    values: [picked.name],
-                    scaleId: picked.scaleId,
-                  }
-                : { propertyId: property.propertyId, valueIds: [], values: [], scaleId: null },
-            );
-          }}
-          className={`${INPUT_CLS} mt-1 h-9`}
-        >
-          <option value="">Keep as is</option>
-          {property.possibleValues
-            .filter((v) => v.valueId != null)
-            .map((v) => (
-              <option key={v.valueId} value={v.name}>
-                {v.name}
-              </option>
-            ))}
-        </select>
-      </label>
+      <AttributeRow
+        id={id}
+        ariaLabel={ariaLabel}
+        listing={listing}
+        property={property}
+        attribute={value as AttributeValue}
+        onChange={onChange}
+      />
     );
   }
 
@@ -604,6 +580,77 @@ function PersonalizationRow({
         >
           + Add personalization
         </button>
+      )}
+    </div>
+  );
+}
+
+/** One Optional attribute: a value dropdown, paired with a Scale dropdown when the property has scales. */
+function AttributeRow({
+  id,
+  ariaLabel,
+  listing,
+  property,
+  attribute,
+  onChange,
+}: {
+  id: string;
+  ariaLabel: string;
+  listing: BulkListingDetail;
+  property: TaxonomyProperty;
+  attribute: AttributeValue;
+  onChange: (value: FieldValue) => void;
+}) {
+  const [chosenScale, setChosenScale] = useState<number | null>(null);
+  const scaleId = chosenScale ?? attribute.scaleId ?? property.scales[0]?.scaleId ?? null;
+  const values = property.possibleValues.filter(
+    (v) => v.valueId != null && (property.scales.length === 0 || v.scaleId === scaleId),
+  );
+  return (
+    <div className="flex flex-wrap items-end gap-2 text-sm">
+      <label htmlFor={id} className="block min-w-[12rem] flex-1">
+        <span className="text-xs text-zinc-500">{property.displayName}</span>
+        <select
+          id={id}
+          aria-label={ariaLabel}
+          value={attribute.values[0] ?? ""}
+          onChange={(e) => {
+            const picked = values.find((v) => v.name === e.target.value);
+            onChange(
+              picked && picked.valueId != null
+                ? { propertyId: property.propertyId, valueIds: [picked.valueId], values: [picked.name], scaleId: picked.scaleId }
+                : { propertyId: property.propertyId, valueIds: [], values: [], scaleId: null },
+            );
+          }}
+          className={`${INPUT_CLS} mt-1 h-9`}
+        >
+          <option value="">Keep as is</option>
+          {values.map((v) => (
+            <option key={v.valueId} value={v.name}>
+              {v.name}
+            </option>
+          ))}
+        </select>
+      </label>
+      {property.scales.length > 0 && (
+        <label className="block w-40">
+          <span className="text-xs text-zinc-500">Scale</span>
+          <select
+            aria-label={`${property.displayName} scale for ${listing.title}`}
+            value={scaleId ?? ""}
+            onChange={(e) => {
+              setChosenScale(Number(e.target.value));
+              onChange({ propertyId: property.propertyId, valueIds: [], values: [], scaleId: null });
+            }}
+            className={`${INPUT_CLS} mt-1 h-9`}
+          >
+            {property.scales.map((scale) => (
+              <option key={scale.scaleId} value={scale.scaleId}>
+                {scale.displayName}
+              </option>
+            ))}
+          </select>
+        </label>
       )}
     </div>
   );

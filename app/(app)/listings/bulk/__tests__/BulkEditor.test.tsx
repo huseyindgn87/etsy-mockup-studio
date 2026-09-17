@@ -89,6 +89,17 @@ const INVENTORY = {
 };
 
 let fetchMock: ReturnType<typeof vi.fn>;
+/** What the save route answers, per request; defaults to every listing saved. */
+let saveResults: ((updates: { listingId: number }[]) => { listingId: number; ok: boolean; error?: string }[]) | null =
+  null;
+/** What AI Edits answers for one request body. */
+let aiAnswer: (body: { field: string; listing: { title: string } }) => { status: number; body: unknown } = (body) => ({
+  status: 200,
+  body: { value: body.field === "tags" ? ["ai tag", "second tag"] : `AI ${body.listing.title}` },
+});
+
+/** Listing 101's grid, re-keyed for any listing id. */
+const inventoryFor = (listingId: number) => ({ ...INVENTORY, listingId });
 
 function jsonResponse(body: unknown, status = 200) {
   return { ok: status < 400, status, json: async () => body };
@@ -105,7 +116,13 @@ function mockFetch(listings: BulkListingDetail[] = LISTINGS) {
       });
     }
     if (url.startsWith("/api/etsy/listings/bulk/inventory")) {
-      return jsonResponse({ inventories: { 101: INVENTORY }, missing: [] });
+      const ids = new URL(url, "http://x").searchParams.get("ids")!.split(",").map(Number);
+      return jsonResponse({ inventories: Object.fromEntries(ids.map((id) => [id, inventoryFor(id)])), missing: [] });
+    }
+    if (url === "/api/etsy/shop") return jsonResponse({ shopName: "GHCollectiveUS", currencyCode: "USD" });
+    if (url === "/api/ai/optimize") {
+      const answer = aiAnswer(JSON.parse((init as RequestInit).body as string));
+      return jsonResponse(answer.body, answer.status);
     }
     const mediaSave = /^\/api\/etsy\/listings\/(\d+)\/media$/.exec(url);
     if (mediaSave) {
@@ -126,7 +143,10 @@ function mockFetch(listings: BulkListingDetail[] = LISTINGS) {
       });
     }
     if (url === "/api/etsy/listings/bulk/save") {
-      return jsonResponse({ results: listings.map((l) => ({ listingId: l.listingId, ok: true })) });
+      const { updates } = JSON.parse((init as RequestInit).body as string) as { updates: { listingId: number }[] };
+      return jsonResponse({
+        results: saveResults ? saveResults(updates) : updates.map((u) => ({ listingId: u.listingId, ok: true })),
+      });
     }
     if (url === "/api/etsy/sections") {
       return jsonResponse({ sections: [{ shopSectionId: 9, title: "Mugs" }] });
@@ -170,6 +190,19 @@ function savedUpdates(): { listingId: number; patch: Record<string, unknown> }[]
   return call ? JSON.parse((call[1] as RequestInit).body as string).updates : null;
 }
 
+/** Every save request body, in order. */
+const allSaves = (): { listingId: number; patch: Record<string, unknown> }[][] =>
+  fetchMock.mock.calls
+    .filter(([url]) => url === "/api/etsy/listings/bulk/save")
+    .map(([, init]) => JSON.parse((init as RequestInit).body as string).updates);
+
+const aiCalls = () =>
+  fetchMock.mock.calls
+    .filter(([url]) => url === "/api/ai/optimize")
+    .map(([, init]) => JSON.parse((init as RequestInit).body as string));
+
+const inRow = (listing: number) => within(screen.getByRole("group", { name: `Listing ${listing}` }));
+
 /**
  * Each row's controls are named for the listing they belong to, so a query
  * can never accidentally reach into the wrong row.
@@ -194,6 +227,11 @@ async function renderEditor(listings: BulkListingDetail[] = LISTINGS) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  saveResults = null;
+  aiAnswer = (body) => ({
+    status: 200,
+    body: { value: body.field === "tags" ? ["ai tag", "second tag"] : `AI ${body.listing.title}` },
+  });
 });
 
 afterEach(() => {
@@ -768,60 +806,115 @@ describe("Optional attributes", () => {
   });
 });
 
-describe("Inventory", () => {
-  test("a variation listing says so instead of offering price and quantity", async () => {
-    await renderEditor([detail(101), detail(102, { hasVariations: true })]);
+describe("Inventory — variation blocks", () => {
+  const VARIED = [detail(101), detail(102, { hasVariations: true }), detail(103, { hasVariations: true })];
+
+  test("a plain listing keeps its single control; a variation listing shows its own collapsed block", async () => {
+    await renderEditor(VARIED);
     openField("Price", "Inventory");
-    expect(rowField("Price", 101)).toBeInTheDocument();
-    expect(screen.queryByLabelText("Price for Listing 102")).not.toBeInTheDocument();
-    expect(screen.getByText(/Price varies by variation on this listing/i)).toBeInTheDocument();
+    expect(rowField("Price", 101)).toHaveValue(10);
+    const block = await inRow(102).findByRole("button", { name: "Show all variations for Listing 102" });
+    expect(block).toHaveAttribute("aria-expanded", "false");
+    expect(inRow(102).getByText("Red — 10.00")).toBeInTheDocument();
+    expect(inRow(102).queryByRole("tablist")).not.toBeInTheDocument();
+    expect(inRow(101).queryByRole("button", { name: /Show all variations/ })).not.toBeInTheDocument();
   });
 
-  test("apply skips it rather than flattening its grid", async () => {
-    await renderEditor([detail(101), detail(102, { hasVariations: true })]);
+  test("each listing's block expands and collapses on its own, mounting its table only when expanded", async () => {
+    await renderEditor(VARIED);
     openField("Price", "Inventory");
-    fireEvent.change(applyAllField("Price"), { target: { value: "20" } });
+    fireEvent.click(await inRow(102).findByRole("button", { name: "Show all variations for Listing 102" }));
+
+    const tabs102 = inRow(102).getByRole("tablist", { name: "Variation details for Listing 102" });
+    expect(within(tabs102).getByRole("tab", { name: "Price" })).toHaveAttribute("aria-selected", "true");
+    for (const tab of ["Variations", "Price", "Quantity", "SKU", "Visibility", "Photos", "Processing"]) {
+      expect(within(tabs102).getByRole("tab", { name: tab })).toBeInTheDocument();
+    }
+    expect(inRow(102).getByLabelText("Price for Red")).toHaveValue("10.00");
+    expect(inRow(103).queryByRole("tablist")).not.toBeInTheDocument();
+    expect(inRow(103).queryByLabelText("Price for Red")).not.toBeInTheDocument();
+
+    fireEvent.click(inRow(103).getByRole("button", { name: "Show all variations for Listing 103" }));
+    fireEvent.click(inRow(102).getByRole("button", { name: "Show less variations for Listing 102" }));
+    expect(inRow(102).queryByRole("tablist")).not.toBeInTheDocument();
+    expect(inRow(103).getByRole("tablist")).toBeInTheDocument();
+  });
+
+  test("editing one listing's combination price never touches another listing's grid", async () => {
+    await renderEditor(VARIED);
+    openField("Price", "Inventory");
+    fireEvent.click(await inRow(102).findByRole("button", { name: "Show all variations for Listing 102" }));
+    fireEvent.click(inRow(103).getByRole("button", { name: "Show all variations for Listing 103" }));
+    fireEvent.change(inRow(102).getByLabelText("Price for Red"), { target: { value: "42" } });
+
+    expect(inRow(103).getByLabelText("Price for Red")).toHaveValue("10.00");
+    fireEvent.click(syncButton());
+    await waitFor(() => expect(savedUpdates()).not.toBeNull());
+    const updates = savedUpdates()!;
+    expect(updates.map((u) => u.listingId)).toEqual([102]);
+    const variations = updates[0].patch.variations as { products: { price?: number }[]; priceOnProperty: number[] };
+    expect(variations.products.map((p) => p.price)).toEqual([42, 12]);
+    expect(variations.priceOnProperty).toEqual([200]);
+  });
+
+  test("Price's bulk bar reaches ticked plain listings and ticked variation grids, never unticked ones", async () => {
+    await renderEditor(VARIED);
+    openField("Price", "Inventory");
+    await inRow(103).findByRole("button", { name: "Show all variations for Listing 103" });
+    fireEvent.click(screen.getByLabelText("Include Listing 103 in the save"));
+
+    expect(applyButton()).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("Price operation"), { target: { value: "increase" } });
+    fireEvent.click(screen.getByRole("button", { name: "Amount as a percentage" }));
+    fireEvent.change(applyAllField("Price"), { target: { value: "10" } });
     fireEvent.click(applyButton());
 
-    fireEvent.click(syncButton());
-    await waitFor(() => expect(savedUpdates()).not.toBeNull());
-    expect(savedUpdates()).toEqual([{ listingId: 101, patch: { price: 20 } }]);
-  });
-
-  test("Variations gives each listing its own card of tabs", async () => {
-    await renderEditor([detail(101, { hasVariations: true })]);
-    openField("Variations", "Inventory");
-    for (const tab of ["Variations", "Price", "Quantity", "SKU", "Visibility", "Photos", "Processing"]) {
-      expect(await screen.findByLabelText(`${tab} tab for Listing 101`)).toBeInTheDocument();
-    }
-  });
-
-  test("an option can be added, and the new combination is saved with the grid", async () => {
-    await renderEditor([detail(101, { hasVariations: true })]);
-    openField("Variations", "Inventory");
-    const input = await screen.findByLabelText("Add Color option to Listing 101");
-    fireEvent.change(input, { target: { value: "Green" } });
-    fireEvent.click(screen.getByRole("button", { name: "Add option" }));
+    expect(rowField("Price", 101)).toHaveValue(11);
+    expect(inRow(102).getByText("Blue — 13.20")).toBeInTheDocument();
+    expect(inRow(103).getByText("Blue — 12.00")).toBeInTheDocument();
 
     fireEvent.click(syncButton());
     await waitFor(() => expect(savedUpdates()).not.toBeNull());
-    const variations = savedUpdates()![0].patch.variations as { products: unknown[] };
+    const updates = savedUpdates()!;
+    expect(updates.map((u) => u.listingId)).toEqual([101, 102]);
+    expect(updates[0].patch).toEqual({ price: 11 });
+    expect((updates[1].patch.variations as { products: { price: number }[] }).products.map((p) => p.price)).toEqual([
+      11, 13.2,
+    ]);
+  });
+
+  test("a percentage can't be chosen for Set to", async () => {
+    await renderEditor();
+    openField("Price", "Inventory");
+    expect(screen.getByRole("button", { name: "Amount as a percentage" })).toBeDisabled();
+    fireEvent.change(applyAllField("Price"), { target: { value: "12.5" } });
+    fireEvent.click(applyButton());
+    expect(rowField("Price", 102)).toHaveValue(12.5);
+  });
+
+  test("SKU's bar adds text before each ticked row's SKU", async () => {
+    await renderEditor([detail(101, { sku: "MUG-1" }), detail(102, { sku: "MUG-2" })]);
+    openField("SKU", "Inventory");
+    fireEvent.change(applyAllField("SKU"), { target: { value: "GH-" } });
+    fireEvent.click(applyButton());
+    expect(rowField("SKU", 101)).toHaveValue("GH-MUG-1");
+    expect(rowField("SKU", 102)).toHaveValue("GH-MUG-2");
+  });
+
+  test("an option added on the Variations tab saves the whole new grid", async () => {
+    await renderEditor([detail(101, { hasVariations: true })]);
+    openField("Variations", "Inventory");
+    fireEvent.click(await inRow(101).findByRole("button", { name: "Show all variations for Listing 101" }));
+    fireEvent.change(await inRow(101).findByLabelText("New Color option"), { target: { value: "Green" } });
+    fireEvent.click(inRow(101).getByRole("button", { name: "Add Color option" }));
+
+    fireEvent.click(syncButton());
+    await waitFor(() => expect(savedUpdates()).not.toBeNull());
+    const variations = savedUpdates()![0].patch.variations as {
+      products: { propertyValues: { valueIds: (number | null)[]; values: string[] }[]; price: number }[];
+    };
     expect(variations.products).toHaveLength(3);
-  });
-
-  test("a per-combination price is edited on its own tab", async () => {
-    await renderEditor([detail(101, { hasVariations: true })]);
-    openField("Variations", "Inventory");
-    fireEvent.click(await screen.findByLabelText("Price tab for Listing 101"));
-    fireEvent.change(screen.getByLabelText("Price for Red on Listing 101"), {
-      target: { value: "42" },
-    });
-
-    fireEvent.click(syncButton());
-    await waitFor(() => expect(savedUpdates()).not.toBeNull());
-    const variations = savedUpdates()![0].patch.variations as { products: { price?: number }[] };
-    expect(variations.products[0].price).toBe(42);
-    expect(variations.products[1].price).toBe(12);
+    expect(variations.products[2].propertyValues[0]).toMatchObject({ valueIds: [null], values: ["Green"] });
   });
 });
 
@@ -903,5 +996,142 @@ describe("leaving with unsaved edits", () => {
     fireEvent.click(cancel);
     expect(reached).toHaveBeenCalled();
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+});
+
+describe("selection", () => {
+  test("the master checkbox ticks and unticks only the rows the search shows", async () => {
+    await renderEditor();
+    const master = screen.getByRole("checkbox", { name: "Select all listings" });
+    expect(master).toBeChecked();
+
+    fireEvent.change(screen.getByPlaceholderText("Search these listings by title…"), { target: { value: "101" } });
+    expect(screen.getAllByRole("group", { name: /^Listing \d+$/ })).toHaveLength(1);
+    fireEvent.click(master);
+    fireEvent.change(screen.getByPlaceholderText("Search these listings by title…"), { target: { value: "" } });
+
+    expect(screen.getByLabelText("Include Listing 101 in the save")).not.toBeChecked();
+    expect(screen.getByLabelText("Include Listing 102 in the save")).toBeChecked();
+    expect(screen.getByLabelText("Include Listing 103 in the save")).toBeChecked();
+    expect(master).not.toBeChecked();
+    expect((master as HTMLInputElement).indeterminate).toBe(true);
+  });
+});
+
+describe("AI Edits", () => {
+  test("Optimize stays disabled until a preset or prompt is set, then fills every ticked row", async () => {
+    await renderEditor();
+    openField("Title", "AI Edits");
+    const optimize = screen.getByRole("button", { name: "Optimize" });
+    expect(optimize).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Regenerate title for Listing 101" })).toBeDisabled();
+
+    fireEvent.click(screen.getByLabelText("Include Listing 102 in the save"));
+    fireEvent.change(screen.getByLabelText("Prompt preset"), { target: { value: "seo" } });
+    fireEvent.click(optimize);
+
+    await waitFor(() => expect(rowField("Title", 103)).toHaveValue("AI Listing 103"));
+    expect(rowField("Title", 101)).toHaveValue("AI Listing 101");
+    expect(rowField("Title", 102)).toHaveValue("Listing 102");
+    expect(aiCalls().map((c) => c.listing.title).sort()).toEqual(["Listing 101", "Listing 103"]);
+    expect(aiCalls()[0]).toMatchObject({ field: "title", preset: "seo", model: "claude-opus-5" });
+    expect(savedUpdates()).toBeNull();
+  });
+
+  test("a row's Regenerate rewrites that row alone, with the bar's prompt and model", async () => {
+    await renderEditor();
+    openField("Description", "AI Edits");
+    fireEvent.change(screen.getByLabelText("AI prompt"), { target: { value: "Mention it's dishwasher safe" } });
+    fireEvent.change(screen.getByLabelText("Model"), { target: { value: "claude-sonnet-5" } });
+    fireEvent.click(screen.getByRole("button", { name: "Regenerate description for Listing 102" }));
+
+    await waitFor(() => expect(rowField("Description", 102)).toHaveValue("AI Listing 102"));
+    expect(rowField("Description", 101)).toHaveValue("");
+    expect(aiCalls()).toEqual([
+      {
+        field: "description",
+        model: "claude-sonnet-5",
+        preset: "",
+        prompt: "Mention it's dishwasher safe",
+        listing: { title: "Listing 102", description: "", tags: [] },
+      },
+    ]);
+
+    fireEvent.click(syncButton());
+    await waitFor(() => expect(savedUpdates()).not.toBeNull());
+    expect(savedUpdates()).toEqual([{ listingId: 102, patch: { description: "AI Listing 102" } }]);
+  });
+
+  test("regenerated tags replace that row's tag list", async () => {
+    await renderEditor([detail(101, { tags: ["old"] })]);
+    openField("Tags", "AI Edits");
+    fireEvent.change(screen.getByLabelText("Prompt preset"), { target: { value: "gift" } });
+    fireEvent.click(screen.getByRole("button", { name: "Regenerate tags for Listing 101" }));
+    await waitFor(() => expect(inRow(101).getByText("ai tag")).toBeInTheDocument());
+    fireEvent.click(syncButton());
+    await waitFor(() => expect(savedUpdates()).not.toBeNull());
+    expect(savedUpdates()).toEqual([{ listingId: 101, patch: { tags: ["ai tag", "second tag"] } }]);
+  });
+
+  test("a failed regenerate is reported on its own row and leaves the value alone", async () => {
+    aiAnswer = () => ({ status: 503, body: { error: "AI Edits isn't set up." } });
+    await renderEditor();
+    openField("Title", "AI Edits");
+    fireEvent.change(screen.getByLabelText("Prompt preset"), { target: { value: "shorten" } });
+    fireEvent.click(screen.getByRole("button", { name: "Regenerate title for Listing 103" }));
+
+    expect(await inRow(103).findByRole("alert")).toHaveTextContent("AI Edits isn't set up.");
+    expect(rowField("Title", 103)).toHaveValue("Listing 103");
+    expect(inRow(101).queryByRole("alert")).not.toBeInTheDocument();
+  });
+});
+
+describe("saving", () => {
+  test("reports each listing's success or failure; a failed listing keeps its edit and retries alone", async () => {
+    saveResults = (updates) =>
+      updates.map((u) => (u.listingId === 102 ? { listingId: 102, ok: false, error: "Etsy said no" } : { listingId: u.listingId, ok: true }));
+    await renderEditor();
+    openField("Title", "Listings");
+    fireEvent.change(rowField("Title", 101), { target: { value: "First" } });
+    fireEvent.change(rowField("Title", 102), { target: { value: "Second" } });
+    fireEvent.click(syncButton());
+
+    const status = await screen.findByRole("status");
+    expect(status).toHaveTextContent("Saved 1 of 2 listings. Rows that failed keep their changes below.");
+    expect(status).toHaveTextContent("Listing 102: Etsy said no");
+    expect(inRow(102).getByText(/Etsy said no/)).toBeInTheDocument();
+    expect(rowField("Title", 102)).toHaveValue("Second");
+    expect(syncButton()).toHaveTextContent("Sync updates (1)");
+
+    saveResults = null;
+    fireEvent.click(syncButton());
+    await waitFor(() => expect(allSaves()).toHaveLength(2));
+    expect(allSaves()[1]).toEqual([{ listingId: 102, patch: { title: "Second" } }]);
+  });
+});
+
+describe("layout", () => {
+  test("the header names the shop, and the icon beside it hides and shows the field list", async () => {
+    await renderEditor();
+    expect(await screen.findByText("GHCollectiveUS")).toBeInTheDocument();
+    const toggle = screen.getByRole("button", { name: "Hide field list" });
+    fireEvent.click(toggle);
+    expect(screen.queryByRole("navigation", { name: "Fields" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show field list" }));
+    expect(screen.getByRole("navigation", { name: "Fields" })).toBeInTheDocument();
+  });
+
+  test("each row shows the listing's full title above its control", async () => {
+    const long = "A very long listing title that goes on well past what a single clamped line would ever show";
+    await renderEditor([detail(101, { title: long })]);
+    expect(within(screen.getByRole("group", { name: long })).getByText(long)).not.toHaveClass("line-clamp-1");
+  });
+
+  test("only the rows near the viewport are mounted", async () => {
+    const many = Array.from({ length: 60 }, (_, i) => detail(1000 + i));
+    await renderEditor(many);
+    const mounted = screen.getAllByRole("group", { name: /^Listing \d+$/ }).length;
+    expect(mounted).toBeGreaterThan(3);
+    expect(mounted).toBeLessThan(60);
   });
 });

@@ -16,8 +16,20 @@ import {
   type BulkListingPatch,
 } from "@/lib/etsy/bulk-edit";
 import { appendToList, applyTextTransform } from "@/lib/etsy/bulk-text";
-import { toVariationPatch, type VariationGrid } from "@/lib/etsy/variation-grid";
+import {
+  applyNumericToForm,
+  applyNumericToValue,
+  applyProcessingToForm,
+  applySkuText,
+  applySkuToForm,
+} from "@/lib/etsy/bulk-operations";
+import type { VariationGrid } from "@/lib/etsy/variation-grid";
+import { gridToOfferingState, offeringStateToBulkVariations } from "@/lib/etsy/variation-grid-form";
+import { validateOfferings } from "@/lib/etsy/variation-offerings";
+import { DEFAULT_AI_MODEL, isUsableAiSettings, type AiField } from "@/lib/ai/listing-ai";
 import type { PersonalizationQuestionInput } from "@/lib/etsy/listing-personalization";
+import { EMPTY_LISTING_FORM, type ListingFormValue } from "@/app/(app)/mockups/ListingForm";
+import AiEditsBar, { type AiSettings } from "./AiEditsBar";
 import BulkApplyControl, { type ApplyInstruction } from "./BulkApplyControl";
 import BulkFieldInput, { INVENTORY_LOCKED } from "./BulkFieldInput";
 import BulkSidebar from "./BulkSidebar";
@@ -37,7 +49,8 @@ import {
 } from "@/app/components/listing-media/existing-media";
 import { checkPickedVideo } from "@/app/components/listing-media/video-file";
 import { useUnsavedChangesGuard } from "@/app/components/unsaved-changes/useUnsavedChangesGuard";
-import VariationsCard from "./VariationsCard";
+import VariationRowBlock, { VARIATION_FIELDS } from "./VariationRowBlock";
+import VirtualListingRows from "./VirtualListingRows";
 import { INPUT_CLS, attributeChoicesAcross, labelFor, propertyForListing } from "./helpers";
 import {
   EMPTY_OPTIONS,
@@ -110,13 +123,26 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [options, setOptions] = useState<BulkOptions>(EMPTY_OPTIONS);
   const [attributes, setAttributes] = useState<Record<number, ListingAttribute[]>>({});
-  const [grids, setGrids] = useState<Record<number, VariationGrid>>({});
-  const [gridsLoaded, setGridsLoaded] = useState(false);
+  /** Each variation listing's grid as the variation form holds it, as Etsy has it now. */
+  const [variationOriginals, setVariationOriginals] = useState<Record<number, ListingFormValue>>({});
+  /** Edited variation forms, per listing. Absent means "untouched". */
+  const [variationEdits, setVariationEdits] = useState<Record<number, ListingFormValue>>({});
+  /** Listings whose inventory read has come back (with or without a grid). */
+  const [inventoryDone, setInventoryDone] = useState<ReadonlySet<number>>(new Set());
+  /** Variation blocks the user has expanded — each listing independently. */
+  const [expandedBlocks, setExpandedBlocks] = useState<Record<number, boolean>>({});
+  const [showVariationErrors, setShowVariationErrors] = useState(false);
+  const [shopName, setShopName] = useState<string | null>(null);
+  const [currencyCode, setCurrencyCode] = useState<string | null>(null);
+  const [navOpen, setNavOpen] = useState(true);
+  const [ai, setAi] = useState<AiSettings>({ preset: "", model: DEFAULT_AI_MODEL, prompt: "" });
+  const [aiRunning, setAiRunning] = useState<Record<number, boolean>>({});
+  const [aiErrors, setAiErrors] = useState<Record<number, string>>({});
   /**
    * What has already been asked for. A ref rather than state: it only guards
    * a fetch from being repeated, and nothing rendered reads it.
    */
-  const requested = useRef({ attributes: false, grids: false, taxonomies: new Set<number>() });
+  const requested = useRef({ attributes: false, inventories: new Set<number>(), taxonomies: new Set<number>() });
 
   const [selection, setSelection] = useState<FieldSelection>({
     group: BULK_GROUPS[0].key,
@@ -143,7 +169,6 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
 
   useEffect(() => {
     if (listingIds.length === 0) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setListings([]);
       return;
     }
@@ -196,6 +221,10 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
     load("/api/etsy/taxonomy", (b) => flattenTaxonomy((b.tree ?? []) as TaxonomyNode[]), (taxonomy) =>
       setOptions((prev) => ({ ...prev, taxonomy })),
     );
+    load("/api/etsy/shop", (b) => b as { shopName?: string; currencyCode?: string | null }, (shop) => {
+      setShopName(shop.shopName ?? null);
+      setCurrencyCode(shop.currencyCode ?? null);
+    });
   }, []);
 
   // Attributes cost one Etsy call per listing, so they're only fetched once
@@ -222,8 +251,9 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
     () => [...new Set((listings ?? []).map((l) => l.taxonomyId).filter((id): id is number => id != null))].join(","),
     [listings],
   );
+  const variationFieldSelected = VARIATION_FIELDS.has(field);
   useEffect(() => {
-    if (!attributeFieldSelected || !taxonomyIdsKey) return;
+    if (!(attributeFieldSelected || variationFieldSelected) || !taxonomyIdsKey) return;
     for (const raw of taxonomyIdsKey.split(",")) {
       const taxonomyId = Number(raw);
       if (requested.current.taxonomies.has(taxonomyId)) continue;
@@ -241,24 +271,31 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
         })
         .catch(() => {});
     }
-  }, [attributeFieldSelected, taxonomyIdsKey]);
+  }, [attributeFieldSelected, variationFieldSelected, taxonomyIdsKey]);
 
-  // Same for the variation grids.
+  // Variation grids cost one Etsy call per listing too: read when a variation-aware
+  // field is opened, and only for the listings that field shows a block for.
   useEffect(() => {
-    if (field !== "variations" || requested.current.grids) return;
-    if (listings == null || listings.length === 0) return;
-    requested.current.grids = true;
-    fetch(`/api/etsy/listings/bulk/inventory?ids=${idsKey}`)
+    if (!variationFieldSelected || listings == null) return;
+    const needed = listings
+      .filter((l) => (field === "variations" || l.hasVariations) && !requested.current.inventories.has(l.listingId))
+      .map((l) => l.listingId);
+    if (needed.length === 0) return;
+    for (const id of needed) requested.current.inventories.add(id);
+    fetch(`/api/etsy/listings/bulk/inventory?ids=${needed.join(",")}`)
       .then((res) => (res.ok ? res.json() : null))
       .then((body: { inventories?: Record<string, VariationGrid> } | null) => {
-        const raw = body?.inventories ?? {};
-        setGrids(Object.fromEntries(Object.entries(raw).map(([id, grid]) => [Number(id), grid])));
+        const forms: Record<number, ListingFormValue> = {};
+        for (const [raw, grid] of Object.entries(body?.inventories ?? {})) {
+          const listing = listings.find((l) => l.listingId === Number(raw));
+          if (listing) forms[listing.listingId] = { ...EMPTY_LISTING_FORM, ...gridToOfferingState(grid, listing) };
+        }
+        setVariationOriginals((prev) => ({ ...prev, ...forms }));
       })
       .catch(() => {})
-      // Only once the read has actually come back does a card stop saying
-      // "Loading…" — otherwise an empty map reads as "no inventory record".
-      .finally(() => setGridsLoaded(true));
-  }, [field, listings, idsKey]);
+      // Only once the read is back does a block stop saying "Loading…".
+      .finally(() => setInventoryDone((prev) => new Set([...prev, ...needed])));
+  }, [variationFieldSelected, field, listings]);
 
   /** The listing's own stored value for `field`, as the inputs represent it. */
   const originalValue = useCallback(
@@ -348,18 +385,58 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
   const editable = useCallback(
     (listing: BulkListingDetail, key: BulkFieldKey): boolean => {
       if (isReadOnlyField(key)) return false;
-      if (INVENTORY_LOCKED.has(key) && listing.hasVariations) return false;
+      // A variation listing prices, stocks and schedules each combination on its variation block.
+      if ((INVENTORY_LOCKED.has(key) || key === "readinessStateId") && listing.hasVariations) return false;
       return true;
     },
     [],
   );
 
+  const variationFormFor = (listing: BulkListingDetail): ListingFormValue | null =>
+    variationEdits[listing.listingId] ?? variationOriginals[listing.listingId] ?? null;
+
+  /** Merge an edit into one listing's variation form. */
+  function editVariations(listingId: number, partial: Partial<ListingFormValue>) {
+    setVariationEdits((prev) => {
+      const base = prev[listingId] ?? variationOriginals[listingId];
+      return base ? { ...prev, [listingId]: { ...base, ...partial } } : prev;
+    });
+  }
+
+  /** Does this row show its variation block for the current field? */
+  const showsBlock = (listing: BulkListingDetail) =>
+    VARIATION_FIELDS.has(field) && (field === "variations" || listing.hasVariations);
+
+  /** What an inventory instruction means for a variation form — null when it can't apply there. */
+  function resolveFormInstruction(
+    instruction: ApplyInstruction,
+    form: ListingFormValue,
+  ): Partial<ListingFormValue> | null {
+    if (instruction.kind === "numeric" && (field === "price" || field === "quantity")) {
+      return applyNumericToForm(form, field, instruction.instruction);
+    }
+    if (instruction.kind === "sku") return applySkuToForm(form, instruction.position, instruction.text);
+    if (instruction.kind === "set" && field === "readinessStateId") {
+      return applyProcessingToForm(form, Number(instruction.value));
+    }
+    return null;
+  }
+
   /** Write one instruction into every ticked listing — the explicit apply-to-all. */
   function applyToTicked(instruction: ApplyInstruction) {
+    const formEdits: Record<number, ListingFormValue> = {};
+    for (const listing of listings ?? []) {
+      if (!targeted[listing.listingId] || !showsBlock(listing)) continue;
+      const form = variationFormFor(listing);
+      const partial = form && resolveFormInstruction(instruction, form);
+      if (form && partial) formEdits[listing.listingId] = { ...form, ...partial };
+    }
+    if (Object.keys(formEdits).length > 0) setVariationEdits((prev) => ({ ...prev, ...formEdits }));
+
     setEdited((prev) => {
       const next = { ...prev };
       for (const listing of listings ?? []) {
-        if (!targeted[listing.listingId] || !editable(listing, field)) continue;
+        if (!targeted[listing.listingId] || !editable(listing, field) || showsBlock(listing)) continue;
         const current = next[listing.listingId]?.[field] ?? originalValue(listing, field);
         const resolved = resolveInstruction(instruction, listing, current);
         if (resolved === null) continue;
@@ -384,12 +461,23 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
           ? appendToList(list, instruction.value, { max: MAX_TAGS, trimTo: MAX_TAG_LENGTH })
           : appendToList(list, instruction.value, { max: MAX_MATERIALS, trimTo: MAX_MATERIAL_LENGTH });
       }
+      case "numeric":
+        return field === "price" || field === "quantity"
+          ? applyNumericToValue(field, String(current), instruction.instruction)
+          : null;
+      case "sku":
+        return applySkuText(String(current), instruction.position, instruction.text);
       case "attribute": {
-        // Matched by name: the same value has a different id on each category.
+        // Matched by name: the same value (and scale) has a different id on each category.
         const property = propertyForListing(field, listing, options);
         if (!property) return null;
+        const scaleName = (scaleId: number | null) =>
+          property.scales.find((scale) => scale.scaleId === scaleId)?.displayName ?? null;
         const picked = property.possibleValues.find(
-          (v) => v.valueId != null && v.name === instruction.valueName,
+          (v) =>
+            v.valueId != null &&
+            v.name === instruction.valueName &&
+            (instruction.scaleName == null || scaleName(v.scaleId) === instruction.scaleName),
         );
         if (!picked || picked.valueId == null) return null;
         return {
@@ -456,12 +544,33 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
     [edited, editable, originalValue],
   );
 
+  /** A listing's replacement variation grid, when its form differs from Etsy's. */
+  const variationPatchFor = useCallback(
+    (listing: BulkListingDetail): BulkListingPatch["variations"] | null => {
+      const edit = variationEdits[listing.listingId];
+      const original = variationOriginals[listing.listingId];
+      if (!edit || !original) return null;
+      const next = offeringStateToBulkVariations(edit);
+      return next && JSON.stringify(next) !== JSON.stringify(offeringStateToBulkVariations(original)) ? next : null;
+    },
+    [variationEdits, variationOriginals],
+  );
+
+  const fullPatchFor = useCallback(
+    (listing: BulkListingDetail): BulkListingPatch => {
+      const patch = patchFor(listing);
+      const variations = variationPatchFor(listing);
+      return variations ? { ...patch, variations } : patch;
+    },
+    [patchFor, variationPatchFor],
+  );
+
   const updates = useMemo(() => {
     return (listings ?? [])
       .filter((l) => targeted[l.listingId])
-      .map((l) => ({ listingId: l.listingId, patch: patchFor(l) }))
+      .map((l) => ({ listingId: l.listingId, patch: fullPatchFor(l) }))
       .filter((u) => Object.keys(u.patch).length > 0);
-  }, [listings, targeted, patchFor]);
+  }, [listings, targeted, fullPatchFor]);
 
   /** Ticked listings whose photo/video grid would change on save. */
   const mediaUpdates = useMemo(
@@ -480,7 +589,7 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
 
   /** Listings, ticked or not, with an edit that no Sync has written yet. */
   const unsavedCount = (listings ?? []).filter((l) => {
-    if (Object.keys(patchFor(l)).length > 0) return true;
+    if (Object.keys(fullPatchFor(l)).length > 0) return true;
     const changed = mediaChanges(l, media[l.listingId]);
     return changed.photos || changed.videos;
   }).length;
@@ -542,9 +651,10 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
       const changed = mediaChanges(listing, media[listing.listingId]);
       if (changed.photos) counts.photos = (counts.photos ?? 0) + 1;
       if (changed.videos) counts.videos = (counts.videos ?? 0) + 1;
+      if (variationPatchFor(listing)) counts.variations = (counts.variations ?? 0) + 1;
     }
     return counts;
-  }, [listings, edited, targeted, editable, originalValue, media]);
+  }, [listings, edited, targeted, editable, originalValue, media, variationPatchFor]);
 
   const visible = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -559,22 +669,52 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
     setSaveError(null);
     setResults(null);
     try {
-      let fieldResults: SaveResult[] = [];
-      if (updates.length > 0) {
+      // A variation grid with errors is refused for that listing only — the rest still go out.
+      const refused: SaveResult[] = [];
+      const sendable = updates.filter((u) => {
+        const form = u.patch.variations ? variationEdits[u.listingId] : undefined;
+        const error = form ? validateOfferings(form, [])[0] : undefined;
+        if (error) refused.push({ listingId: u.listingId, ok: false, error: `Variations: ${error.message}` });
+        return !error;
+      });
+      if (refused.length > 0) {
+        setShowVariationErrors(true);
+        setExpandedBlocks((prev) => ({ ...prev, ...Object.fromEntries(refused.map((r) => [r.listingId, true])) }));
+      }
+
+      let fieldResults: SaveResult[] = [...refused];
+      if (sendable.length > 0) {
         const res = await fetch("/api/etsy/listings/bulk/save", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ updates }),
+          body: JSON.stringify({ updates: sendable }),
         });
         if (!res.ok) throw new Error(await errorFrom(res));
-        fieldResults = ((await res.json()) as { results: SaveResult[] }).results;
+        const saved = ((await res.json()) as { results: SaveResult[] }).results;
+        fieldResults = [...fieldResults, ...saved];
         // Saved values are now the listings' own values — clear the edits that
-        // landed so the rows stop showing them as pending.
-        const savedIds = new Set(fieldResults.filter((r) => r.ok).map((r) => r.listingId));
-        setListings((prev) => (prev ?? []).map((l) => (savedIds.has(l.listingId) ? applySaved(l, patchFor(l)) : l)));
+        // landed so the rows stop showing them as pending. Failed rows keep theirs.
+        const savedIds = new Set(saved.filter((r) => r.ok).map((r) => r.listingId));
+        const savedForms = Object.fromEntries(
+          sendable.filter((u) => savedIds.has(u.listingId) && u.patch.variations).map((u) => [u.listingId, variationEdits[u.listingId]]),
+        );
+        setListings((prev) =>
+          (prev ?? []).map((l) => {
+            if (!savedIds.has(l.listingId)) return l;
+            const next = applySaved(l, patchFor(l));
+            const form = savedForms[l.listingId];
+            return form ? { ...next, hasVariations: form.variations.length > 0 } : next;
+          }),
+        );
         setEdited((prev) => {
           const next = { ...prev };
           for (const id of savedIds) delete next[id];
+          return next;
+        });
+        setVariationOriginals((prev) => ({ ...prev, ...savedForms }));
+        setVariationEdits((prev) => {
+          const next = { ...prev };
+          for (const id of Object.keys(savedForms)) delete next[Number(id)];
           return next;
         });
       }
@@ -639,19 +779,203 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
     }
   }
 
+  /** Ask Claude for a new value of the AI field for one listing, filling its row. */
+  async function regenerate(listing: BulkListingDetail) {
+    const id = listing.listingId;
+    const target = field as AiField;
+    setAiRunning((prev) => ({ ...prev, [id]: true }));
+    setAiErrors((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    try {
+      const res = await fetch("/api/ai/optimize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          field: target,
+          model: ai.model,
+          preset: ai.preset,
+          prompt: ai.prompt,
+          listing: {
+            title: String(valueOf(listing, "title")),
+            description: String(valueOf(listing, "description")),
+            tags: valueOf(listing, "tags") as string[],
+          },
+        }),
+      });
+      if (!res.ok) throw new Error(await errorFrom(res));
+      const body = (await res.json()) as { value: string | string[] };
+      setValue(id, target, body.value);
+    } catch (err) {
+      setAiErrors((prev) => ({ ...prev, [id]: err instanceof Error ? err.message : "AI Edits failed." }));
+    } finally {
+      setAiRunning((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+    }
+  }
+
+  /** Optimize: every ticked row, a few at a time. */
+  async function optimizeTicked() {
+    const queue = (listings ?? []).filter((l) => targeted[l.listingId]);
+    const worker = async () => {
+      for (let next = queue.shift(); next; next = queue.shift()) await regenerate(next);
+    };
+    await Promise.all(Array.from({ length: Math.min(AI_CONCURRENCY, queue.length) }, worker));
+  }
+
+  const masterRef = useRef<HTMLInputElement>(null);
+  const visibleTargeted = visible.filter((l) => targeted[l.listingId]).length;
+  const allVisibleTargeted = visible.length > 0 && visibleTargeted === visible.length;
+  useEffect(() => {
+    if (masterRef.current) masterRef.current.indeterminate = visibleTargeted > 0 && !allVisibleTargeted;
+  }, [visibleTargeted, allVisibleTargeted]);
+
   const resultFor = (listingId: number) => results?.find((r) => r.listingId === listingId);
   const count = (listings ?? []).length;
   const label = labelFor(field);
-  const showApplyControl = applyKindFor(field) !== "none" && !isReadOnlyField(field);
+  const aiField = selection.group === "ai";
+  const showApplyControl = !aiField && applyKindFor(field) !== "none" && !isReadOnlyField(field);
+  const aiUsable = isUsableAiSettings(ai);
+  const aiRunningCount = Object.keys(aiRunning).length;
+  const currencySymbol = currencyCode ? symbolFor(currencyCode) : "$";
+
+  function renderRow(listing: BulkListingDetail) {
+    const id = listing.listingId;
+    const result = resultFor(id);
+    const rowPatch = fullPatchFor(listing);
+    const rowMedia = mediaChanges(listing, media[id]);
+    const changed = Object.keys(rowPatch).length + (rowMedia.photos ? 1 : 0) + (rowMedia.videos ? 1 : 0);
+    const rowMediaState = mediaFor(listing);
+    const properties = listing.taxonomyId == null ? [] : options.propertiesByTaxonomy[listing.taxonomyId];
+    return (
+      <div
+        role="group"
+        aria-label={listing.title}
+        className="rounded-xl border border-black/10 bg-white p-4 dark:border-white/15 dark:bg-zinc-950"
+      >
+        <div className="flex items-start gap-3">
+          <input
+            type="checkbox"
+            aria-label={`Include ${listing.title} in the save`}
+            checked={targeted[id] ?? false}
+            onChange={(e) => setTargeted((p) => ({ ...p, [id]: e.target.checked }))}
+            className="mt-1 h-4 w-4 cursor-pointer accent-primary"
+          />
+          <span className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded bg-zinc-100 dark:bg-zinc-800">
+            {listing.thumbnailUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={listing.thumbnailUrl} alt="" className="h-full w-full object-cover" />
+            ) : (
+              <span className="text-[10px] text-zinc-400">—</span>
+            )}
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="break-words text-sm font-medium text-zinc-800 dark:text-zinc-100">{listing.title}</p>
+            <p className="text-xs text-zinc-500">
+              {listing.state}
+              {changed > 0 && ` · ${changed} change${changed === 1 ? "" : "s"} pending`}
+              {result && !result.ok && <span className="text-red-600 dark:text-red-400"> · {result.error}</span>}
+              {result?.ok && <span className="text-green-700 dark:text-green-400"> · saved</span>}
+            </p>
+          </div>
+          {aiField && (
+            <button
+              type="button"
+              onClick={() => void regenerate(listing)}
+              disabled={!aiUsable || aiRunning[id]}
+              aria-label={`Regenerate ${label.toLowerCase()} for ${listing.title}`}
+              title={aiUsable ? undefined : "Choose a preset or write a prompt above first"}
+              className="h-8 shrink-0 rounded-full border border-black/10 px-3 text-xs font-medium hover:bg-black/[.04] disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/15 dark:hover:bg-white/[.06]"
+            >
+              {aiRunning[id] ? "Generating…" : "↻ Regenerate"}
+            </button>
+          )}
+        </div>
+
+        <div className="mt-3 pl-7">
+          {aiField && aiErrors[id] && (
+            <p role="alert" className="mb-2 text-xs font-medium text-red-600 dark:text-red-400">
+              {aiErrors[id]}
+            </p>
+          )}
+          {field === "photos" || field === "videos" ? (
+            <>
+              {mediaErrors[id] && (
+                <p className="mb-2 text-xs font-medium text-red-600 dark:text-red-400">{mediaErrors[id]}</p>
+              )}
+              <ListingMediaEditor
+                sections={field}
+                slots={mediaPhotoSlots(rowMediaState, listing)}
+                altTextBySlot={rowMediaState.altTextBySlot}
+                onMovePhoto={(from, to) => updateMedia(listing, (m) => moveMediaPhoto(m, from, to))}
+                onRemovePhoto={(slotId) => removePhoto(listing, slotId)}
+                onAltTextChange={(slotId, text) => updateMedia(listing, (m) => setMediaAltText(m, slotId, text))}
+                onAddPhotos={(files) => addPhotos(listing, files)}
+                videos={rowMediaState.videos}
+                videoErrors={rowMediaState.videoErrors}
+                onSelectVideo={(slot, file) => void selectVideo(listing, slot, file)}
+                onMoveVideo={(from, to) => updateMedia(listing, (m) => moveMediaVideo(m, from, to))}
+              />
+            </>
+          ) : showsBlock(listing) ? (
+            <VariationRowBlock
+              listing={listing}
+              field={field}
+              form={variationFormFor(listing)}
+              status={variationOriginals[id] ? "ready" : inventoryDone.has(id) ? "missing" : "loading"}
+              expanded={expandedBlocks[id] ?? false}
+              onToggle={() => setExpandedBlocks((prev) => ({ ...prev, [id]: !prev[id] }))}
+              onChange={(partial) => editVariations(id, partial)}
+              variationProperties={properties ? properties.filter((p) => p.supportsVariations) : null}
+              processingProfiles={options.processingProfiles}
+              currencyCode={currencyCode}
+              showErrors={showVariationErrors}
+            />
+          ) : (
+            <BulkFieldInput
+              field={field}
+              listing={listing}
+              value={valueOf(listing, field)}
+              options={options}
+              onChange={(value) => setValue(id, field, value)}
+            />
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-zinc-50 font-sans dark:bg-black">
       <div className="mx-auto w-full max-w-[96rem] px-4 py-8 sm:px-6">
         {/* ---- top bar ---- */}
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <h1 className="text-xl font-semibold tracking-tight text-black dark:text-zinc-50">
-            {listings == null ? "Loading listings…" : `Editing ${count} listing${count === 1 ? "" : "s"}`}
-          </h1>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setNavOpen((open) => !open)}
+              aria-expanded={navOpen}
+              aria-controls="bulk-field-nav"
+              aria-label={navOpen ? "Hide field list" : "Show field list"}
+              className="flex h-9 w-9 items-center justify-center rounded-lg text-zinc-600 hover:bg-black/[.04] dark:text-zinc-300 dark:hover:bg-white/[.06]"
+            >
+              <svg aria-hidden="true" viewBox="0 0 20 20" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.6">
+                <rect x="3" y="4" width="14" height="12" rx="2" />
+                <path d="M8 4v12" />
+              </svg>
+            </button>
+            <div>
+              {shopName && <p className="text-xs font-medium text-zinc-500">{shopName}</p>}
+              <h1 className="text-xl font-semibold tracking-tight text-black dark:text-zinc-50">
+                {listings == null ? "Loading listings…" : `Editing ${count} listing${count === 1 ? "" : "s"}`}
+              </h1>
+            </div>
+          </div>
           <div className="flex items-center gap-2">
             <Link
               href="/listings"
@@ -678,15 +1002,14 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
           </div>
         </div>
         <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-          Changes are written to Etsy only when you press Sync updates. Untick a row to leave that
-          listing alone.
+          Changes are written to Etsy only when you press Sync updates. Untick a row to leave that listing alone.
         </p>
 
         {scheduleNote && (
           <div className="mt-4 rounded-xl border border-black/10 bg-white px-4 py-3 text-sm dark:border-white/15 dark:bg-zinc-950">
-            Scheduling covers publishing a <em>new</em> listing from a draft — a scheduled job holds
-            the images it will upload. An edit to listings that are already live has nothing to
-            render ahead of time, so it isn&apos;t schedulable yet.{" "}
+            Scheduling covers publishing a <em>new</em> listing from a draft — a scheduled job holds the images it
+            will upload. An edit to listings that are already live has nothing to render ahead of time, so it
+            isn&apos;t schedulable yet.{" "}
             <Link href="/schedule" className="font-medium text-primary underline underline-offset-2">
               See scheduled listings
             </Link>
@@ -705,8 +1028,8 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
         )}
         {missing.length > 0 && (
           <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950/50 dark:text-amber-300">
-            {missing.length} selected listing{missing.length === 1 ? "" : "s"} could not be loaded
-            and {missing.length === 1 ? "is" : "are"} not shown. Refresh the shop and try again.
+            {missing.length} selected listing{missing.length === 1 ? "" : "s"} could not be loaded and{" "}
+            {missing.length === 1 ? "is" : "are"} not shown. Refresh the shop and try again.
           </div>
         )}
         {results && (
@@ -716,151 +1039,101 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
           >
             Saved {results.filter((r) => r.ok).length} of {results.length} listings.
             {results.some((r) => !r.ok) && " Rows that failed keep their changes below."}
+            {results.some((r) => !r.ok) && (
+              <ul className="mt-1 list-disc pl-5 text-xs text-red-600 dark:text-red-400">
+                {results
+                  .filter((r) => !r.ok)
+                  .map((r) => (
+                    <li key={r.listingId}>
+                      {(listings ?? []).find((l) => l.listingId === r.listingId)?.title ?? `Listing #${r.listingId}`}:{" "}
+                      {r.error}
+                    </li>
+                  ))}
+              </ul>
+            )}
           </div>
         )}
 
         <div className="mt-6 flex flex-col gap-6 lg:flex-row">
-          <aside className="lg:w-56 lg:shrink-0">
-            <BulkSidebar selection={selection} onSelect={setSelection} pendingByField={pendingByField} />
-          </aside>
+          {navOpen && (
+            <aside id="bulk-field-nav" className="lg:w-56 lg:shrink-0">
+              <BulkSidebar selection={selection} onSelect={setSelection} pendingByField={pendingByField} />
+            </aside>
+          )}
 
           <div className="min-w-0 flex-1">
             <h2 className="text-sm font-semibold text-zinc-800 dark:text-zinc-100">{label}</h2>
 
-            <label className="mt-2 block text-sm">
-              <span className="sr-only">Search listings</span>
-              <input
-                type="search"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search these listings by title…"
-                className={`${INPUT_CLS} h-10`}
+            {aiField && (
+              <AiEditsBar
+                fieldLabel={label}
+                settings={ai}
+                onChange={setAi}
+                onOptimize={() => void optimizeTicked()}
+                running={aiRunningCount}
+                targetedCount={targetedCount}
               />
-            </label>
-
+            )}
             {showApplyControl && (
               <BulkApplyControl
+                key={field}
                 field={field}
                 options={options}
                 attributeChoices={attributeChoicesAcross(field, listings ?? [], options)}
                 targetedCount={targetedCount}
+                currencySymbol={currencySymbol}
                 onApply={applyToTicked}
               />
             )}
 
-            <div className="mt-4 space-y-3">
+            <div className="mt-4 flex items-center gap-3">
+              <input
+                ref={masterRef}
+                type="checkbox"
+                aria-label="Select all listings"
+                checked={allVisibleTargeted}
+                disabled={visible.length === 0}
+                onChange={(e) =>
+                  setTargeted((prev) => ({
+                    ...prev,
+                    ...Object.fromEntries(visible.map((l) => [l.listingId, e.target.checked])),
+                  }))
+                }
+                className="h-4 w-4 cursor-pointer accent-primary"
+              />
+              <label className="block flex-1 text-sm">
+                <span className="sr-only">Search listings</span>
+                <input
+                  type="search"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search these listings by title…"
+                  className={`${INPUT_CLS} h-10`}
+                />
+              </label>
+            </div>
+
+            <div className="mt-3">
               {listings == null &&
                 Array.from({ length: 3 }).map((_, i) => (
                   <div
                     key={i}
-                    className="h-24 animate-pulse rounded-xl border border-black/10 bg-white dark:border-white/15 dark:bg-zinc-950"
+                    className="mb-3 h-24 animate-pulse rounded-xl border border-black/10 bg-white dark:border-white/15 dark:bg-zinc-950"
                   />
                 ))}
 
               {listings != null && visible.length === 0 && (
                 <p className="rounded-xl border border-black/10 bg-white px-4 py-10 text-center text-sm text-zinc-500 dark:border-white/15 dark:bg-zinc-950">
-                  {count === 0
-                    ? "No listings selected. Pick some on the listings page first."
-                    : "No listings match that search."}
+                  {count === 0 ? "No listings selected. Pick some on the listings page first." : "No listings match that search."}
                 </p>
               )}
 
-              {visible.map((listing) => {
-                const result = resultFor(listing.listingId);
-                const rowPatch = patchFor(listing);
-                const rowMedia = mediaChanges(listing, media[listing.listingId]);
-                const changed =
-                  Object.keys(rowPatch).length + (rowMedia.photos ? 1 : 0) + (rowMedia.videos ? 1 : 0);
-                const rowMediaState = mediaFor(listing);
-                return (
-                  <div
-                    key={listing.listingId}
-                    role="group"
-                    aria-label={listing.title}
-                    className="rounded-xl border border-black/10 bg-white p-4 dark:border-white/15 dark:bg-zinc-950"
-                  >
-                    <div className="flex items-start gap-3">
-                      <input
-                        type="checkbox"
-                        aria-label={`Include ${listing.title} in the save`}
-                        checked={targeted[listing.listingId] ?? false}
-                        onChange={(e) =>
-                          setTargeted((p) => ({ ...p, [listing.listingId]: e.target.checked }))
-                        }
-                        className="mt-1 h-4 w-4 cursor-pointer accent-primary"
-                      />
-                      <span className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded bg-zinc-100 dark:bg-zinc-800">
-                        {listing.thumbnailUrl ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img src={listing.thumbnailUrl} alt="" className="h-full w-full object-cover" />
-                        ) : (
-                          <span className="text-[10px] text-zinc-400">—</span>
-                        )}
-                      </span>
-                      <div className="min-w-0 flex-1">
-                        <p className="line-clamp-1 text-sm font-medium text-zinc-800 dark:text-zinc-100">
-                          {listing.title}
-                        </p>
-                        <p className="text-xs text-zinc-500">
-                          {listing.state}
-                          {changed > 0 && ` · ${changed} change${changed === 1 ? "" : "s"} pending`}
-                          {result && !result.ok && (
-                            <span className="text-red-600 dark:text-red-400"> · {result.error}</span>
-                          )}
-                          {result?.ok && <span className="text-green-700 dark:text-green-400"> · saved</span>}
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="mt-3 pl-7">
-                      {field === "photos" || field === "videos" ? (
-                        <>
-                          {mediaErrors[listing.listingId] && (
-                            <p className="mb-2 text-xs font-medium text-red-600 dark:text-red-400">
-                              {mediaErrors[listing.listingId]}
-                            </p>
-                          )}
-                          <ListingMediaEditor
-                            sections={field}
-                            slots={mediaPhotoSlots(rowMediaState, listing)}
-                            altTextBySlot={rowMediaState.altTextBySlot}
-                            onMovePhoto={(from, to) => updateMedia(listing, (m) => moveMediaPhoto(m, from, to))}
-                            onRemovePhoto={(slotId) => removePhoto(listing, slotId)}
-                            onAltTextChange={(slotId, text) =>
-                              updateMedia(listing, (m) => setMediaAltText(m, slotId, text))
-                            }
-                            onAddPhotos={(files) => addPhotos(listing, files)}
-                            videos={rowMediaState.videos}
-                            videoErrors={rowMediaState.videoErrors}
-                            onSelectVideo={(slot, file) => void selectVideo(listing, slot, file)}
-                            onMoveVideo={(from, to) => updateMedia(listing, (m) => moveMediaVideo(m, from, to))}
-                          />
-                        </>
-                      ) : field === "variations" ? (
-                        <VariationsCard
-                          listing={listing}
-                          grid={
-                            (edited[listing.listingId]?.variations as VariationGrid | undefined) ??
-                            grids[listing.listingId] ??
-                            null
-                          }
-                          loading={!gridsLoaded}
-                          processingProfiles={options.processingProfiles}
-                          onChange={(grid) => setValue(listing.listingId, "variations", grid as FieldValue)}
-                        />
-                      ) : (
-                        <BulkFieldInput
-                          field={field}
-                          listing={listing}
-                          value={valueOf(listing, field)}
-                          options={options}
-                          onChange={(value) => setValue(listing.listingId, field, value)}
-                        />
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
+              <VirtualListingRows
+                items={visible}
+                getKey={(l) => l.listingId}
+                estimate={ROW_ESTIMATE[field] ?? 150}
+                renderRow={renderRow}
+              />
             </div>
           </div>
         </div>
@@ -868,6 +1141,29 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
       {unsavedDialog}
     </div>
   );
+}
+
+const AI_CONCURRENCY = 3;
+
+/** Rough row heights per field, for the virtual list's rows it hasn't measured yet. */
+const ROW_ESTIMATE: Partial<Record<BulkFieldKey, number>> = {
+  description: 220,
+  photos: 420,
+  videos: 260,
+  personalization: 320,
+  variations: 230,
+};
+
+function symbolFor(currencyCode: string): string {
+  try {
+    return (
+      new Intl.NumberFormat("en-US", { style: "currency", currency: currencyCode, currencyDisplay: "narrowSymbol" })
+        .formatToParts(0)
+        .find((p) => p.type === "currency")?.value ?? currencyCode
+    );
+  } catch {
+    return currencyCode;
+  }
 }
 
 /**
@@ -962,12 +1258,6 @@ function patchEntry(field: BulkFieldKey, value: FieldValue): BulkListingPatch | 
         }
       }
       return any ? patch : null;
-    }
-    case "variations": {
-      const grid = value as unknown as VariationGrid;
-      return grid && Array.isArray(grid.combinations) && grid.combinations.length > 0
-        ? { variations: toVariationPatch(grid) }
-        : null;
     }
     default:
       return null;

@@ -67,6 +67,7 @@ export const ATTRIBUTE_FIELDS = [
   { key: "attr_neckline", label: "Neckline", matches: ["neckline"] },
   { key: "attr_clothing_style", label: "Clothing style", matches: ["clothing style", "clothing_style", "style"] },
   { key: "attr_graphic", label: "Graphic", matches: ["graphic"] },
+  { key: "attr_closure", label: "Closure", matches: ["closure", "closure type", "closure_type"] },
 ] as const;
 
 export type AttributeFieldKey = (typeof ATTRIBUTE_FIELDS)[number]["key"];
@@ -255,7 +256,7 @@ export interface BulkField {
 export interface BulkGroup {
   key: string;
   label: string;
-  /** The AI Edits group sits at the top, always open and visually separated. */
+  /** Every group collapses; the flag stays so a future always-open group has somewhere to say so. */
   collapsible: boolean;
   fields: readonly BulkField[];
 }
@@ -278,7 +279,7 @@ export const BULK_GROUPS: readonly BulkGroup[] = [
   {
     key: "ai",
     label: "AI Edits",
-    collapsible: false,
+    collapsible: true,
     fields: [
       { key: "title", label: "Title" },
       { key: "description", label: "Description" },
@@ -379,6 +380,7 @@ const APPLY_KINDS: Record<BulkFieldKey, BulkApplyKind> = {
   attr_neckline: "select",
   attr_clothing_style: "select",
   attr_graphic: "select",
+  attr_closure: "select",
   variations: "none",
   price: "value",
   quantity: "value",

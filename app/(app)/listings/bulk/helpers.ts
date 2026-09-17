@@ -55,26 +55,42 @@ export function propertyForListing(
   );
 }
 
+/** What the apply-to-all dropdown offers for one attribute: value names, and per scale when the property has scales. */
+export interface AttributeChoices {
+  values: string[];
+  scales: { name: string; values: string[] }[];
+}
+
 /**
  * The value names one attribute offers across the whole selection — what the
  * apply-to-all dropdown lists. Values are matched to each row by *name*
  * rather than id on purpose: the same "Red" has a different value id on
  * different categories, so an id chosen once could not be written to a row in
- * another category.
+ * another category. Scales ("US", "UK"…) are matched by name the same way.
  */
 export function attributeChoicesAcross(
   field: BulkFieldKey,
   listings: readonly BulkListingDetail[],
   options: BulkOptions,
-): string[] {
+): AttributeChoices {
   const names = new Set<string>();
+  const byScale = new Map<string, Set<string>>();
   for (const listing of listings) {
     const property = propertyForListing(field, listing, options);
-    for (const value of property?.possibleValues ?? []) {
-      if (value.valueId != null) names.add(value.name);
+    if (!property) continue;
+    const scaleNames = new Map(property.scales.map((s) => [s.scaleId, s.displayName]));
+    for (const value of property.possibleValues) {
+      if (value.valueId == null) continue;
+      names.add(value.name);
+      const scale = value.scaleId == null ? undefined : scaleNames.get(value.scaleId);
+      if (scale) byScale.set(scale, (byScale.get(scale) ?? new Set()).add(value.name));
     }
   }
-  return [...names].sort((a, b) => a.localeCompare(b));
+  const sorted = (set: Set<string>) => [...set].sort((a, b) => a.localeCompare(b));
+  return {
+    values: sorted(names),
+    scales: [...byScale].map(([name, values]) => ({ name, values: sorted(values) })),
+  };
 }
 
 /** The taxonomy path shown under a listing's title on the Category field. */

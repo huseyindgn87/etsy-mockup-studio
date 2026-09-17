@@ -429,9 +429,9 @@ describe("the editor's sidebar", () => {
     ]);
   });
 
-  test("AI Edits sits at the top and doesn't collapse; the rest do", () => {
-    expect(BULK_GROUPS[0]).toMatchObject({ label: "AI Edits", collapsible: false });
-    expect(BULK_GROUPS.slice(1).every((g) => g.collapsible)).toBe(true);
+  test("AI Edits sits at the top, and every group collapses", () => {
+    expect(BULK_GROUPS[0]).toMatchObject({ label: "AI Edits" });
+    expect(BULK_GROUPS.every((g) => g.collapsible)).toBe(true);
   });
 
   test("each group lists exactly the fields specified, in order", () => {
@@ -462,6 +462,7 @@ describe("the editor's sidebar", () => {
       "Neckline",
       "Clothing style",
       "Graphic",
+      "Closure",
     ]);
     expect(fieldsOf("inventory")).toEqual(["Variations", "Price", "Quantity", "SKU"]);
     expect(fieldsOf("shipping")).toEqual([

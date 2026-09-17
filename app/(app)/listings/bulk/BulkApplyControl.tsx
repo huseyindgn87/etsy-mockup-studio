@@ -8,49 +8,72 @@ import {
   DIMENSION_UNITS,
   type BulkFieldKey,
 } from "@/lib/etsy/bulk-edit";
+import {
+  isUsableNumeric,
+  type AmountUnit,
+  type NumberOperation,
+  type NumericInstruction,
+  type SkuPosition,
+} from "@/lib/etsy/bulk-operations";
 import { TEXT_TRANSFORM_MODES, type TextTransformMode } from "@/lib/etsy/bulk-text";
 import { WHEN_MADE_VALUES, WHO_MADE_OPTIONS, formatWhenMade } from "@/lib/etsy/listing-classification";
-import { INPUT_CLS, labelFor } from "./helpers";
+import { INPUT_CLS, labelFor, type AttributeChoices } from "./helpers";
 import type { BulkOptions } from "./types";
 
 /**
  * What an Apply press asks the editor to do to every *ticked* row. Resolving
- * it per row is the editor's job, not this control's: a transform depends on
- * each row's current text, an append on its current list, and an attribute
- * value on the property that row's own category has.
+ * it per row is the editor's job, not this control's: an operation depends on
+ * each row's current value (or its variation grid), an append on its current
+ * list, and an attribute value on the property that row's own category has.
  */
 export type ApplyInstruction =
   | { kind: "transform"; mode: TextTransformMode; value: string; find: string }
   | { kind: "append"; value: string }
-  | { kind: "attribute"; valueName: string }
+  | { kind: "attribute"; valueName: string; scaleName: string | null }
   | { kind: "set"; value: string }
+  | { kind: "numeric"; instruction: NumericInstruction }
+  | { kind: "sku"; position: SkuPosition; text: string }
   | { kind: "about"; whoMade: string; whenMade: string; isSupply: boolean }
   | { kind: "partners"; ids: number[] }
   | { kind: "weight"; weight: string; unit: string }
   | { kind: "size"; length: string; width: string; height: string; unit: string };
 
+const NUMBER_OPERATIONS: { value: NumberOperation; label: string }[] = [
+  { value: "set", label: "Set to" },
+  { value: "increase", label: "Increase by" },
+  { value: "decrease", label: "Decrease by" },
+];
+
+const SKU_POSITIONS: { value: SkuPosition; label: string }[] = [
+  { value: "before", label: "Add before" },
+  { value: "after", label: "Add after" },
+  { value: "replace", label: "Replace" },
+];
+
+const buttonCls =
+  "h-9 shrink-0 rounded-full border border-black/10 px-4 text-xs font-medium transition-colors hover:bg-black/[.04] disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/15 dark:hover:bg-white/[.06]";
+
 /**
- * The control above the listing rows: one value, one Apply button, written
- * only to rows whose checkbox is ticked. Which control appears depends on the
- * field — a mode dropdown plus text for Title and Description, a plain text
- * input that *adds* a tag for Tags, a dropdown of Etsy's valid values for the
- * dropdown-backed fields.
- *
- * Fields edited per listing only (Media, Variations, Personalization) get no
- * control here at all.
+ * The bar above the listing rows: one value and one Apply, written only to
+ * rows whose checkbox is ticked — the secondary path next to editing each row.
+ * Its shape depends on the field; Apply stays disabled until it holds a value
+ * that can be applied. Fields edited per listing only (Media, Variations,
+ * Personalization) get no bar.
  */
 export default function BulkApplyControl({
   field,
   options,
   attributeChoices,
   targetedCount,
+  currencySymbol = "$",
   onApply,
 }: {
   field: BulkFieldKey;
   options: BulkOptions;
-  /** Value names this attribute offers across the selection. */
-  attributeChoices: string[];
+  /** Values (and scales) this attribute offers across the selection. */
+  attributeChoices: AttributeChoices;
   targetedCount: number;
+  currencySymbol?: string;
   onApply: (instruction: ApplyInstruction) => void;
 }) {
   const kind = applyKindFor(field);
@@ -60,61 +83,61 @@ export default function BulkApplyControl({
   const [text, setText] = useState("");
   const [find, setFind] = useState("");
   const [choice, setChoice] = useState("");
+  const [scale, setScale] = useState("");
+  const [operation, setOperation] = useState<NumberOperation>("set");
+  const [unit, setUnit] = useState<AmountUnit>("amount");
+  const [position, setPosition] = useState<SkuPosition>("before");
   const [whoMade, setWhoMade] = useState<string>(WHO_MADE_OPTIONS[0].value);
   const [whenMade, setWhenMade] = useState<string>(WHEN_MADE_VALUES[0]);
   const [isSupply, setIsSupply] = useState(false);
   const [partnerIds, setPartnerIds] = useState<number[]>([]);
-  const [unit, setUnit] = useState("");
+  const [measureUnit, setMeasureUnit] = useState("");
   const [size, setSize] = useState({ length: "", width: "", height: "" });
 
   if (kind === "none") return null;
 
-  const applyId = `apply-all-${field}`;
   const ariaLabel = `${label} to apply to all`;
+  const numeric = field === "price" || field === "quantity";
+  const attribute = field.startsWith("attr_");
+  const scales = attribute ? attributeChoices.scales : [];
+  const scaleValues = scales.find((s) => s.name === scale)?.values ?? [];
 
-  function submit() {
+  const instruction = ((): ApplyInstruction | null => {
+    if (numeric) {
+      const numericInstruction = { operation, amount: text, unit };
+      return isUsableNumeric(field, numericInstruction) ? { kind: "numeric", instruction: numericInstruction } : null;
+    }
+    if (field === "sku") return text ? { kind: "sku", position, text } : null;
     if (kind === "transform") {
-      if (mode === "replace" ? !find : !text) return;
-      onApply({ kind: "transform", mode, value: text, find });
-      return;
+      return (mode === "replace" ? find : text) ? { kind: "transform", mode, value: text, find } : null;
     }
-    if (kind === "append") {
-      if (!text.trim()) return;
-      onApply({ kind: "append", value: text.trim() });
-      setText("");
-      return;
-    }
-    if (field === "about") {
-      onApply({ kind: "about", whoMade, whenMade, isSupply });
-      return;
-    }
-    if (field === "productionPartners") {
-      onApply({ kind: "partners", ids: partnerIds });
-      return;
-    }
+    if (kind === "append") return text.trim() ? { kind: "append", value: text.trim() } : null;
+    if (field === "about") return { kind: "about", whoMade, whenMade, isSupply };
+    if (field === "productionPartners") return partnerIds.length > 0 ? { kind: "partners", ids: partnerIds } : null;
     if (field === "itemWeight") {
-      if (!text.trim() || !unit) return;
-      onApply({ kind: "weight", weight: text.trim(), unit });
-      return;
+      return text.trim() && measureUnit ? { kind: "weight", weight: text.trim(), unit: measureUnit } : null;
     }
     if (field === "itemSize") {
-      if (!unit) return;
-      onApply({ kind: "size", ...size, unit });
-      return;
+      return measureUnit && (size.length || size.width || size.height)
+        ? { kind: "size", ...size, unit: measureUnit }
+        : null;
     }
-    if (kind === "select" && isAttribute(field)) {
-      if (!choice) return;
-      onApply({ kind: "attribute", valueName: choice });
-      return;
+    if (attribute) {
+      if (!choice || (scales.length > 0 && !scale)) return null;
+      return { kind: "attribute", valueName: choice, scaleName: scales.length > 0 ? scale : null };
     }
-    if (kind === "select") {
-      if (!choice) return;
-      onApply({ kind: "set", value: choice });
-      return;
-    }
-    if (!text.trim()) return;
-    onApply({ kind: "set", value: text.trim() });
+    return choice ? { kind: "set", value: choice } : null;
+  })();
+
+  function submit() {
+    if (!instruction) return;
+    onApply(instruction);
+    if (instruction.kind === "append") setText("");
   }
+
+  const selectChoicesList = attribute
+    ? (scales.length > 0 ? scaleValues : attributeChoices.values).map((name) => ({ value: name, label: name }))
+    : selectChoices(field, options);
 
   return (
     <section
@@ -122,15 +145,104 @@ export default function BulkApplyControl({
       className="mt-4 rounded-xl border border-dashed border-black/15 bg-white p-4 dark:border-white/20 dark:bg-zinc-950"
     >
       <div className="flex items-center justify-between">
-        <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
-          Apply to all selected
-        </h2>
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Apply to all selected</h2>
         <span className="text-xs text-zinc-500">
           {targetedCount} listing{targetedCount === 1 ? "" : "s"} ticked
         </span>
       </div>
 
       <div className="mt-2 flex flex-wrap items-end gap-2">
+        {numeric && (
+          <>
+            <label className="text-sm">
+              <span className="block text-xs text-zinc-500">Operation</span>
+              <select
+                aria-label={`${label} operation`}
+                value={operation}
+                onChange={(e) => {
+                  const next = e.target.value as NumberOperation;
+                  setOperation(next);
+                  if (next === "set") setUnit("amount");
+                }}
+                className={`${INPUT_CLS} mt-1 h-9 w-36`}
+              >
+                {NUMBER_OPERATIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="w-32 text-sm">
+              <span className="block text-xs text-zinc-500">Amount</span>
+              <input
+                type="text"
+                inputMode="decimal"
+                aria-label={ariaLabel}
+                value={text}
+                onChange={(e) => {
+                  if (/^\d*(\.\d*)?$/.test(e.target.value)) setText(e.target.value);
+                }}
+                className={`${INPUT_CLS} mt-1 h-9`}
+              />
+            </label>
+            {field === "price" && (
+              <div role="group" aria-label="Amount unit" className="flex h-9 overflow-hidden rounded-lg border border-black/10 dark:border-white/15">
+                {(
+                  [
+                    ["amount", currencySymbol, "Amount in money"],
+                    ["percent", "%", "Amount as a percentage"],
+                  ] as const
+                ).map(([value, text, name]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    aria-label={name}
+                    aria-pressed={unit === value}
+                    disabled={value === "percent" && operation === "set"}
+                    onClick={() => setUnit(value)}
+                    className={`w-9 text-sm disabled:cursor-not-allowed disabled:opacity-40 ${
+                      unit === value ? "bg-black text-white dark:bg-white dark:text-black" : ""
+                    }`}
+                  >
+                    {text}
+                  </button>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+
+        {field === "sku" && (
+          <>
+            <label className="text-sm">
+              <span className="block text-xs text-zinc-500">Position</span>
+              <select
+                aria-label="SKU position"
+                value={position}
+                onChange={(e) => setPosition(e.target.value as SkuPosition)}
+                className={`${INPUT_CLS} mt-1 h-9 w-36`}
+              >
+                {SKU_POSITIONS.map((p) => (
+                  <option key={p.value} value={p.value}>
+                    {p.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="min-w-[10rem] flex-1 text-sm">
+              <span className="block text-xs text-zinc-500">Text</span>
+              <input
+                type="text"
+                aria-label={ariaLabel}
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                className={`${INPUT_CLS} mt-1 h-9`}
+              />
+            </label>
+          </>
+        )}
+
         {kind === "transform" && (
           <>
             <label className="text-sm">
@@ -161,12 +273,9 @@ export default function BulkApplyControl({
               </label>
             )}
             <label className="min-w-[10rem] flex-1 text-sm">
-              <span className="block text-xs text-zinc-500">
-                {mode === "replace" ? "Replace with" : "Text"}
-              </span>
+              <span className="block text-xs text-zinc-500">{mode === "replace" ? "Replace with" : "Text"}</span>
               <input
                 type="text"
-                id={applyId}
                 aria-label={ariaLabel}
                 value={text}
                 onChange={(e) => setText(e.target.value)}
@@ -178,12 +287,9 @@ export default function BulkApplyControl({
 
         {kind === "append" && (
           <label className="min-w-[12rem] flex-1 text-sm">
-            <span className="block text-xs text-zinc-500">
-              {field === "tags" ? "Tag to add" : "Material to add"}
-            </span>
+            <span className="block text-xs text-zinc-500">{field === "tags" ? "Tag to add" : "Material to add"}</span>
             <input
               type="text"
-              id={applyId}
               aria-label={ariaLabel}
               value={text}
               maxLength={field === "tags" ? MAX_TAG_LENGTH : undefined}
@@ -251,12 +357,9 @@ export default function BulkApplyControl({
             <span className="block text-xs text-zinc-500">Production partners</span>
             <select
               multiple
-              id={applyId}
               aria-label={ariaLabel}
               value={partnerIds.map(String)}
-              onChange={(e) =>
-                setPartnerIds([...e.target.selectedOptions].map((o) => Number(o.value)))
-              }
+              onChange={(e) => setPartnerIds([...e.target.selectedOptions].map((o) => Number(o.value)))}
               className={`${INPUT_CLS} mt-1 h-20 py-1`}
             >
               {options.productionPartners.map((p) => (
@@ -277,7 +380,6 @@ export default function BulkApplyControl({
                 type="number"
                 min="0"
                 step="0.01"
-                id={applyId}
                 aria-label={ariaLabel}
                 value={text}
                 onChange={(e) => setText(e.target.value)}
@@ -285,11 +387,11 @@ export default function BulkApplyControl({
               />
             </label>
             <label className="w-28 text-sm">
-              <span className="block text-xs text-zinc-500">Unit</span>
+              <span className="block text-xs text-zinc-500">Scale</span>
               <select
                 aria-label="Item weight unit to apply to all"
-                value={unit}
-                onChange={(e) => setUnit(e.target.value)}
+                value={measureUnit}
+                onChange={(e) => setMeasureUnit(e.target.value)}
                 className={`${INPUT_CLS} mt-1 h-9`}
               >
                 <option value="">Choose…</option>
@@ -320,11 +422,11 @@ export default function BulkApplyControl({
               </label>
             ))}
             <label className="w-28 text-sm">
-              <span className="block text-xs text-zinc-500">Unit</span>
+              <span className="block text-xs text-zinc-500">Scale</span>
               <select
                 aria-label="Item size unit to apply to all"
-                value={unit}
-                onChange={(e) => setUnit(e.target.value)}
+                value={measureUnit}
+                onChange={(e) => setMeasureUnit(e.target.value)}
                 className={`${INPUT_CLS} mt-1 h-9`}
               >
                 <option value="">Choose…</option>
@@ -338,47 +440,49 @@ export default function BulkApplyControl({
           </>
         )}
 
-        {kind === "select" && !["about", "productionPartners"].includes(field) && (
-          <label className="min-w-[14rem] flex-1 text-sm">
-            <span className="block text-xs text-zinc-500">{label}</span>
-            <select
-              id={applyId}
-              aria-label={ariaLabel}
-              value={choice}
-              onChange={(e) => setChoice(e.target.value)}
-              className={`${INPUT_CLS} mt-1 h-9`}
-            >
-              <option value="">Choose…</option>
-              {selectChoices(field, options, attributeChoices).map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          </label>
+        {kind === "select" && field !== "about" && field !== "productionPartners" && (
+          <>
+            <label className="min-w-[14rem] flex-1 text-sm">
+              <span className="block text-xs text-zinc-500">{label}</span>
+              <select
+                aria-label={ariaLabel}
+                value={choice}
+                onChange={(e) => setChoice(e.target.value)}
+                className={`${INPUT_CLS} mt-1 h-9`}
+              >
+                <option value="">Choose {label.toLowerCase()}</option>
+                {selectChoicesList.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {scales.length > 0 && (
+              <label className="w-40 text-sm">
+                <span className="block text-xs text-zinc-500">Scale</span>
+                <select
+                  aria-label={`${label} scale to apply to all`}
+                  value={scale}
+                  onChange={(e) => {
+                    setScale(e.target.value);
+                    setChoice("");
+                  }}
+                  className={`${INPUT_CLS} mt-1 h-9`}
+                >
+                  <option value="">Choose scale</option>
+                  {scales.map((s) => (
+                    <option key={s.name} value={s.name}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </>
         )}
 
-        {kind === "value" && (
-          <label className="min-w-[10rem] flex-1 text-sm">
-            <span className="block text-xs text-zinc-500">{label}</span>
-            <input
-              type={field === "price" || field === "quantity" ? "number" : "text"}
-              min={field === "price" || field === "quantity" ? "0" : undefined}
-              step={field === "price" ? "0.01" : undefined}
-              id={applyId}
-              aria-label={ariaLabel}
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              className={`${INPUT_CLS} mt-1 h-9`}
-            />
-          </label>
-        )}
-
-        <button
-          type="button"
-          onClick={submit}
-          className="h-9 shrink-0 rounded-full border border-black/10 px-4 text-xs font-medium transition-colors hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
-        >
+        <button type="button" onClick={submit} disabled={!instruction} className={buttonCls}>
           Apply
         </button>
       </div>
@@ -392,27 +496,13 @@ export default function BulkApplyControl({
   );
 }
 
-function isAttribute(field: BulkFieldKey): boolean {
-  return field.startsWith("attr_");
-}
-
 /** The valid Etsy values one dropdown-backed field offers. */
-function selectChoices(
-  field: BulkFieldKey,
-  options: BulkOptions,
-  attributeChoices: string[],
-): { value: string; label: string }[] {
-  if (isAttribute(field)) {
-    return attributeChoices.map((name) => ({ value: name, label: name }));
-  }
+function selectChoices(field: BulkFieldKey, options: BulkOptions): { value: string; label: string }[] {
   switch (field) {
     case "shopSectionId":
       return options.sections.map((s) => ({ value: String(s.shopSectionId), label: s.title }));
     case "shippingProfileId":
-      return options.shippingProfiles.map((p) => ({
-        value: String(p.shippingProfileId),
-        label: p.title,
-      }));
+      return options.shippingProfiles.map((p) => ({ value: String(p.shippingProfileId), label: p.title }));
     case "readinessStateId":
       return options.processingProfiles.map((p) => ({
         value: String(p.readinessStateId),
@@ -421,10 +511,7 @@ function selectChoices(
         }`,
       }));
     case "returnPolicyId":
-      return options.returnPolicies.map((p) => ({
-        value: String(p.returnPolicyId),
-        label: p.label,
-      }));
+      return options.returnPolicies.map((p) => ({ value: String(p.returnPolicyId), label: p.label }));
     case "taxonomyId":
       return options.taxonomy.map((t) => ({ value: String(t.id), label: t.path }));
     default:
