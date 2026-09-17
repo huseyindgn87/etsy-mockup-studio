@@ -362,6 +362,20 @@ function ScheduleEntry({
           {badge.label}
         </span>
       )}
+      {item.kind === "bulk_edit" && item.results.length > 0 && (
+        <ul className="mt-1 space-y-px text-[10px] leading-tight text-zinc-600 dark:text-zinc-400">
+          {item.results.map((result) => (
+            <li
+              key={result.listingId}
+              title={result.error ?? undefined}
+              className={`line-clamp-2 ${result.ok ? "" : "text-red-700 dark:text-red-400"}`}
+            >
+              {result.ok ? "✓" : "!"} {result.title || result.listingId}
+              {result.error ? `: ${result.error}` : ""}
+            </li>
+          ))}
+        </ul>
+      )}
       {editable && (
         <div className="mt-1 flex justify-end gap-0.5">
           <button

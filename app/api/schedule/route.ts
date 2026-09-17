@@ -1,7 +1,9 @@
 import { type NextRequest, NextResponse } from "next/server";
+import { parseBulkEditRequest } from "@/lib/scheduling/bulk-request";
 import { parseScheduleContent } from "@/lib/scheduling/content-request";
 import { resolveScheduleScope, storeResultResponse } from "@/lib/scheduling/request";
 import {
+  createScheduledBulkEdit,
   createScheduledListing,
   listActiveSchedulesForDraft,
   listScheduledListings,
@@ -37,7 +39,15 @@ export async function GET(request: NextRequest) {
 }
 
 /**
- * `POST /api/schedule` — `{ draftId, date, time, timezone, publishSpec,
+ * `POST /api/schedule` — two kinds of job.
+ *
+ * `{ kind: "bulk_edit", updates, setId?, date, time, timezone }` stores the
+ * bulk editor's pending per-listing changes, to be applied by the runner at
+ * that time through the same write path Sync updates uses. Every listing is
+ * checked against the caller's own cached listings, and any photo the edit
+ * adds must already be uploaded via `PUT /api/schedule/renders/...`.
+ *
+ * Otherwise `{ draftId, date, time, timezone, publishSpec,
  * renderSetId, images }`. `date`/`time` are a wall time in `timezone`, stored
  * as a UTC instant; it must be in the future. `images` (1–20, rank order)
  * must already be uploaded via `PUT /api/schedule/renders/...`. Only records
@@ -56,12 +66,25 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Expected a JSON body." }, { status: 400 });
   }
 
-  if (typeof body.draftId !== "string" || body.draftId === "") {
-    return NextResponse.json({ error: "Provide the `draftId` to schedule." }, { status: 400 });
-  }
   const time = parseScheduleTime(body);
   if (!time.ok) return NextResponse.json({ error: time.error }, { status: 400 });
 
+  if (body.kind === "bulk_edit") {
+    const job = await parseBulkEditRequest(resolved.scope, body);
+    if (!job.ok) return job.response;
+    const created = await createScheduledBulkEdit(
+      resolved.scope,
+      time.scheduledAt,
+      time.timezone,
+      job.job,
+      job.setId,
+    );
+    return storeResultResponse(created, 201);
+  }
+
+  if (typeof body.draftId !== "string" || body.draftId === "") {
+    return NextResponse.json({ error: "Provide the `draftId` to schedule." }, { status: 400 });
+  }
   const content = await parseScheduleContent(resolved.scope, body);
   if (!content.ok) return content.response;
 

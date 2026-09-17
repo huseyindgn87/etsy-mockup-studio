@@ -4,6 +4,7 @@ vi.mock("@/lib/scheduling/runner", () => ({
   runDueScheduledListings: vi.fn(async () => ({ published: ["s1"], retrying: [], failed: [], skipped: 0, recovered: 0 })),
 }));
 vi.mock("@/lib/scheduling/publisher", () => ({ publishScheduledListing: vi.fn() }));
+vi.mock("@/lib/scheduling/bulk-publisher", () => ({ applyScheduledBulkEdit: vi.fn() }));
 vi.mock("@/lib/storage/r2", () => ({ deleteObjects: vi.fn() }));
 
 import { POST } from "@/app/api/schedule/run/route";

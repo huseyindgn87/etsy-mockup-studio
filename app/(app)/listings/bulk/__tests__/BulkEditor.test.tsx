@@ -101,6 +101,9 @@ let aiAnswer: (body: { field: string; listing: { title: string } }) => { status:
   body: { value: body.field === "tags" ? ["ai tag", "second tag"] : `AI ${body.listing.title}` },
 });
 
+/** Whether the schedule's file uploads answer or report that R2 is missing. */
+let storageConfigured = true;
+
 /** Each listing's variation photos as the inventory read returns them; undefined = Etsy didn't return them. */
 let variationImagesFor: (listingId: number) => { propertyId: number; valueId: number; value: string; imageId: number }[] | undefined =
   () => [];
@@ -166,6 +169,14 @@ function mockFetch(listings: BulkListingDetail[] = LISTINGS) {
         results: saveResults ? saveResults(updates) : updates.map((u) => ({ listingId: u.listingId, ok: true })),
       });
     }
+    if (url === "/api/schedule") {
+      return jsonResponse({ scheduledListing: { id: "sched-1", scheduledAt: "2026-09-20T14:30:00.000Z" } }, 201);
+    }
+    const renderUpload = /^\/api\/schedule\/renders\/([^/]+)\/([^/]+)$/.exec(url);
+    if (renderUpload) {
+      if (!storageConfigured) return jsonResponse({ error: "File storage (R2) isn't set up yet." }, 503);
+      return jsonResponse({ ok: true, key: `scheduled/alice/${renderUpload[1]}/${renderUpload[2]}` });
+    }
     if (url === "/api/etsy/sections") {
       return jsonResponse({ sections: [{ shopSectionId: 9, title: "Mugs" }] });
     }
@@ -217,6 +228,12 @@ const allSaves = (): { listingId: number; patch: Record<string, unknown> }[][] =
     .filter(([url]) => url === "/api/etsy/listings/bulk/save")
     .map(([, init]) => JSON.parse((init as RequestInit).body as string).updates);
 
+/** Every scheduled-edit request body, in order. */
+const scheduleCalls = () =>
+  fetchMock.mock.calls
+    .filter(([url]) => url === "/api/schedule")
+    .map(([, init]) => JSON.parse((init as RequestInit).body as string));
+
 const aiCalls = () =>
   fetchMock.mock.calls
     .filter(([url]) => url === "/api/ai/optimize")
@@ -259,6 +276,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   saveResults = null;
   saveDelay = null;
+  storageConfigured = true;
   variationImagesFor = () => [];
   aiAnswer = (body) => ({
     status: 200,
@@ -1275,8 +1293,10 @@ describe("saving", () => {
 
     gate.resolve();
     await waitFor(() => expect(syncButton()).toHaveTextContent(/^Sync updates$/));
-    expect(screen.getByRole("button", { name: "Schedule" })).toBeEnabled();
     expect(screen.getByRole("link", { name: "Cancel" })).not.toHaveAttribute("aria-disabled");
+    // Schedule stores what is still pending, so it comes back with the next edit.
+    fireEvent.change(rowField("Title", 102), { target: { value: "Second" } });
+    expect(screen.getByRole("button", { name: "Schedule" })).toBeEnabled();
   });
 
   test("the progress line counts the listings written so far", async () => {
@@ -1341,5 +1361,103 @@ describe("layout", () => {
     const mounted = screen.getAllByRole("group", { name: /^Listing \d+$/ }).length;
     expect(mounted).toBeGreaterThan(3);
     expect(mounted).toBeLessThan(60);
+  });
+});
+
+describe("scheduling the pending edits", () => {
+  /** Opens the picker and confirms it with the time it suggests. */
+  async function scheduleNow() {
+    fireEvent.click(screen.getByRole("button", { name: "Schedule" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Schedule edits" }));
+  }
+
+  test("Schedule is offered only once something has changed", async () => {
+    await renderEditor();
+    expect(screen.getByRole("button", { name: "Schedule" })).toBeDisabled();
+
+    openField("Title", "Listings");
+    fireEvent.change(rowField("Title", 101), { target: { value: "First" } });
+    expect(screen.getByRole("button", { name: "Schedule" })).toBeEnabled();
+  });
+
+  test("stores every pending change as a job, writing nothing to Etsy", async () => {
+    await renderEditor();
+    openField("Title", "Listings");
+    fireEvent.change(rowField("Title", 101), { target: { value: "First" } });
+    fireEvent.change(rowField("Title", 102), { target: { value: "Second" } });
+
+    await scheduleNow();
+
+    await waitFor(() => expect(scheduleCalls()).toHaveLength(1));
+    const [body] = scheduleCalls();
+    expect(body).toMatchObject({
+      kind: "bulk_edit",
+      timezone: expect.any(String),
+      updates: [
+        { listingId: 101, title: "Listing 101", patch: { title: "First" } },
+        { listingId: 102, title: "Listing 102", patch: { title: "Second" } },
+      ],
+    });
+    expect(allSaves()).toHaveLength(0);
+    expect(await screen.findByText(/Scheduled 2 listings for/)).toBeInTheDocument();
+  });
+
+  /** Puts one picked file into listing 101's photo grid, as the empty-slot picker does. */
+  function addPhoto() {
+    URL.createObjectURL = vi.fn(() => "blob:new");
+    URL.revokeObjectURL = vi.fn();
+    const input = screen
+      .getByRole("group", { name: "Listing 101" })
+      .querySelector<HTMLInputElement>('[data-testid="photo-file-input"]')!;
+    fireEvent.change(input, { target: { files: [new File(["bytes"], "back.jpg", { type: "image/jpeg" })] } });
+  }
+
+  test("a photo added to a row is uploaded to the job's storage first", async () => {
+    await renderEditor();
+    openField("Photos", "Media");
+    addPhoto();
+
+    await scheduleNow();
+
+    await waitFor(() => expect(scheduleCalls()).toHaveLength(1));
+    const [update] = scheduleCalls()[0].updates;
+    expect(update.media.imageFiles).toEqual([
+      { key: expect.stringContaining("media-101-image-00"), filename: "back.jpg", contentType: "image/jpeg" },
+    ]);
+    expect(update.media.images).toEqual([
+      { kind: "existing", imageId: 1, altText: "" },
+      { kind: "new", index: 0, altText: "" },
+    ]);
+  });
+
+  test("without file storage the picker says so and nothing is scheduled", async () => {
+    storageConfigured = false;
+    await renderEditor();
+    openField("Photos", "Media");
+    addPhoto();
+
+    await scheduleNow();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("File storage (R2) isn't set up yet.");
+    expect(scheduleCalls()).toHaveLength(0);
+  });
+
+  test("once scheduled, the screen holds nothing unsaved", async () => {
+    await renderEditor();
+    openField("Title", "Listings");
+    fireEvent.change(rowField("Title", 101), { target: { value: "First" } });
+
+    const warned = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(warned);
+    expect(warned.defaultPrevented).toBe(true);
+
+    await scheduleNow();
+    await screen.findByText(/Scheduled 1 listing for/);
+
+    const after = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(after);
+    expect(after.defaultPrevented).toBe(false);
+    expect(syncButton()).toBeDisabled();
   });
 });

@@ -55,6 +55,10 @@ import {
 } from "@/app/components/listing-media/existing-media";
 import { checkPickedVideo } from "@/app/components/listing-media/video-file";
 import { useUnsavedChangesGuard } from "@/app/components/unsaved-changes/useUnsavedChangesGuard";
+import ScheduleDialog from "@/app/(app)/schedule/ScheduleDialog";
+import { bulkMediaSlot } from "@/lib/scheduling/render-keys";
+import type { ScheduledBulkUpdate, ScheduledImageEntry, ScheduledVideoEntry } from "@/lib/scheduling/bulk-job";
+import type { ScheduleTimeInput } from "@/lib/scheduling/types";
 import VariationRowBlock, { VARIATION_FIELDS } from "./VariationRowBlock";
 import VirtualListingRows from "./VirtualListingRows";
 import { INPUT_CLS, attributeChoicesAcross, labelFor, propertyForListing } from "./helpers";
@@ -100,6 +104,28 @@ async function writeWithTimeout(url: string, init: RequestInit): Promise<Respons
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Uploads one photo or video a scheduled bulk edit adds, into the job's own
+ * storage prefix, and returns the stored file as the job records it.
+ */
+async function storeScheduledFile(
+  setId: string,
+  listingId: number,
+  kind: "image" | "video",
+  index: number,
+  file: File,
+): Promise<{ key: string; filename: string; contentType: string }> {
+  const contentType = file.type || (kind === "image" ? "image/jpeg" : "video/mp4");
+  const res = await fetch(`/api/schedule/renders/${setId}/${bulkMediaSlot(listingId, kind, index)}`, {
+    method: "PUT",
+    headers: { "Content-Type": contentType },
+    body: file,
+  });
+  if (!res.ok) throw new Error(await errorFrom(res));
+  const { key } = (await res.json()) as { key: string };
+  return { key, filename: file.name || `${kind}-${index + 1}`, contentType };
 }
 
 /** One listing's media and field writes, reported as a single row result. */
@@ -214,7 +240,10 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [results, setResults] = useState<SaveResult[] | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [scheduleNote, setScheduleNote] = useState(false);
+  /** The date/time picker, open while the user is scheduling this edit. */
+  const [scheduling, setScheduling] = useState(false);
+  /** What the last successful schedule covered, shown in place of the results line. */
+  const [scheduled, setScheduled] = useState<{ count: number; when: string } | null>(null);
   /**
    * Each row's photo/video grid, once it has been touched. Local only — a
    * listing's media is written by Sync updates and nothing else.
@@ -896,6 +925,81 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
     return done.length > 0 && done.every((r) => r.ok);
   }
 
+
+  /**
+   * Store every pending change as a scheduled job instead of writing it now.
+   * Files the edit adds are uploaded to the job's own storage prefix first —
+   * the runner has no browser to read them from — and the job records which
+   * listings it covers, so it can report per listing exactly as Sync updates
+   * does. Nothing reaches Etsy here.
+   */
+  async function scheduleEdits(input: ScheduleTimeInput): Promise<string | null> {
+    const ids = [...new Set([...updates.map((u) => u.listingId), ...mediaUpdates.map((l) => l.listingId)])];
+    if (ids.length === 0) return "There are no changes to schedule.";
+
+    const setId = crypto.randomUUID();
+    const payload: ScheduledBulkUpdate[] = [];
+    for (const id of ids) {
+      const listing = (listings ?? []).find((l) => l.listingId === id);
+      if (!listing) continue;
+      const patch = updates.find((u) => u.listingId === id)?.patch ?? {};
+
+      // The same refusal a save makes: a grid with errors is never stored.
+      const form = patch.variations || patch.variationImages ? variationEdits[id] : undefined;
+      const invalid = form ? validateOfferings(form, variationPhotoSlots(listing).map((s) => s.slotId))[0] : undefined;
+      if (invalid) {
+        setShowVariationErrors(true);
+        setExpandedBlocks((prev) => ({ ...prev, [id]: true }));
+        return `${listing.title}: ${invalid.message}`;
+      }
+
+      let media: ScheduledBulkUpdate["media"];
+      if (mediaUpdates.some((l) => l.listingId === id)) {
+        const { payload: order, imageFiles, videoFiles } = mediaSavePayload(mediaFor(listing));
+        try {
+          media = {
+            images: order.images as ScheduledImageEntry[],
+            videos: order.videos as ScheduledVideoEntry[],
+            imageFiles: await Promise.all(imageFiles.map((file, i) => storeScheduledFile(setId, id, "image", i, file))),
+            videoFiles: await Promise.all(videoFiles.map((file, i) => storeScheduledFile(setId, id, "video", i, file))),
+          };
+        } catch (err) {
+          return err instanceof Error ? err.message : "The added photos could not be stored.";
+        }
+      }
+
+      payload.push({ listingId: id, title: listing.title, patch, ...(media ? { media } : {}) });
+    }
+
+    let when: string;
+    try {
+      const res = await fetch("/api/schedule", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind: "bulk_edit", ...input, setId, updates: payload }),
+      });
+      if (!res.ok) throw new Error(await errorFrom(res));
+      const body = (await res.json()) as { scheduledListing: { scheduledAt: string } };
+      when = new Date(body.scheduledListing.scheduledAt).toLocaleString();
+    } catch (err) {
+      return err instanceof Error ? err.message : "The edits could not be scheduled.";
+    }
+
+    // The edits now live on the scheduled job, so the screen holds nothing
+    // unsaved — no warning fires on the way out.
+    setMedia((prev) => {
+      for (const state of Object.values(prev)) for (const added of state.added) URL.revokeObjectURL(added.url);
+      return {};
+    });
+    setEdited({});
+    setVariationEdits({});
+    setResults(null);
+    setSaveError(null);
+    setScheduled({ count: payload.length, when });
+    setScheduling(false);
+    return null;
+  }
+
   /** Ask Claude for a new value of the AI field for one listing, filling its row. */
   async function regenerate(listing: BulkListingDetail) {
     const id = listing.listingId;
@@ -1119,9 +1223,8 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
             </Link>
             <button
               type="button"
-              onClick={() => setScheduleNote((open) => !open)}
-              aria-expanded={scheduleNote}
-              disabled={saving}
+              onClick={() => setScheduling(true)}
+              disabled={saving || syncCount === 0}
               className="inline-flex h-9 items-center rounded-full border border-black/[.08] px-4 text-sm font-medium transition-colors hover:bg-black/[.04] disabled:opacity-40 dark:border-white/[.145] dark:hover:bg-white/[.06]"
             >
               Schedule
@@ -1151,15 +1254,29 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
           </p>
         )}
 
-        {scheduleNote && (
+        {scheduled && (
           <div className="mt-4 rounded-xl border border-black/10 bg-white px-4 py-3 text-sm dark:border-white/15 dark:bg-zinc-950">
-            Scheduling covers publishing a <em>new</em> listing from a draft — a scheduled job holds the images it
-            will upload. An edit to listings that are already live has nothing to render ahead of time, so it
-            isn&apos;t schedulable yet.{" "}
+            Scheduled {scheduled.count} listing{scheduled.count === 1 ? "" : "s"} for {scheduled.when}. Nothing has
+            been sent to Etsy — the changes are applied then.{" "}
             <Link href="/schedule" className="font-medium text-primary underline underline-offset-2">
               See scheduled listings
             </Link>
           </div>
+        )}
+
+        {scheduling && (
+          <ScheduleDialog
+            heading="Schedule these edits"
+            description={
+              <>
+                {syncCount} listing{syncCount === 1 ? "" : "s"} will be updated at this time, exactly as Sync updates
+                would. Nothing is sent to Etsy until then.
+              </>
+            }
+            submitLabel="Schedule edits"
+            onSubmit={scheduleEdits}
+            onClose={() => setScheduling(false)}
+          />
         )}
 
         {loadError && (

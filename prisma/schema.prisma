@@ -509,7 +509,15 @@ model ScheduledListing {
   scheduledAt   DateTime
   timezone      String
   status        String    @default("pending")
+  /// "publish" (a draft becomes a new Etsy listing) or "bulk_edit" (pending
+  /// bulk-editor changes applied to listings that are already live).
+  kind          String    @default("publish")
   publishSpec   Json?
+  /// A bulk edit's per-listing patches, fixed when it was scheduled.
+  bulkEdit      Json?
+  /// What the runner's last pass did, per listing — the same per-listing
+  /// outcomes Sync updates reports on screen.
+  results       Json?
   renderSetId   String?
   images        Json      @default("[]")
   attemptCount  Int       @default(0)

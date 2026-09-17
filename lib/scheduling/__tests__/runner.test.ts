@@ -50,6 +50,9 @@ function makeDeps(publish?: RunnerDeps["publish"]) {
           return id;
         }),
     ),
+    applyBulkEdit: vi.fn<RunnerDeps["applyBulkEdit"]>(async (_row, updates) =>
+      updates.map((u) => ({ listingId: u.listingId, title: u.title, ok: true })),
+    ),
     deleteImages: vi.fn<RunnerDeps["deleteImages"]>(async () => {}),
     now: () => new Date(),
   };

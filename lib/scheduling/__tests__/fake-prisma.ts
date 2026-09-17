@@ -18,12 +18,15 @@ export interface FakeScheduledListing {
   id: string;
   userId: string;
   shopId: string;
+  kind: string;
   draftId: string | null;
   activeDraftId: string | null;
   scheduledAt: Date;
   timezone: string;
   status: string;
   publishSpec: unknown;
+  bulkEdit: unknown;
+  results: unknown;
   renderSetId: string | null;
   images: unknown;
   attemptCount: number;
@@ -113,11 +116,14 @@ export function seedScheduled(
 ): FakeScheduledListing {
   const full: FakeScheduledListing = {
     id: `s${db.nextId++}`,
+    kind: "publish",
     draftId: null,
     activeDraftId: null,
     timezone: "UTC",
     status: "pending",
     publishSpec: null,
+    bulkEdit: null,
+    results: null,
     renderSetId: null,
     images: [],
     attemptCount: 0,

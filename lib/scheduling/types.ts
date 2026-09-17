@@ -38,9 +38,27 @@ export interface ScheduledImage {
   altText?: string;
 }
 
+/** What a scheduled job does when it runs. */
+export const SCHEDULE_KINDS = ["publish", "bulk_edit"] as const;
+export type ScheduleKind = (typeof SCHEDULE_KINDS)[number];
+
+/**
+ * What applying one listing's scheduled bulk edit did — the same per-listing
+ * outcome the bulk screen's Sync updates reports on screen.
+ */
+export interface ScheduledBulkResult {
+  listingId: number;
+  title: string;
+  ok: boolean;
+  /** Something landed but not all of it (the media step failed, or only the variation photos did). */
+  partial?: boolean;
+  error?: string;
+}
+
 /** One scheduled listing as the API returns it. */
 export interface ScheduledListingSummary {
   id: string;
+  kind: ScheduleKind;
   draftId: string | null;
   title: string;
   thumbnailUrl: string | null;
@@ -50,6 +68,10 @@ export interface ScheduledListingSummary {
   timezone: string;
   status: ScheduleStatus;
   imageCount: number;
+  /** For a bulk edit: how many listings it covers. 0 for a publish. */
+  listingCount: number;
+  /** For a bulk edit: what the last run did, per listing. Empty until it has run. */
+  results: ScheduledBulkResult[];
   attemptCount: number;
   /** ISO 8601 — when a failed attempt will be retried, while it waits out its backoff. */
   nextAttemptAt: string | null;

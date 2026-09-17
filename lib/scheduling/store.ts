@@ -14,16 +14,19 @@
  * be rescheduled or cancelled underneath it.
  */
 
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db/prisma";
 import type { PublishSpec } from "@/lib/etsy/publish-listing";
+import { bulkEditFileKeys, coerceBulkResults, type ScheduledBulkEdit } from "./bulk-job";
 import { coerceScheduledImages } from "./publish-spec";
 import {
   ACTIVE_STATUSES,
   EDITABLE_STATUSES,
+  SCHEDULE_KINDS,
   SCHEDULE_STATUSES,
   type ScheduledImage,
   type ScheduledListingSummary,
+  type ScheduleKind,
   type ScheduleStatus,
 } from "./types";
 
@@ -47,7 +50,10 @@ const ALREADY_SCHEDULED = "This draft is already scheduled. Reschedule it instea
 
 interface ScheduledRow {
   id: string;
+  kind: string;
   draftId: string | null;
+  bulkEdit: Prisma.JsonValue;
+  results: Prisma.JsonValue;
   scheduledAt: Date;
   timezone: string;
   status: string;
@@ -71,15 +77,30 @@ function coerceStatus(value: string): ScheduleStatus {
   return (SCHEDULE_STATUSES as readonly string[]).includes(value) ? (value as ScheduleStatus) : "failed";
 }
 
+function coerceKind(value: string): ScheduleKind {
+  return (SCHEDULE_KINDS as readonly string[]).includes(value) ? (value as ScheduleKind) : "publish";
+}
+
+/** How many listings a stored bulk edit covers, without validating the whole job. */
+function bulkListingCount(bulkEdit: Prisma.JsonValue): number {
+  const updates = (bulkEdit as { updates?: unknown } | null)?.updates;
+  return Array.isArray(updates) ? updates.length : 0;
+}
+
 function toSummary(row: ScheduledRow): ScheduledListingSummary {
+  const kind = coerceKind(row.kind);
+  const listingCount = kind === "bulk_edit" ? bulkListingCount(row.bulkEdit) : 0;
   let title = "Deleted draft";
   let thumbnailUrl: string | null = null;
-  if (row.draft && row.draftId) {
+  if (kind === "bulk_edit") {
+    title = `Bulk edit · ${listingCount} listing${listingCount === 1 ? "" : "s"}`;
+  } else if (row.draft && row.draftId) {
     title = row.draft.title.trim() || "Untitled listing";
     if (row.draft.hasThumbnail) thumbnailUrl = `/api/drafts/${row.draftId}/assets/thumbnail/thumb`;
   }
   return {
     id: row.id,
+    kind,
     draftId: row.draftId,
     title,
     thumbnailUrl,
@@ -87,6 +108,8 @@ function toSummary(row: ScheduledRow): ScheduledListingSummary {
     timezone: row.timezone,
     status: coerceStatus(row.status),
     imageCount: coerceScheduledImages(row.images).length,
+    listingCount,
+    results: coerceBulkResults(row.results),
     attemptCount: row.attemptCount,
     nextAttemptAt: row.nextAttemptAt ? row.nextAttemptAt.toISOString() : null,
     lastError: row.lastError,
@@ -148,6 +171,37 @@ export async function createScheduledListing(
 }
 
 /**
+ * Schedules the bulk editor's pending per-listing changes. Unlike a publish
+ * there is no draft — the job carries the listings it covers — so nothing
+ * here can conflict with another schedule, and `setId` is the storage prefix
+ * holding whatever photos and videos the edit adds (`null` when it adds
+ * none). The caller has validated the time, the job and the listings'
+ * ownership.
+ */
+export async function createScheduledBulkEdit(
+  scope: Scope,
+  scheduledAt: Date,
+  timezone: string,
+  job: ScheduledBulkEdit,
+  setId: string | null,
+): Promise<StoreResult<ScheduledListingSummary>> {
+  const row = await prisma.scheduledListing.create({
+    data: {
+      userId: scope.userId,
+      shopId: scope.shopId,
+      kind: "bulk_edit",
+      scheduledAt,
+      timezone,
+      bulkEdit: job as unknown as Prisma.InputJsonValue,
+      renderSetId: setId,
+      images: [],
+    },
+    include: withDraft,
+  });
+  return { ok: true, value: toSummary(row) };
+}
+
+/**
  * Scheduled listings whose `scheduledAt` falls in `[from, to)`, soonest
  * first. Cancelled rows are left out — they no longer belong on the calendar.
  */
@@ -206,7 +260,7 @@ export async function rescheduleScheduledListing(
 ): Promise<StoreResult<Rescheduled>> {
   const before = await findOwned(scope, id);
   if (!before) return { ok: false, code: "not_found", error: "Scheduled listing not found." };
-  if (!content && coerceScheduledImages(before.images).length === 0) {
+  if (coerceKind(before.kind) !== "bulk_edit" && !content && coerceScheduledImages(before.images).length === 0) {
     return {
       ok: false,
       code: "conflict",
@@ -238,6 +292,21 @@ export async function rescheduleScheduledListing(
   return { ok: true, value: { summary: toSummary(row), superseded } };
 }
 
+/**
+ * The stored files a cancelled job leaves behind: a publish's rendered
+ * images, or the photos and videos a bulk edit was going to upload.
+ */
+function releasedFiles(row: ScheduledRow): ScheduledImage[] {
+  if (coerceKind(row.kind) !== "bulk_edit") return coerceScheduledImages(row.images);
+  const updates = (row.bulkEdit as { updates?: unknown } | null)?.updates;
+  if (!Array.isArray(updates)) return [];
+  return bulkEditFileKeys({ updates } as ScheduledBulkEdit).map((key) => ({
+    key,
+    filename: "",
+    contentType: "",
+  }));
+}
+
 export interface Cancelled {
   summary: ScheduledListingSummary;
   /** The images the cancelled schedule owned — nothing references them now, for the caller to delete. */
@@ -254,14 +323,21 @@ export async function cancelScheduledListing(scope: Scope, id: string): Promise<
   const before = await findOwned(scope, id);
   const { count } = await prisma.scheduledListing.updateMany({
     where: { id, userId: scope.userId, shopId: scope.shopId, status: { in: [...EDITABLE_STATUSES] } },
-    data: { status: "cancelled", activeDraftId: null, nextAttemptAt: null, renderSetId: null, images: [] },
+    data: {
+      status: "cancelled",
+      activeDraftId: null,
+      nextAttemptAt: null,
+      renderSetId: null,
+      images: [],
+      bulkEdit: Prisma.DbNull,
+    },
   });
   const row = await findOwned(scope, id);
   if (!row) return { ok: false, code: "not_found", error: "Scheduled listing not found." };
   if (count === 0) {
     return { ok: false, code: "conflict", error: `This listing is ${row.status} and can't be cancelled.` };
   }
-  const images = before ? coerceScheduledImages(before.images) : [];
+  const images = before ? releasedFiles(before) : [];
   return {
     ok: true,
     value: {

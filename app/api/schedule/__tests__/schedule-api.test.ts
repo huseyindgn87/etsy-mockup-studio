@@ -4,11 +4,13 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 // (lib/scheduling/__tests__/fake-prisma.ts) and an in-memory R2. Only the
 // app session and "which Etsy shop is active" are mocked.
 
-const { authMock, shopMock, stored, r2State } = vi.hoisted(() => ({
+const { authMock, shopMock, stored, r2State, cachedListings } = vi.hoisted(() => ({
   authMock: vi.fn(),
   shopMock: vi.fn(),
   stored: new Set<string>(),
   r2State: { configured: true },
+  /** Which listings each user's active shop holds, as the listings cache has them. */
+  cachedListings: new Map<string, Set<number>>(),
 }));
 vi.mock("@/auth", () => ({ auth: authMock }));
 vi.mock("@/lib/etsy/listing-store", () => {
@@ -17,7 +19,12 @@ vi.mock("@/lib/etsy/listing-store", () => {
       super("Not connected to Etsy.");
     }
   }
-  return { NotConnectedError, resolveActiveShopId: shopMock };
+  return {
+    NotConnectedError,
+    resolveActiveShopId: shopMock,
+    listStoredListingsByIds: async (userId: string, _shopId: string, ids: number[]) =>
+      ids.filter((id) => cachedListings.get(userId)?.has(id)).map((listingId) => ({ listingId })),
+  };
 });
 vi.mock("@/lib/etsy/listings", () => ({ EtsyApiError: class EtsyApiError extends Error {} }));
 vi.mock("@/lib/etsy/listing-create", () => ({}));
@@ -45,7 +52,7 @@ import { POST as CANCEL } from "@/app/api/schedule/[id]/cancel/route";
 import { NotConnectedError } from "@/lib/etsy/listing-store";
 import { db, resetDb, seedDraft, seedScheduled } from "@/lib/scheduling/__tests__/fake-prisma";
 import { imageMeta, SET_A, SET_B, storedImages, VALID_SPEC } from "@/lib/scheduling/__tests__/fixtures";
-import { renderImageKey } from "@/lib/scheduling/render-keys";
+import { bulkMediaKey, renderImageKey } from "@/lib/scheduling/render-keys";
 import { utcToWallTime } from "@/lib/scheduling/timezone";
 import type { ScheduledListingSummary } from "@/lib/scheduling/types";
 import { deleteObjects } from "@/lib/storage/r2";
@@ -142,6 +149,9 @@ beforeEach(() => {
   seedDraft({ id: "draft-alice-2", userId: "alice", title: "Second mug" });
   seedDraft({ id: "draft-bob", userId: "bob", title: "Bob's poster" });
   upload("alice", SET_A, 3);
+  cachedListings.clear();
+  cachedListings.set("alice", new Set([101, 102]));
+  cachedListings.set("bob", new Set([201]));
 });
 
 afterEach(() => {
@@ -490,5 +500,97 @@ describe("cross-user isolation", () => {
     expect((await cancel(row.id)).status).toBe(404);
     signInAs("alice", "shop-a");
     expect((await listRange(FORTNIGHT.from, FORTNIGHT.to)).map((r) => r.id)).toEqual([row.id]);
+  });
+});
+
+describe("scheduling a bulk edit", () => {
+  /** What the bulk screen sends: the pending per-listing changes, and when. */
+  function bulkBody(overrides: Record<string, unknown> = {}) {
+    return {
+      kind: "bulk_edit",
+      date: "2026-09-20",
+      time: "14:30",
+      timezone: "UTC",
+      updates: [
+        { listingId: 101, title: "Mug", patch: { title: "Renamed mug" } },
+        { listingId: 102, title: "Tee", patch: { quantity: 4 } },
+      ],
+      ...overrides,
+    };
+  }
+
+  test("stores the pending edits as a job of its own, writing nothing to Etsy", async () => {
+    const { status, body: created } = await create(bulkBody());
+
+    expect(status).toBe(201);
+    expect(created.scheduledListing).toMatchObject({
+      kind: "bulk_edit",
+      draftId: null,
+      title: "Bulk edit · 2 listings",
+      listingCount: 2,
+      status: "pending",
+      results: [],
+      scheduledAt: "2026-09-20T14:30:00.000Z",
+    });
+    expect(db.scheduled.get(created.scheduledListing.id)!.bulkEdit).toEqual({
+      updates: [
+        { listingId: 101, title: "Mug", patch: { title: "Renamed mug" } },
+        { listingId: 102, title: "Tee", patch: { quantity: 4 } },
+      ],
+    });
+  });
+
+  test("it shows on the calendar, and can be cancelled", async () => {
+    const { body: created } = await create(bulkBody());
+    const items = await listRange(FORTNIGHT.from, FORTNIGHT.to);
+    expect(items.map((i) => i.id)).toContain(created.scheduledListing.id);
+
+    const cancelled = await cancel(created.scheduledListing.id);
+    expect(cancelled.status).toBe(200);
+    expect(db.scheduled.get(created.scheduledListing.id)!.status).toBe("cancelled");
+  });
+
+  test("a listing outside the caller's active shop is refused", async () => {
+    const { status, body: b } = await create(
+      bulkBody({ updates: [{ listingId: 201, title: "Bob's poster", patch: { title: "x" } }] }),
+    );
+    expect(status).toBe(404);
+    expect(b.error).toContain("isn't in this shop");
+    expect(db.scheduled.size).toBe(0);
+  });
+
+  test("a time in the past, and a job with nothing in it, are both refused", async () => {
+    expect((await create(bulkBody({ date: "2026-09-01" }))).status).toBe(400);
+    expect((await create(bulkBody({ updates: [] }))).status).toBe(400);
+    expect(db.scheduled.size).toBe(0);
+  });
+
+  test("a photo the edit adds must have finished uploading", async () => {
+    const key = bulkMediaKey("alice", SET_B, 101, "image", 0);
+    const withPhoto = bulkBody({
+      setId: SET_B,
+      updates: [
+        {
+          listingId: 101,
+          title: "Mug",
+          patch: {},
+          media: {
+            images: [{ kind: "new", index: 0, altText: "" }],
+            videos: [],
+            imageFiles: [{ key, filename: "back.jpg", contentType: "image/jpeg" }],
+            videoFiles: [],
+          },
+        },
+      ],
+    });
+
+    const missing = await create(withPhoto);
+    expect(missing.status).toBe(400);
+    expect(missing.body.error).toContain("didn't finish uploading");
+
+    stored.add(key);
+    const { status, body: created } = await create(withPhoto);
+    expect(status).toBe(201);
+    expect(db.scheduled.get(created.scheduledListing.id)!.renderSetId).toBe(SET_B);
   });
 });

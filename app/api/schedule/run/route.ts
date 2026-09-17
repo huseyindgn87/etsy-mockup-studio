@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { applyScheduledBulkEdit } from "@/lib/scheduling/bulk-publisher";
 import { publishScheduledListing } from "@/lib/scheduling/publisher";
 import { runDueScheduledListings } from "@/lib/scheduling/runner";
 import { isAuthorizedRunnerRequest, RUNNER_SECRET_ENV, runnerSecret } from "@/lib/scheduling/runner-auth";
@@ -32,6 +33,7 @@ export async function POST(request: Request) {
 
   const result = await runDueScheduledListings({
     publish: publishScheduledListing,
+    applyBulkEdit: applyScheduledBulkEdit,
     deleteImages: deleteObjects,
     now: () => new Date(),
   });

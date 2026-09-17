@@ -3,7 +3,7 @@
  */
 
 import { deleteObjects, isR2Configured, listKeys } from "@/lib/storage/r2";
-import { isOwnedRenderKey, renderSetPrefix } from "./render-keys";
+import { isOwnedScheduleKey, renderSetPrefix } from "./render-keys";
 import type { ScheduledImage } from "./types";
 
 /** The images not (yet) in storage — a schedule is only created once this is empty. */
@@ -30,7 +30,7 @@ export async function deleteScheduledImages(
   if (!isR2Configured()) return;
   const keys = released.images
     .map((image) => image.key)
-    .filter((key) => isOwnedRenderKey(key, userId, released.renderSetId));
+    .filter((key) => isOwnedScheduleKey(key, userId, released.renderSetId));
   if (keys.length === 0) return;
   await deleteObjects(keys).catch((err) => {
     console.error("[schedule] couldn't delete rendered images", err);

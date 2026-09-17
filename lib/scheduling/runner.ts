@@ -19,11 +19,19 @@
  * failed) row is never processed again.
  */
 
-import type { ScheduledListing } from "@prisma/client";
+import { Prisma, type ScheduledListing } from "@prisma/client";
 import { prisma } from "@/lib/db/prisma";
+import {
+  bulkEditFileKeys,
+  coerceBulkResults,
+  parseScheduledBulkEdit,
+  pendingBulkUpdates,
+  summariseBulkResults,
+  type ScheduledBulkUpdate,
+} from "./bulk-job";
 import { coerceScheduledImages } from "./publish-spec";
-import { isOwnedRenderKey } from "./render-keys";
-import { MAX_PUBLISH_ATTEMPTS } from "./types";
+import { isOwnedRenderKey, isOwnedScheduleKey } from "./render-keys";
+import { MAX_PUBLISH_ATTEMPTS, type ScheduledBulkResult } from "./types";
 
 /** Delay before retry `n` (after the n-th failed attempt): 5 minutes, then 20. */
 export const BASE_RETRY_DELAY_MS = 5 * 60 * 1000;
@@ -44,6 +52,12 @@ export interface PublishHooks {
 export interface RunnerDeps {
   /** Publishes a claimed row to Etsy; resolves to the Etsy listing id. */
   publish: (row: ScheduledListing, hooks: PublishHooks) => Promise<string>;
+  /**
+   * Applies a claimed bulk edit's listings, one result per listing. It never
+   * throws for a single listing: a listing that fails is reported in its own
+   * result and the rest are still written.
+   */
+  applyBulkEdit: (row: ScheduledListing, updates: ScheduledBulkUpdate[]) => Promise<ScheduledBulkResult[]>;
   /** Deletes exactly these R2 keys. */
   deleteImages: (keys: string[]) => Promise<void>;
   now: () => Date;
@@ -138,11 +152,13 @@ async function recoverStalePublishing(now: Date): Promise<number> {
  * already live, and orphaned objects are only a cost.
  */
 export async function cleanupPublishedImages(
-  row: Pick<ScheduledListing, "id" | "userId" | "renderSetId" | "images">,
+  row: Pick<ScheduledListing, "id" | "userId" | "renderSetId" | "images"> & { kind?: string; bulkEdit?: unknown },
   deleteImages: RunnerDeps["deleteImages"],
 ): Promise<number> {
-  const keys = coerceScheduledImages(row.images).map((i) => i.key);
-  const owned = keys.filter((key) => isOwnedRenderKey(key, row.userId, row.renderSetId));
+  const bulk = row.kind === "bulk_edit";
+  const keys = bulk ? bulkFileKeys(row.bulkEdit) : coerceScheduledImages(row.images).map((i) => i.key);
+  const owns = bulk ? isOwnedScheduleKey : isOwnedRenderKey;
+  const owned = keys.filter((key) => owns(key, row.userId, row.renderSetId));
   const refused = keys.filter((key) => !owned.includes(key));
   if (refused.length) {
     console.error(`[schedule] refusing to delete keys outside scheduled listing ${row.id}'s render set`, refused);
@@ -157,7 +173,72 @@ export async function cleanupPublishedImages(
   }
 }
 
+/** The stored media files a bulk edit was going to upload, without validating the whole job. */
+function bulkFileKeys(bulkEdit: unknown): string[] {
+  const updates = (bulkEdit as { updates?: unknown } | null)?.updates;
+  return Array.isArray(updates) ? bulkEditFileKeys({ updates } as never) : [];
+}
+
+/**
+ * Applies a claimed bulk edit. Every listing gets its own result, recorded on
+ * the row whatever happens, so a listing Etsy refuses never stops the others
+ * and never hides the ones that landed. A run that didn't finish every
+ * listing counts as a failed attempt — the retry writes only the listings
+ * still outstanding, the way a second Sync updates retries only the failures.
+ */
+async function processBulkEdit(row: ScheduledListing, deps: RunnerDeps, now: Date) {
+  const parsed = parseScheduledBulkEdit(row.bulkEdit, { userId: row.userId, setId: row.renderSetId });
+  if (!parsed.ok) {
+    return recordFailure(row, `The scheduled edits are invalid: ${parsed.error}`, row.etsyListingId, now);
+  }
+
+  const previous = coerceBulkResults(row.results);
+  const pending = pendingBulkUpdates(parsed.job, previous);
+  let applied: ScheduledBulkResult[];
+  try {
+    applied = pending.length === 0 ? [] : await deps.applyBulkEdit(row, pending);
+  } catch (err) {
+    console.error(`[schedule] applying scheduled bulk edit ${row.id} failed`, err);
+    return recordFailure(row, errorMessage(err), row.etsyListingId, now);
+  }
+
+  // One entry per listing the job covers, newest outcome winning.
+  const byListing = new Map<number, ScheduledBulkResult>();
+  for (const result of [...previous, ...applied]) byListing.set(result.listingId, result);
+  const results = parsed.job.updates.map(
+    (update) =>
+      byListing.get(update.listingId) ?? {
+        listingId: update.listingId,
+        title: update.title,
+        ok: false,
+        error: "This listing wasn't reached.",
+      },
+  );
+  await prisma.scheduledListing.updateMany({
+    where: { id: row.id, status: "publishing" },
+    data: { results: results as unknown as Prisma.InputJsonValue },
+  });
+
+  const failed = results.filter((r) => !r.ok);
+  if (failed.length > 0) {
+    const detail = failed
+      .slice(0, 3)
+      .map((r) => `${r.title || r.listingId}: ${r.error ?? "failed"}`)
+      .join("; ");
+    return recordFailure(row, `${summariseBulkResults(results)} ${detail}`, row.etsyListingId, now);
+  }
+
+  const { count } = await prisma.scheduledListing.updateMany({
+    where: { id: row.id, status: "publishing" },
+    data: { status: "published", lastError: null, nextAttemptAt: null },
+  });
+  if (count === 0) return "lost" as const;
+  await cleanupPublishedImages(row, deps.deleteImages);
+  return "published" as const;
+}
+
 async function processClaimed(row: ScheduledListing, deps: RunnerDeps, now: Date) {
+  if (row.kind === "bulk_edit") return processBulkEdit(row, deps, now);
   let etsyListingId = row.etsyListingId;
   try {
     etsyListingId = await deps.publish(row, {
