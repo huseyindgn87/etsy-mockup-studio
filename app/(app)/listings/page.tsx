@@ -7,7 +7,6 @@ import {
   ChevronDown,
   Copy,
   Download,
-  ExternalLink,
   Pencil,
   RefreshCw,
   Share2,
@@ -810,18 +809,6 @@ export default function ListingsPage() {
                         >
                           {listing.title}
                         </Link>
-                        <a
-                          href={listing.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          title="View on Etsy"
-                          aria-label={`View ${listing.title} on Etsy`}
-                          onClick={(e) => e.stopPropagation()}
-                          className="inline-flex shrink-0 items-center gap-1 rounded-full border border-black/10 px-2 py-1 text-xs font-medium text-zinc-600 transition-colors hover:border-black/25 hover:text-zinc-900 dark:border-white/15 dark:text-zinc-400 dark:hover:border-white/30 dark:hover:text-zinc-100"
-                        >
-                          <ExternalLink size={12} aria-hidden="true" />
-                          Etsy
-                        </a>
                       </div>
                     </td>
                     <td className="px-4 py-3 text-zinc-600 dark:text-zinc-400">

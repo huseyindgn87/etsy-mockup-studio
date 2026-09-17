@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 const { pushMock } = vi.hoisted(() => ({ pushMock: vi.fn() }));
@@ -307,13 +307,32 @@ describe("opening a listing", () => {
     expect(screen.getByRole("link", { name: "Listing 100" })).toHaveAttribute("href", editorPath);
   });
 
-  test("View on Etsy opens the Etsy listing in a new tab without routing the row", async () => {
+  test("clicking the thumbnail cell or a metadata cell opens the editor too", async () => {
     await renderPage();
-    const view = screen.getByRole("link", { name: "View Listing 100 on Etsy" });
-    expect(view).toHaveAttribute("href", "https://etsy.com/listing/100");
-    expect(view).toHaveAttribute("target", "_blank");
-    fireEvent.click(view);
+    const cells = screen.getByTestId("listing-row-100").querySelectorAll("td");
+    for (const cell of [cells[1], cells[2], cells[4], cells[5]]) {
+      pushMock.mockClear();
+      fireEvent.click(cell);
+      expect(pushMock).toHaveBeenCalledWith(editorPath);
+    }
+  });
+
+  test("the row holds no link out to Etsy", async () => {
+    await renderPage();
+    const row = screen.getByTestId("listing-row-100");
+    expect(row.querySelector('a[href*="etsy.com"]')).toBeNull();
+    expect(within(row).queryByRole("link", { name: /on Etsy/ })).not.toBeInTheDocument();
+  });
+
+  test("the hover action icons don't navigate the row", async () => {
+    await renderPage();
+    const row = within(screen.getByTestId("listing-row-100"));
+    fireEvent.click(row.getByLabelText("Copy Listing 100"));
+    fireEvent.click(row.getByLabelText("Edit Listing 100"));
+    fireEvent.click(row.getByLabelText("Share Listing 100"));
+    fireEvent.click(row.getByLabelText("Delete Listing 100"));
     expect(pushMock).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toHaveTextContent(/permanently deleted from Etsy/);
   });
 
   test("clicking the checkbox selects the row and doesn't navigate", async () => {

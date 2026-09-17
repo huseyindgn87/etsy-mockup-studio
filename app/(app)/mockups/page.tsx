@@ -57,6 +57,7 @@ import {
   type ListingVideoItem,
   type PhotoSlot,
 } from "@/app/components/listing-media/ListingMedia";
+import EtsyMark from "@/app/components/EtsyMark";
 import ListingPreviewModal, { type PreviewMediaItem } from "./ListingPreviewModal";
 import MockupCanvas from "./MockupCanvas";
 import TemplatePicker from "./TemplatePicker";
@@ -1890,6 +1891,17 @@ function MockupsPageInner() {
             >
               Preview
             </button>
+            {publishMode === "existing" && publishId != null && (
+              <a
+                href={`https://www.etsy.com/listing/${publishId}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex h-9 items-center gap-2 rounded-full border border-black/10 px-4 text-sm font-medium transition-colors hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
+              >
+                <EtsyMark />
+                View on Etsy
+              </a>
+            )}
             <span className="max-w-xs truncate text-xs text-zinc-500 dark:text-zinc-400">
               {modeCaption}
             </span>

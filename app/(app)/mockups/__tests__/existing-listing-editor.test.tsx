@@ -263,6 +263,22 @@ describe("editor opened on an existing listing", () => {
     expect(settings.getByRole("radio", { name: "Automatic" })).not.toBeChecked();
   });
 
+  it("offers View on Etsy beside Save draft and Preview", async () => {
+    openExisting();
+    await waitFor(() => expect(within(header()).getByText(TITLE)).toBeInTheDocument());
+
+    const view = within(header()).getByRole("link", { name: "View on Etsy" });
+    expect(view).toHaveAttribute("href", `https://www.etsy.com/listing/${LISTING_ID}`);
+    expect(view).toHaveAttribute("target", "_blank");
+    expect(view).toHaveAttribute("rel", expect.stringContaining("noopener"));
+    expect(view.querySelector("svg")).not.toBeNull();
+
+    const bar = within(header()).getByText("Save draft").parentElement!;
+    const labels = [...bar.children].map((el) => el.textContent);
+    expect(labels).toContain("Preview");
+    expect(labels.indexOf("View on Etsy")).toBe(labels.indexOf("Preview") + 1);
+  });
+
   it("sends no draft PUT between mount and the first user edit", async () => {
     openExisting();
     await waitFor(() => expect(within(header()).getByText(TITLE)).toBeInTheDocument());
