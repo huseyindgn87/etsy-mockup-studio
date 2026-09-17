@@ -120,6 +120,18 @@ function route(method: string, url: string): Response {
   if (url === "/api/etsy/production-partners") {
     return json({ partners: [{ productionPartnerId: 7, partnerName: "Atlanta Print Co", location: "US" }] });
   }
+  if (url === "/api/etsy/taxonomy") {
+    const node = (id: number, level: number, name: string, parentId: number | null, children: unknown[] = []) => ({
+      id, level, name, parentId, children,
+    });
+    return json({
+      tree: [
+        node(1, 1, "Clothing", null, [
+          node(2, 2, "Gender-Neutral Adult Clothing", 1, [node(3, 3, "Tops & Tees", 2, [node(482, 4, "T-shirts", 3)])]),
+        ]),
+      ],
+    });
+  }
   if (url === "/api/etsy/taxonomy/482/properties") {
     return json({
       properties: [
@@ -232,11 +244,15 @@ describe("editor opened on an existing listing", () => {
     expect(inventory.getByPlaceholderText("optional")).toHaveValue("HG-000179");
 
     const variations = openSection("Variations");
-    expect(variations.getAllByText("Size").length).toBeGreaterThan(0);
-    expect(variations.getAllByText("Color").length).toBeGreaterThan(0);
-    expect(variations.getAllByText("Unisex Shirt / 2XL").length).toBeGreaterThan(0);
-    const priceCells = variations.getAllByDisplayValue(/^(23\.69|26\.78)$/);
-    expect(priceCells.map((c) => (c as HTMLInputElement).value)).toEqual(["23.69", "23.69", "26.78", "26.78"]);
+    await waitFor(() => expect(variations.getByRole("combobox", { name: "Item type" })).toHaveValue("482"));
+    expect(variations.getByRole("combobox", { name: "Category" })).toHaveValue("1");
+    expect(variations.getByRole("textbox", { name: "First variation name" })).toHaveValue("Size");
+    expect(variations.getByRole("textbox", { name: "Second variation name" })).toHaveValue("Color");
+    const options = (name: string) =>
+      within(variations.getByRole("list", { name })).getAllByRole("listitem").map((li) => li.textContent);
+    expect(options("Size options")).toEqual(["⠿Unisex Shirt / S×", "⠿Unisex Shirt / 2XL×"]);
+    expect(options("Color options")).toEqual(["⠿Ash×", "⠿Black×"]);
+    expect(variations.getByText(/^4 combinations \(max \d+\)\.$/)).toBeInTheDocument();
 
     const shipping = openSection("Shipping");
     await waitFor(() => expect(shipping.getByRole("combobox")).toHaveValue("1441577564343"));
