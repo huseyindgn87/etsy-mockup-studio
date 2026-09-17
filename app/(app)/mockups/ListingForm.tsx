@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { EditorSectionCard } from "./editor-sections";
 import {
   MAX_OPTIONS_PER_VARIATION,
   MAX_VARIATIONS,
@@ -63,7 +64,7 @@ export interface ListingFormVariation {
 
 export type VariationToggleKey = "price" | "readiness" | "quantity" | "sku";
 
-/** One tab of the left-nav listing editor that this form's fields live in. */
+/** One section of the listing editor's scrolling form that this form's fields live in. */
 export type ListingFormTab =
   | "title"
   | "description"
@@ -256,25 +257,20 @@ function flattenTaxonomy(nodes: TaxonomyNode[], prefix = ""): FlatTaxonomyNode[]
 
 /**
  * Listing-editing form fields: title, description, tags, category + category
- * properties + section, price, quantity/SKU, and variations — one left-nav
- * tab's worth of fields rendered at a time (`activeTab`, or nothing when
- * `null`, e.g. while a non-form tab like Photos is active). All fields'
- * fetch effects and local state stay mounted regardless of which tab is
- * showing, so switching tabs never drops in-flight data or re-fetches
- * taxonomy/sections. Values feed a draft listing on publish; nothing here is
- * sent to Etsy until then.
+ * properties + section, price, quantity/SKU, and variations — every section
+ * rendered at once, stacked in the editor sidebar's order, each with its own
+ * anchor (see `editor-sections.tsx`). Values feed a draft listing on publish;
+ * nothing here is sent to Etsy until then.
  */
 export default function ListingForm({
   value,
   onChange,
-  activeTab,
-  onGoToTab,
+  onGoToSection,
 }: {
   value: ListingFormValue;
   onChange: (next: ListingFormValue) => void;
-  activeTab: ListingFormTab | null;
-  /** Lets a sub-panel (e.g. the Variations modal) send the user to another tab, such as Details to pick a category. */
-  onGoToTab?: (tab: ListingFormTab) => void;
+  /** Lets a sub-panel (e.g. the Variations modal) send the user to another section, such as Details to pick a category. */
+  onGoToSection?: (section: ListingFormTab) => void;
 }) {
   const patch = (partial: Partial<ListingFormValue>) => onChange({ ...value, ...partial });
 
@@ -483,7 +479,6 @@ export default function ListingForm({
 
   const inputCls =
     "w-full rounded-lg border border-black/10 bg-white px-3 text-sm outline-none focus:border-primary dark:border-white/15 dark:bg-zinc-950";
-  const sectionHeadingCls = "text-base font-bold text-zinc-900 dark:text-zinc-50";
 
   // Once price varies by at least one variation, it's entered per combination
   // on the Variations tab instead — the main-form field is hidden (not
@@ -500,519 +495,481 @@ export default function ListingForm({
     productionPartnerIds: value.productionPartnerIds,
   });
 
-  if (activeTab === null) return null;
-
   return (
     <>
-      {activeTab === "title" && (
-        <section className="space-y-4">
-          <h3 className={sectionHeadingCls}>Title</h3>
-          <label className="block text-sm">
-            <span className="flex justify-between text-xs text-zinc-500">
-              <span>Title</span>
-              <span className="font-mono">
-                {value.title.length}/{MAX_TITLE_LENGTH}
-              </span>
+      <EditorSectionCard section="title" className="space-y-4">
+        <label className="block text-sm">
+          <span className="flex justify-between text-xs text-zinc-500">
+            <span>Title</span>
+            <span className="font-mono">
+              {value.title.length}/{MAX_TITLE_LENGTH}
             </span>
-            <input
-              type="text"
-              value={value.title}
-              maxLength={MAX_TITLE_LENGTH}
-              onChange={(e) => patch({ title: e.target.value })}
-              placeholder="e.g. Miami Skyline Wall Art Print"
-              className={`${inputCls} mt-1 h-10`}
-            />
-          </label>
-        </section>
-      )}
+          </span>
+          <input
+            type="text"
+            value={value.title}
+            maxLength={MAX_TITLE_LENGTH}
+            onChange={(e) => patch({ title: e.target.value })}
+            placeholder="e.g. Miami Skyline Wall Art Print"
+            className={`${inputCls} mt-1 h-10`}
+          />
+        </label>
+      </EditorSectionCard>
 
-      {activeTab === "description" && (
-        <section className="space-y-4">
-          <h3 className={sectionHeadingCls}>Description</h3>
-          <label className="block text-sm">
-            <span className="text-xs text-zinc-500">Description</span>
-            <textarea
-              rows={8}
-              value={value.description}
-              onChange={(e) => patch({ description: e.target.value })}
-              placeholder="Describe the product…"
-              className={`${inputCls} mt-1 resize-y py-2`}
-            />
-          </label>
-        </section>
-      )}
+      <EditorSectionCard section="description" className="space-y-4">
+        <label className="block text-sm">
+          <span className="text-xs text-zinc-500">Description</span>
+          <textarea
+            rows={8}
+            value={value.description}
+            onChange={(e) => patch({ description: e.target.value })}
+            placeholder="Describe the product…"
+            className={`${inputCls} mt-1 resize-y py-2`}
+          />
+        </label>
+      </EditorSectionCard>
 
-      {activeTab === "tags" && (
-        <section className="space-y-2">
-          <h3 className={sectionHeadingCls}>Tags</h3>
-          <div className="text-sm">
-            <span className="flex justify-between text-xs text-zinc-500">
-              <span>Tags</span>
-              <span className="font-mono">
-                {value.tags.length}/{MAX_TAGS}
-              </span>
+      <EditorSectionCard section="tags" className="space-y-2">
+        <div className="text-sm">
+          <span className="flex justify-between text-xs text-zinc-500">
+            <span>Tags</span>
+            <span className="font-mono">
+              {value.tags.length}/{MAX_TAGS}
             </span>
-            <div className="mt-1 flex flex-wrap items-center gap-1.5 rounded-lg border border-black/10 p-1.5 dark:border-white/15">
-              {value.tags.map((t) => (
-                <span
-                  key={t}
-                  className="flex items-center gap-1 rounded-full bg-black/[.06] px-2 py-0.5 text-xs dark:bg-white/10"
+          </span>
+          <div className="mt-1 flex flex-wrap items-center gap-1.5 rounded-lg border border-black/10 p-1.5 dark:border-white/15">
+            {value.tags.map((t) => (
+              <span
+                key={t}
+                className="flex items-center gap-1 rounded-full bg-black/[.06] px-2 py-0.5 text-xs dark:bg-white/10"
+              >
+                {t}
+                <button
+                  type="button"
+                  onClick={() => removeTag(t)}
+                  aria-label={`Remove ${t} tag`}
+                  className="text-zinc-500 hover:text-red-600"
                 >
-                  {t}
-                  <button
-                    type="button"
-                    onClick={() => removeTag(t)}
-                    aria-label={`Remove ${t} tag`}
-                    className="text-zinc-500 hover:text-red-600"
-                  >
-                    ×
-                  </button>
-                </span>
-              ))}
-              {value.tags.length < MAX_TAGS && (
+                  ×
+                </button>
+              </span>
+            ))}
+            {value.tags.length < MAX_TAGS && (
+              <input
+                type="text"
+                value={tagDraft}
+                maxLength={MAX_TAG_LENGTH}
+                onChange={(e) => setTagDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === ",") {
+                    e.preventDefault();
+                    addTag();
+                  }
+                }}
+                onBlur={addTag}
+                placeholder={value.tags.length === 0 ? "Type a tag, press Enter…" : ""}
+                className="min-w-[100px] flex-1 border-none bg-transparent px-1 py-0.5 text-sm outline-none"
+              />
+            )}
+          </div>
+        </div>
+      </EditorSectionCard>
+
+      <EditorSectionCard section="details" className="space-y-3">
+        <div ref={categoryRootRef} className="relative">
+          <button
+            type="button"
+            onClick={() => setCategoryOpen((o) => !o)}
+            className={`${inputCls} flex h-10 items-center justify-between text-left`}
+          >
+            <span className={value.taxonomyPath ? "" : "text-zinc-400"}>
+              {value.taxonomyPath || "Select a category…"}
+            </span>
+            <span className="text-zinc-400">▾</span>
+          </button>
+
+          {categoryOpen && (
+            <div className="absolute z-10 mt-1 w-full min-w-[280px] overflow-hidden rounded-lg border border-black/10 bg-white shadow-lg dark:border-white/15 dark:bg-zinc-950">
+              <div className="border-b border-black/10 p-2 dark:border-white/15">
                 <input
                   type="text"
-                  value={tagDraft}
-                  maxLength={MAX_TAG_LENGTH}
-                  onChange={(e) => setTagDraft(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === ",") {
-                      e.preventDefault();
-                      addTag();
-                    }
-                  }}
-                  onBlur={addTag}
-                  placeholder={value.tags.length === 0 ? "Type a tag, press Enter…" : ""}
-                  className="min-w-[100px] flex-1 border-none bg-transparent px-1 py-0.5 text-sm outline-none"
+                  autoFocus
+                  value={categoryQuery}
+                  onChange={(e) => setCategoryQuery(e.target.value)}
+                  placeholder="Search categories… (accessories, jewelry, weddings…)"
+                  className="h-8 w-full rounded-md border border-black/10 bg-white px-2 text-sm outline-none focus:border-primary dark:border-white/15 dark:bg-zinc-900"
                 />
-              )}
+              </div>
+              <ul className="max-h-72 overflow-y-auto py-1">
+                {taxonomyLoading && (
+                  <li className="px-2 py-3 text-center text-xs text-zinc-500">
+                    Loading categories…
+                  </li>
+                )}
+                {!taxonomyLoading && categoryRows.length === 0 && (
+                  <li className="px-2 py-3 text-center text-xs text-zinc-500">
+                    No matching categories.
+                  </li>
+                )}
+                {!taxonomyLoading &&
+                  categoryRows.map((n) => (
+                    <li key={n.id}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          patch({
+                            taxonomyId: n.id,
+                            taxonomyPath: n.path,
+                            // a new category has different properties (and variations)
+                            properties: {},
+                            variations: [],
+                            variationToggles: EMPTY_VARIATION_TOGGLES,
+                            variationRows: EMPTY_VARIATION_ROWS,
+                            variationRowEnabled: {},
+                          });
+                          setCategoryOpen(false);
+                          setCategoryQuery("");
+                        }}
+                        className={`block w-full px-3 py-2 text-left text-sm hover:bg-black/[.04] dark:hover:bg-white/[.06] ${
+                          n.id === value.taxonomyId ? "bg-primary/10" : ""
+                        }`}
+                      >
+                        {n.path}
+                      </button>
+                    </li>
+                  ))}
+              </ul>
             </div>
+          )}
+        </div>
+
+        {propertiesLoading && (
+          <p className="text-xs text-zinc-500">Loading category properties…</p>
+        )}
+        {propertiesError && <p className="text-xs text-red-600">{propertiesError}</p>}
+
+        {!propertiesLoading && attributeProperties.length > 0 && (
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {attributeProperties.map((prop) => (
+              <PropertyPicker
+                key={prop.propertyId}
+                property={prop}
+                selected={value.properties[prop.propertyId]}
+                onToggle={togglePropertyValue}
+              />
+            ))}
           </div>
-        </section>
-      )}
+        )}
+      </EditorSectionCard>
 
-      {activeTab === "details" && (
-        <section className="space-y-3">
-          <h3 className={sectionHeadingCls}>Details</h3>
+      <EditorSectionCard section="howMade" className="max-w-2xl space-y-6">
+        <fieldset className="space-y-1.5">
+          <legend className="text-xs text-zinc-500">Who made it? *</legend>
+          {WHO_MADE_OPTIONS.map((opt) => (
+            <label key={opt.value} className="flex items-center gap-2 text-sm">
+              <input
+                type="radio"
+                name="who-made"
+                checked={value.whoMade === opt.value}
+                onChange={() => patch({ whoMade: opt.value })}
+                className="accent-primary"
+              />
+              {opt.label}
+            </label>
+          ))}
+        </fieldset>
 
-          <div ref={categoryRootRef} className="relative">
-            <button
-              type="button"
-              onClick={() => setCategoryOpen((o) => !o)}
-              className={`${inputCls} flex h-10 items-center justify-between text-left`}
-            >
-              <span className={value.taxonomyPath ? "" : "text-zinc-400"}>
-                {value.taxonomyPath || "Select a category…"}
-              </span>
-              <span className="text-zinc-400">▾</span>
-            </button>
+        <fieldset className="space-y-1.5">
+          <legend className="text-xs text-zinc-500">What is it? *</legend>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="radio"
+              name="is-supply"
+              checked={!value.isSupply}
+              onChange={() => patch({ isSupply: false })}
+              className="accent-primary"
+            />
+            A finished product
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="radio"
+              name="is-supply"
+              checked={value.isSupply}
+              onChange={() => patch({ isSupply: true })}
+              className="accent-primary"
+            />
+            A supply or tool to make things
+          </label>
+        </fieldset>
 
-            {categoryOpen && (
-              <div className="absolute z-10 mt-1 w-full min-w-[280px] overflow-hidden rounded-lg border border-black/10 bg-white shadow-lg dark:border-white/15 dark:bg-zinc-950">
-                <div className="border-b border-black/10 p-2 dark:border-white/15">
-                  <input
-                    type="text"
-                    autoFocus
-                    value={categoryQuery}
-                    onChange={(e) => setCategoryQuery(e.target.value)}
-                    placeholder="Search categories… (accessories, jewelry, weddings…)"
-                    className="h-8 w-full rounded-md border border-black/10 bg-white px-2 text-sm outline-none focus:border-primary dark:border-white/15 dark:bg-zinc-900"
-                  />
-                </div>
-                <ul className="max-h-72 overflow-y-auto py-1">
-                  {taxonomyLoading && (
-                    <li className="px-2 py-3 text-center text-xs text-zinc-500">
-                      Loading categories…
-                    </li>
-                  )}
-                  {!taxonomyLoading && categoryRows.length === 0 && (
-                    <li className="px-2 py-3 text-center text-xs text-zinc-500">
-                      No matching categories.
-                    </li>
-                  )}
-                  {!taxonomyLoading &&
-                    categoryRows.map((n) => (
-                      <li key={n.id}>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            patch({
-                              taxonomyId: n.id,
-                              taxonomyPath: n.path,
-                              // a new category has different properties (and variations)
-                              properties: {},
-                              variations: [],
-                              variationToggles: EMPTY_VARIATION_TOGGLES,
-                              variationRows: EMPTY_VARIATION_ROWS,
-                              variationRowEnabled: {},
-                            });
-                            setCategoryOpen(false);
-                            setCategoryQuery("");
-                          }}
-                          className={`block w-full px-3 py-2 text-left text-sm hover:bg-black/[.04] dark:hover:bg-white/[.06] ${
-                            n.id === value.taxonomyId ? "bg-primary/10" : ""
-                          }`}
-                        >
-                          {n.path}
-                        </button>
-                      </li>
-                    ))}
-                </ul>
+        <label className="block max-w-xs text-sm">
+          <span className="text-xs text-zinc-500">When was it made? *</span>
+          <select
+            value={value.whenMade}
+            onChange={(e) => patch({ whenMade: e.target.value as WhenMade })}
+            className={`${inputCls} mt-1 h-9`}
+          >
+            {WHEN_MADE_VALUES.map((v) => (
+              <option key={v} value={v}>
+                {formatWhenMade(v)}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        {value.whoMade === "someone_else" && (
+          <div className="space-y-2">
+            <span className="block text-xs text-zinc-500">
+              Production partners * — required when someone else made this item
+            </span>
+            {productionPartnersError && (
+              <p className="text-xs text-red-600">{productionPartnersError}</p>
+            )}
+            {productionPartners == null && !productionPartnersError && (
+              <p className="text-xs text-zinc-500">Loading production partners…</p>
+            )}
+            {productionPartners && productionPartners.length === 0 && !productionPartnersError && (
+              <p className="text-xs text-zinc-500">
+                This shop has no production partners yet.{" "}
+                <a
+                  href="https://www.etsy.com/your/shops/me/production-partners"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline"
+                >
+                  Add one on Etsy
+                </a>
+                , then reload this page.
+              </p>
+            )}
+            {productionPartners && productionPartners.length > 0 && (
+              <div className="max-h-48 space-y-1 overflow-y-auto rounded-lg border border-black/10 p-2 dark:border-white/15">
+                {productionPartners.map((p) => (
+                  <label
+                    key={p.productionPartnerId}
+                    className="flex items-center gap-2 rounded px-1 py-0.5 text-sm hover:bg-black/[.04] dark:hover:bg-white/[.06]"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={value.productionPartnerIds.includes(p.productionPartnerId)}
+                      onChange={() => toggleProductionPartner(p.productionPartnerId)}
+                      className="accent-primary"
+                    />
+                    {p.partnerName}
+                    {p.location && <span className="text-xs text-zinc-500">· {p.location}</span>}
+                  </label>
+                ))}
               </div>
             )}
           </div>
+        )}
 
-          {propertiesLoading && (
-            <p className="text-xs text-zinc-500">Loading category properties…</p>
-          )}
-          {propertiesError && <p className="text-xs text-red-600">{propertiesError}</p>}
+        {howMadeError && <p className="text-sm font-medium text-red-600">{howMadeError}</p>}
+      </EditorSectionCard>
 
-          {!propertiesLoading && attributeProperties.length > 0 && (
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {attributeProperties.map((prop) => (
-                <PropertyPicker
-                  key={prop.propertyId}
-                  property={prop}
-                  selected={value.properties[prop.propertyId]}
-                  onToggle={togglePropertyValue}
-                />
-              ))}
-            </div>
-          )}
-        </section>
-      )}
-
-      {activeTab === "howMade" && (
-        <section className="max-w-2xl space-y-6">
-          <h3 className={sectionHeadingCls}>How it&apos;s made</h3>
-
-          <fieldset className="space-y-1.5">
-            <legend className="text-xs text-zinc-500">Who made it? *</legend>
-            {WHO_MADE_OPTIONS.map((opt) => (
-              <label key={opt.value} className="flex items-center gap-2 text-sm">
-                <input
-                  type="radio"
-                  name="who-made"
-                  checked={value.whoMade === opt.value}
-                  onChange={() => patch({ whoMade: opt.value })}
-                  className="accent-primary"
-                />
-                {opt.label}
-              </label>
-            ))}
-          </fieldset>
-
-          <fieldset className="space-y-1.5">
-            <legend className="text-xs text-zinc-500">What is it? *</legend>
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                type="radio"
-                name="is-supply"
-                checked={!value.isSupply}
-                onChange={() => patch({ isSupply: false })}
-                className="accent-primary"
-              />
-              A finished product
-            </label>
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                type="radio"
-                name="is-supply"
-                checked={value.isSupply}
-                onChange={() => patch({ isSupply: true })}
-                className="accent-primary"
-              />
-              A supply or tool to make things
-            </label>
-          </fieldset>
-
-          <label className="block max-w-xs text-sm">
-            <span className="text-xs text-zinc-500">When was it made? *</span>
-            <select
-              value={value.whenMade}
-              onChange={(e) => patch({ whenMade: e.target.value as WhenMade })}
-              className={`${inputCls} mt-1 h-9`}
-            >
-              {WHEN_MADE_VALUES.map((v) => (
-                <option key={v} value={v}>
-                  {formatWhenMade(v)}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          {value.whoMade === "someone_else" && (
-            <div className="space-y-2">
-              <span className="block text-xs text-zinc-500">
-                Production partners * — required when someone else made this item
-              </span>
-              {productionPartnersError && (
-                <p className="text-xs text-red-600">{productionPartnersError}</p>
-              )}
-              {productionPartners == null && !productionPartnersError && (
-                <p className="text-xs text-zinc-500">Loading production partners…</p>
-              )}
-              {productionPartners && productionPartners.length === 0 && !productionPartnersError && (
-                <p className="text-xs text-zinc-500">
-                  This shop has no production partners yet.{" "}
-                  <a
-                    href="https://www.etsy.com/your/shops/me/production-partners"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="underline"
-                  >
-                    Add one on Etsy
-                  </a>
-                  , then reload this page.
-                </p>
-              )}
-              {productionPartners && productionPartners.length > 0 && (
-                <div className="max-h-48 space-y-1 overflow-y-auto rounded-lg border border-black/10 p-2 dark:border-white/15">
-                  {productionPartners.map((p) => (
-                    <label
-                      key={p.productionPartnerId}
-                      className="flex items-center gap-2 rounded px-1 py-0.5 text-sm hover:bg-black/[.04] dark:hover:bg-white/[.06]"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={value.productionPartnerIds.includes(p.productionPartnerId)}
-                        onChange={() => toggleProductionPartner(p.productionPartnerId)}
-                        className="accent-primary"
-                      />
-                      {p.partnerName}
-                      {p.location && <span className="text-xs text-zinc-500">· {p.location}</span>}
-                    </label>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {howMadeError && <p className="text-sm font-medium text-red-600">{howMadeError}</p>}
-        </section>
-      )}
-
-      {activeTab === "price" && (
-        <section className="max-w-xs space-y-3">
-          <h3 className={sectionHeadingCls}>Price</h3>
-          {priceVariesByVariation ? (
-            <p className="text-sm text-zinc-500">
-              Price varies by variation — set it per combination on the{" "}
-              {onGoToTab ? (
-                <button
-                  type="button"
-                  onClick={() => onGoToTab("variations")}
-                  className="font-medium text-primary hover:underline"
-                >
-                  Variations tab
-                </button>
-              ) : (
-                "Variations tab"
-              )}
-              .
-            </p>
-          ) : (
-            <label className="block text-sm">
-              <span className="text-xs text-zinc-500">Price</span>
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                inputMode="decimal"
-                value={value.price}
-                onChange={(e) => patch({ price: e.target.value })}
-                placeholder="0.00"
-                className={`${inputCls} mt-1 h-10`}
-              />
-            </label>
-          )}
-        </section>
-      )}
-
-      {activeTab === "inventory" && (
-        <section className="max-w-md space-y-3">
-          <h3 className={sectionHeadingCls}>Inventory</h3>
-          <div className="grid grid-cols-2 gap-3 text-sm">
-            <label className="block">
-              <span className="text-xs text-zinc-500">Quantity</span>
-              <input
-                type="number"
-                min="1"
-                step="1"
-                inputMode="numeric"
-                value={value.quantity}
-                onChange={(e) => patch({ quantity: e.target.value })}
-                className={`${inputCls} mt-1 h-10`}
-              />
-            </label>
-            <label className="block">
-              <span className="text-xs text-zinc-500">SKU</span>
-              <input
-                type="text"
-                value={value.sku}
-                onChange={(e) => patch({ sku: e.target.value })}
-                placeholder="optional"
-                className={`${inputCls} mt-1 h-10`}
-              />
-            </label>
-          </div>
-        </section>
-      )}
-
-      {activeTab === "variations" && (
-        <VariationsSection
-          variationProperties={variationProperties}
-          propertiesLoading={propertiesLoading}
-          propertiesError={propertiesError}
-          value={value}
-          patch={patch}
-          sectionHeadingCls={sectionHeadingCls}
-          onGoToTab={onGoToTab}
-        />
-      )}
-
-      {activeTab === "personalization" && (
-        <PersonalizationSection value={value} patch={patch} sectionHeadingCls={sectionHeadingCls} />
-      )}
-
-      {activeTab === "shipping" && (
-        <section className="max-w-md space-y-3">
-          <h3 className={sectionHeadingCls}>Shipping</h3>
-
-          {processingProfiles && processingProfiles.length === 0 && !processingProfilesError ? (
-            <p className="text-xs text-zinc-500">
-              This shop has no processing profile yet — Etsy requires one for every
-              physical listing.{" "}
-              <a
-                href="https://www.etsy.com/your/shops/me/tools/shipping-profiles"
-                target="_blank"
-                rel="noreferrer"
-                className="underline"
+      <EditorSectionCard section="price" className="max-w-xs space-y-3">
+        {priceVariesByVariation ? (
+          <p className="text-sm text-zinc-500">
+            Price varies by variation — set it per combination on the{" "}
+            {onGoToSection ? (
+              <button
+                type="button"
+                onClick={() => onGoToSection("variations")}
+                className="font-medium text-primary hover:underline"
               >
-                Create one on Etsy
-              </a>
-              , then reload this page.
-            </p>
-          ) : (
-            <label className="block text-sm">
-              <span className="text-xs text-zinc-500">Processing profile</span>
-              <select
-                value={value.readinessStateId ?? ""}
-                onChange={(e) => {
-                  const id = e.target.value ? Number(e.target.value) : null;
-                  patch({ readinessStateId: id });
-                }}
-                className={`${inputCls} mt-1 h-9`}
-              >
-                <option value="">Select a processing profile…</option>
-                {(processingProfiles ?? []).map((p) => (
-                  <option key={p.readinessStateId} value={p.readinessStateId}>
-                    {p.displayLabel || `${p.minProcessingDays}-${p.maxProcessingDays} days`}
-                    {" · "}
-                    {p.readinessState === "made_to_order" ? "Made to order" : "Ready to ship"}
-                  </option>
-                ))}
-              </select>
-              {processingProfilesError && (
-                <p className="mt-1 text-xs text-red-600">{processingProfilesError}</p>
-              )}
-            </label>
-          )}
-        </section>
-      )}
-
-      {activeTab === "settings" && (
-        <section className="max-w-md space-y-5">
-          <h3 className={sectionHeadingCls}>Settings</h3>
-
+                Variations section
+              </button>
+            ) : (
+              "Variations section"
+            )}
+            .
+          </p>
+        ) : (
           <label className="block text-sm">
-            <span className="text-xs text-zinc-500">Shop section</span>
+            <span className="text-xs text-zinc-500">Price</span>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              inputMode="decimal"
+              value={value.price}
+              onChange={(e) => patch({ price: e.target.value })}
+              placeholder="0.00"
+              className={`${inputCls} mt-1 h-10`}
+            />
+          </label>
+        )}
+      </EditorSectionCard>
+
+      <EditorSectionCard section="inventory" className="max-w-md space-y-3">
+        <div className="grid grid-cols-2 gap-3 text-sm">
+          <label className="block">
+            <span className="text-xs text-zinc-500">Quantity</span>
+            <input
+              type="number"
+              min="1"
+              step="1"
+              inputMode="numeric"
+              value={value.quantity}
+              onChange={(e) => patch({ quantity: e.target.value })}
+              className={`${inputCls} mt-1 h-10`}
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs text-zinc-500">SKU</span>
+            <input
+              type="text"
+              value={value.sku}
+              onChange={(e) => patch({ sku: e.target.value })}
+              placeholder="optional"
+              className={`${inputCls} mt-1 h-10`}
+            />
+          </label>
+        </div>
+      </EditorSectionCard>
+
+      <VariationsSection
+        variationProperties={variationProperties}
+        propertiesLoading={propertiesLoading}
+        propertiesError={propertiesError}
+        value={value}
+        patch={patch}
+        onGoToSection={onGoToSection}
+      />
+
+      <PersonalizationSection value={value} patch={patch} />
+
+      <EditorSectionCard section="shipping" className="max-w-md space-y-3">
+        {processingProfiles && processingProfiles.length === 0 && !processingProfilesError ? (
+          <p className="text-xs text-zinc-500">
+            This shop has no processing profile yet — Etsy requires one for every
+            physical listing.{" "}
+            <a
+              href="https://www.etsy.com/your/shops/me/tools/shipping-profiles"
+              target="_blank"
+              rel="noreferrer"
+              className="underline"
+            >
+              Create one on Etsy
+            </a>
+            , then reload this page.
+          </p>
+        ) : (
+          <label className="block text-sm">
+            <span className="text-xs text-zinc-500">Processing profile</span>
             <select
-              value={value.shopSectionId ?? ""}
+              value={value.readinessStateId ?? ""}
               onChange={(e) => {
                 const id = e.target.value ? Number(e.target.value) : null;
-                const title = sections?.find((s) => s.shopSectionId === id)?.title ?? "";
-                patch({ shopSectionId: id, shopSectionTitle: title });
+                patch({ readinessStateId: id });
               }}
               className={`${inputCls} mt-1 h-9`}
             >
-              <option value="">No section</option>
-              {(sections ?? []).map((s) => (
-                <option key={s.shopSectionId} value={s.shopSectionId}>
-                  {decodeHtmlEntities(s.title)}
+              <option value="">Select a processing profile…</option>
+              {(processingProfiles ?? []).map((p) => (
+                <option key={p.readinessStateId} value={p.readinessStateId}>
+                  {p.displayLabel || `${p.minProcessingDays}-${p.maxProcessingDays} days`}
+                  {" · "}
+                  {p.readinessState === "made_to_order" ? "Made to order" : "Ready to ship"}
                 </option>
               ))}
             </select>
-            {sectionsError && <p className="mt-1 text-xs text-red-600">{sectionsError}</p>}
-            <p className="mt-1 text-xs text-zinc-500">
-              Use shop sections to organize your products into groups shoppers can explore.
-            </p>
+            {processingProfilesError && (
+              <p className="mt-1 text-xs text-red-600">{processingProfilesError}</p>
+            )}
           </label>
+        )}
+      </EditorSectionCard>
 
-          <label className="flex items-start gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={value.featureListing}
-              onChange={(e) => patch({ featureListing: e.target.checked })}
-              className="mt-0.5 accent-primary"
-            />
-            <span>
-              Feature this listing
-              <span className="block text-xs text-zinc-500">
-                Showcase this listing at the top of your shop home to make it stand out.
-              </span>
+      <EditorSectionCard section="settings" className="max-w-md space-y-5">
+        <label className="block text-sm">
+          <span className="text-xs text-zinc-500">Shop section</span>
+          <select
+            value={value.shopSectionId ?? ""}
+            onChange={(e) => {
+              const id = e.target.value ? Number(e.target.value) : null;
+              const title = sections?.find((s) => s.shopSectionId === id)?.title ?? "";
+              patch({ shopSectionId: id, shopSectionTitle: title });
+            }}
+            className={`${inputCls} mt-1 h-9`}
+          >
+            <option value="">No section</option>
+            {(sections ?? []).map((s) => (
+              <option key={s.shopSectionId} value={s.shopSectionId}>
+                {decodeHtmlEntities(s.title)}
+              </option>
+            ))}
+          </select>
+          {sectionsError && <p className="mt-1 text-xs text-red-600">{sectionsError}</p>}
+          <p className="mt-1 text-xs text-zinc-500">
+            Use shop sections to organize your products into groups shoppers can explore.
+          </p>
+        </label>
+
+        <label className="flex items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={value.featureListing}
+            onChange={(e) => patch({ featureListing: e.target.checked })}
+            className="mt-0.5 accent-primary"
+          />
+          <span>
+            Feature this listing
+            <span className="block text-xs text-zinc-500">
+              Showcase this listing at the top of your shop home to make it stand out.
             </span>
-          </label>
+          </span>
+        </label>
 
-          <label className="flex items-start gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={value.promoteWithAds}
-              onChange={(e) => patch({ promoteWithAds: e.target.checked })}
-              className="mt-0.5 accent-primary"
-            />
-            <span>
-              Etsy Ads
-              <span className="block text-xs text-zinc-500">
-                Promote this listing on Etsy as part of your Etsy Ads campaign.
-              </span>
-              <span className="block text-xs text-amber-600 dark:text-amber-500">
-                Etsy&apos;s Open API has no Ads-campaign endpoint — this isn&apos;t sent anywhere.
-                Manage Etsy Ads from your shop&apos;s dashboard on Etsy.com.
-              </span>
+        <label className="flex items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={value.promoteWithAds}
+            onChange={(e) => patch({ promoteWithAds: e.target.checked })}
+            className="mt-0.5 accent-primary"
+          />
+          <span>
+            Etsy Ads
+            <span className="block text-xs text-zinc-500">
+              Promote this listing on Etsy as part of your Etsy Ads campaign.
             </span>
-          </label>
+            <span className="block text-xs text-amber-600 dark:text-amber-500">
+              Etsy&apos;s Open API has no Ads-campaign endpoint — this isn&apos;t sent anywhere.
+              Manage Etsy Ads from your shop&apos;s dashboard on Etsy.com.
+            </span>
+          </span>
+        </label>
 
-          <fieldset className="text-sm">
-            <legend className="text-xs text-zinc-500">Renewal options *</legend>
-            <div className="mt-1 space-y-1.5">
-              <label className="flex items-center gap-2">
-                <input
-                  type="radio"
-                  name="renewal-option"
-                  checked={value.autoRenew}
-                  onChange={() => patch({ autoRenew: true })}
-                  className="accent-primary"
-                />
-                Automatic
-              </label>
-              <label className="flex items-center gap-2">
-                <input
-                  type="radio"
-                  name="renewal-option"
-                  checked={!value.autoRenew}
-                  onChange={() => patch({ autoRenew: false })}
-                  className="accent-primary"
-                />
-                Manual
-              </label>
-            </div>
-            <p className="mt-1 text-xs text-zinc-500">
-              Each renewal lasts for four months or until the listing sells out.
-            </p>
-          </fieldset>
-        </section>
-      )}
+        <fieldset className="text-sm">
+          <legend className="text-xs text-zinc-500">Renewal options *</legend>
+          <div className="mt-1 space-y-1.5">
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                name="renewal-option"
+                checked={value.autoRenew}
+                onChange={() => patch({ autoRenew: true })}
+                className="accent-primary"
+              />
+              Automatic
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                name="renewal-option"
+                checked={!value.autoRenew}
+                onChange={() => patch({ autoRenew: false })}
+                className="accent-primary"
+              />
+              Manual
+            </label>
+          </div>
+          <p className="mt-1 text-xs text-zinc-500">
+            Each renewal lasts for four months or until the listing sells out.
+          </p>
+        </fieldset>
+      </EditorSectionCard>
     </>
   );
 }
@@ -1174,16 +1131,14 @@ function VariationsSection({
   propertiesError,
   value,
   patch,
-  sectionHeadingCls,
-  onGoToTab,
+  onGoToSection,
 }: {
   variationProperties: TaxonomyProperty[];
   propertiesLoading: boolean;
   propertiesError: string | null;
   value: ListingFormValue;
   patch: (partial: Partial<ListingFormValue>) => void;
-  sectionHeadingCls: string;
-  onGoToTab?: (tab: ListingFormTab) => void;
+  onGoToSection?: (section: ListingFormTab) => void;
 }) {
   const [editor, setEditor] = useState<{ mode: "add" } | { mode: "edit"; index: number } | null>(null);
 
@@ -1269,9 +1224,7 @@ function VariationsSection({
   }
 
   return (
-    <section className="space-y-4">
-      <h3 className={sectionHeadingCls}>Variations</h3>
-
+    <EditorSectionCard section="variations" className="space-y-4">
       {variations.length === 0 ? (
         <div className="flex items-center justify-center rounded-lg border border-dashed border-black/20 py-10 dark:border-white/25">
           <button
@@ -1406,16 +1359,16 @@ function VariationsSection({
               : undefined
           }
           onGoToDetails={
-            onGoToTab
+            onGoToSection
               ? () => {
-                  onGoToTab("details");
+                  onGoToSection("details");
                   setEditor(null);
                 }
               : undefined
           }
         />
       )}
-    </section>
+    </EditorSectionCard>
   );
 }
 
@@ -1481,7 +1434,7 @@ function VariationEditorModal({
   onSave: (variation: ListingFormVariation, editingIndex: number | null) => void;
   /** Only set when editing — deletes the variation being edited and closes the modal. */
   onDelete?: () => void;
-  /** Sends the user to the Details tab to pick a category, closing this modal. Omitted -> no link is shown. */
+  /** Sends the user to the Details section to pick a category, closing this modal. Omitted -> no link is shown. */
   onGoToDetails?: () => void;
 }) {
   const editingVariation = editingIndex != null ? variations[editingIndex] : null;
@@ -1586,7 +1539,7 @@ function VariationEditorModal({
                       Go to Details
                     </button>
                   ) : (
-                    "Go to the Details tab."
+                    "Go to the Details section."
                   )}
                 </p>
               )}
@@ -2518,11 +2471,9 @@ const personalizationInputCls =
 function PersonalizationSection({
   value,
   patch,
-  sectionHeadingCls,
 }: {
   value: ListingFormValue;
   patch: (partial: Partial<ListingFormValue>) => void;
-  sectionHeadingCls: string;
 }) {
   const slot0 = value.personalizationQuestions[0] ?? EMPTY_PERSONALIZATION_QUESTION;
   const slot1 = value.personalizationQuestions[1] ?? null;
@@ -2541,8 +2492,7 @@ function PersonalizationSection({
   }
 
   return (
-    <section className="max-w-2xl space-y-6">
-      <h3 className={sectionHeadingCls}>Personalization</h3>
+    <EditorSectionCard section="personalization" className="max-w-2xl space-y-6">
       <p className="text-sm text-zinc-500">
         Let buyers customize this listing — a text box, a list of options, or a file upload.
         Etsy allows up to {PERSONALIZATION_MAX_QUESTIONS} personalization questions per listing;
@@ -2565,7 +2515,7 @@ function PersonalizationSection({
           </button>
         </div>
       )}
-    </section>
+    </EditorSectionCard>
   );
 }
 

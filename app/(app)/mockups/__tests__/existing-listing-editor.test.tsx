@@ -165,6 +165,7 @@ function route(method: string, url: string): Response {
 
 beforeEach(() => {
   calls = [];
+  Element.prototype.scrollIntoView = vi.fn();
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -189,8 +190,10 @@ const openExisting = () => {
 
 const draftWrites = () => calls.filter((c) => c.url.startsWith("/api/drafts") && c.method !== "GET");
 
-function openTab(label: string) {
-  fireEvent.click(within(screen.getByRole("navigation")).getByRole("button", { name: new RegExp(`^${label}`) }));
+/** Every section is on the page at once; the sidebar link just scrolls to it. */
+function openSection(label: string) {
+  fireEvent.click(within(screen.getByRole("navigation")).getByRole("link", { name: new RegExp(`^${label}`) }));
+  return within(screen.getByRole("region", { name: label }));
 }
 
 const header = () => screen.getByRole("banner");
@@ -203,46 +206,45 @@ describe("editor opened on an existing listing", () => {
     expect(within(header()).getByText(TITLE)).toBeInTheDocument();
     expect(within(header()).queryByText("Untitled listing")).not.toBeInTheDocument();
 
-    openTab("Title");
-    expect(screen.getByPlaceholderText("e.g. Miami Skyline Wall Art Print")).toHaveValue(TITLE);
+    const title = openSection("Title");
+    expect(title.getByPlaceholderText("e.g. Miami Skyline Wall Art Print")).toHaveValue(TITLE);
 
-    openTab("Description");
-    expect(screen.getByPlaceholderText("Describe the product…")).toHaveValue("This is for ONE shirt, not a set of 2.");
+    const description = openSection("Description");
+    expect(description.getByPlaceholderText("Describe the product…")).toHaveValue("This is for ONE shirt, not a set of 2.");
 
-    openTab("Tags");
-    expect(screen.getByText("meowentine shirt")).toBeInTheDocument();
-    expect(screen.getByText("cat lover shirt")).toBeInTheDocument();
+    const tags = openSection("Tags");
+    expect(tags.getByText("meowentine shirt")).toBeInTheDocument();
+    expect(tags.getByText("cat lover shirt")).toBeInTheDocument();
 
-    openTab("Details");
-    expect(screen.getByText("Clothing > Gender-Neutral Adult Clothing > Tops & Tees > T-shirts")).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole("checkbox", { name: "Black" })).toBeChecked());
-    expect(screen.getByRole("checkbox", { name: "White" })).not.toBeChecked();
+    const details = openSection("Details");
+    expect(details.getByText("Clothing > Gender-Neutral Adult Clothing > Tops & Tees > T-shirts")).toBeInTheDocument();
+    await waitFor(() => expect(details.getByRole("checkbox", { name: "Black" })).toBeChecked());
+    expect(details.getByRole("checkbox", { name: "White" })).not.toBeChecked();
 
-    openTab("How it's made");
-    expect(screen.getByRole("radio", { name: "Another company or person" })).toBeChecked();
-    await waitFor(() => expect(screen.getByRole("checkbox", { name: /Atlanta Print Co/ })).toBeChecked());
+    const howMade = openSection("How it's made");
+    expect(howMade.getByRole("radio", { name: "Another company or person" })).toBeChecked();
+    await waitFor(() => expect(howMade.getByRole("checkbox", { name: /Atlanta Print Co/ })).toBeChecked());
 
-    openTab("Price");
-    expect(screen.getByText(/Price varies by variation/)).toBeInTheDocument();
+    expect(openSection("Price").getByText(/Price varies by variation/)).toBeInTheDocument();
 
-    openTab("Inventory");
-    expect(screen.getByRole("spinbutton")).toHaveValue(997);
-    expect(screen.getByPlaceholderText("optional")).toHaveValue("HG-000179");
+    const inventory = openSection("Inventory");
+    expect(inventory.getByRole("spinbutton")).toHaveValue(997);
+    expect(inventory.getByPlaceholderText("optional")).toHaveValue("HG-000179");
 
-    openTab("Variations");
-    expect(screen.getAllByText("Size").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Color").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Unisex Shirt / 2XL").length).toBeGreaterThan(0);
-    const priceCells = screen.getAllByDisplayValue(/^(23\.69|26\.78)$/);
+    const variations = openSection("Variations");
+    expect(variations.getAllByText("Size").length).toBeGreaterThan(0);
+    expect(variations.getAllByText("Color").length).toBeGreaterThan(0);
+    expect(variations.getAllByText("Unisex Shirt / 2XL").length).toBeGreaterThan(0);
+    const priceCells = variations.getAllByDisplayValue(/^(23\.69|26\.78)$/);
     expect(priceCells.map((c) => (c as HTMLInputElement).value)).toEqual(["23.69", "23.69", "26.78", "26.78"]);
 
-    openTab("Shipping");
-    await waitFor(() => expect(screen.getByRole("combobox")).toHaveValue("1441577564343"));
+    const shipping = openSection("Shipping");
+    await waitFor(() => expect(shipping.getByRole("combobox")).toHaveValue("1441577564343"));
 
-    openTab("Settings");
-    await waitFor(() => expect(screen.getAllByRole("combobox")[0]).toHaveValue("56595398"));
-    expect(screen.getByRole("checkbox", { name: /Feature this listing/ })).toBeChecked();
-    expect(screen.getByRole("radio", { name: "Automatic" })).not.toBeChecked();
+    const settings = openSection("Settings");
+    await waitFor(() => expect(settings.getAllByRole("combobox")[0]).toHaveValue("56595398"));
+    expect(settings.getByRole("checkbox", { name: /Feature this listing/ })).toBeChecked();
+    expect(settings.getByRole("radio", { name: "Automatic" })).not.toBeChecked();
   });
 
   it("sends no draft PUT between mount and the first user edit", async () => {
@@ -254,8 +256,7 @@ describe("editor opened on an existing listing", () => {
     await act(() => new Promise((resolve) => setTimeout(resolve, 4500)));
     expect(draftWrites()).toEqual([]);
 
-    openTab("Title");
-    fireEvent.change(screen.getByPlaceholderText("e.g. Miami Skyline Wall Art Print"), {
+    fireEvent.change(openSection("Title").getByPlaceholderText("e.g. Miami Skyline Wall Art Print"), {
       target: { value: `${TITLE}!` },
     });
     await waitFor(() => expect(calls.filter((c) => c.method === "PUT" && c.url === "/api/drafts/draft-1")).toHaveLength(1), {

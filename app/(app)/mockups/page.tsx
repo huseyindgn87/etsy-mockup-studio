@@ -14,6 +14,15 @@ import { publishBlockedBySchedule, scheduleBlocker } from "@/lib/scheduling/publ
 import type { ScheduledListingSummary, ScheduleTimeInput } from "@/lib/scheduling/types";
 import ScheduleDialog from "../schedule/ScheduleDialog";
 import {
+  EDITOR_SECTIONS,
+  EditorSectionCard,
+  SECTION_SCROLL_OFFSET_VAR,
+  compareSections,
+  isEditorSection,
+  type EditorSection,
+} from "./editor-sections";
+import { useSectionNav } from "./useSectionNav";
+import {
   discardRenderSet,
   prepareScheduleImages,
   uploadScheduleImages,
@@ -40,7 +49,6 @@ import { MAX_LISTING_IMAGES, checkImageFileBasics } from "@/lib/etsy/listing-ima
 import { MAX_LISTING_VIDEOS } from "@/lib/etsy/video-limits";
 import ListingForm, {
   EMPTY_LISTING_FORM,
-  type ListingFormTab,
   type ListingFormValue,
   type VariationToggleKey,
 } from "./ListingForm";
@@ -371,41 +379,6 @@ async function errorFrom(res: Response): Promise<string> {
   return body?.error || `Request failed (${res.status})`;
 }
 
-/** Left-nav tabs, mirroring Etsy's own "New listing" screen. */
-type NavTab = ListingFormTab | "photos";
-
-const LISTING_FORM_TABS: readonly ListingFormTab[] = [
-  "title",
-  "description",
-  "tags",
-  "details",
-  "howMade",
-  "price",
-  "inventory",
-  "variations",
-  "personalization",
-  "shipping",
-  "settings",
-];
-function isListingFormTab(tab: NavTab): tab is ListingFormTab {
-  return (LISTING_FORM_TABS as readonly string[]).includes(tab);
-}
-
-const NAV_ITEMS: { key: NavTab; label: string }[] = [
-  { key: "photos", label: "Photos" },
-  { key: "title", label: "Title" },
-  { key: "description", label: "Description" },
-  { key: "tags", label: "Tags" },
-  { key: "details", label: "Details" },
-  { key: "howMade", label: "How it's made" },
-  { key: "price", label: "Price" },
-  { key: "inventory", label: "Inventory" },
-  { key: "variations", label: "Variations" },
-  { key: "personalization", label: "Personalization" },
-  { key: "shipping", label: "Shipping" },
-  { key: "settings", label: "Settings" },
-];
-
 /**
  * `useSearchParams()` requires a Suspense boundary in the App Router — the
  * listing (and mode) this editor targets is chosen entirely on the Listings
@@ -449,7 +422,6 @@ function MockupsPageInner() {
   const [cornerMode, setCornerMode] = useState<"free" | "ratio">("free");
   const [showTemplatePicker, setShowTemplatePicker] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
-  const [activeTab, setActiveTab] = useState<NavTab>("photos");
   const [shopName, setShopName] = useState<string | null>(null);
   const [videos, setVideos] = useState<(ListingVideoItem | null)[]>(() => Array(MAX_LISTING_VIDEOS).fill(null));
   const [videoErrors, setVideoErrors] = useState<(string | null)[]>(() =>
@@ -510,6 +482,15 @@ function MockupsPageInner() {
   const [draftStatus, setDraftStatus] = useState<"idle" | "restoring" | "saving" | "saved" | "error">(
     initialDraftId ? "restoring" : "idle",
   );
+  const headerRef = useRef<HTMLElement>(null);
+  const {
+    active: activeSection,
+    goTo: goToSection,
+    scrollOffset,
+    setRestoreTarget,
+  } = useSectionNav({ ready: draftStatus !== "restoring" && hydrateListingId == null, headerRef });
+  /** Set by a save refused for missing/invalid fields — marks those sections in the sidebar until fixed. */
+  const [showSectionErrors, setShowSectionErrors] = useState(false);
   const [draftError, setDraftError] = useState<string | null>(null);
   /** `${kind}:${itemId}` for every binary file already confirmed uploaded to R2 — drives both what autosave persists and what the upload effect still needs to send. */
   const [uploadedAssetKeys, setUploadedAssetKeys] = useState<Set<string>>(new Set());
@@ -1030,7 +1011,7 @@ function MockupsPageInner() {
           id: string;
           formData: ListingFormValue;
           source: DraftSource | null;
-          activeTab: NavTab;
+          activeTab: string;
           imageOrder: ImageSlotRef[];
           removedJobKeys?: string[];
           removedEtsyImageIds?: number[];
@@ -1126,7 +1107,7 @@ function MockupsPageInner() {
             thumbnailUrl: null,
           });
         }
-        setActiveTab(body.activeTab || "photos");
+        setRestoreTarget(isEditorSection(body.activeTab) ? body.activeTab : null);
         setAltTextBySlot(body.altTextBySlot ?? {});
         setImageOrder(body.imageOrder ?? []);
         setRemovedJobKeys(body.removedJobKeys ?? []);
@@ -1178,7 +1159,7 @@ function MockupsPageInner() {
     // re-chosen mid-session. May call setPublishMode/setTargetListing once,
     // above, to restore a saved copy/existing identity; neither is otherwise
     // touched again after mount.
-  }, [initialDraftId]);
+  }, [initialDraftId, setRestoreTarget]);
 
   // ---- "existing" mode: the listing's saved fields, from the listings cache, once ----
   useEffect(() => {
@@ -1332,7 +1313,7 @@ function MockupsPageInner() {
       removedJobKeys,
       removedEtsyImageIds,
       altTextBySlot,
-      activeTab,
+      activeTab: activeSection,
       videos: draftVideoSlots(videos, (videoId) => uploadedAssetKeys.has(`video:${videoId}`)),
     };
 
@@ -1354,13 +1335,17 @@ function MockupsPageInner() {
     removedJobKeys,
     removedEtsyImageIds,
     altTextBySlot,
-    activeTab,
+    activeSection,
     videos,
     listingForm,
     publishMode,
     targetListing,
   ]);
-  const draftSnapshot = useMemo(() => draftSnapshotKey(draftPayload), [draftPayload]);
+  // Which section is scrolled into view is saved with the draft but isn't a change worth autosaving.
+  const draftSnapshot = useMemo(
+    () => draftSnapshotKey({ ...draftPayload, photosData: { ...draftPayload.photosData, activeTab: undefined } }),
+    [draftPayload],
+  );
   /** The content last saved — or, until the first user edit, the content as loaded. Autosave only runs when it differs. */
   const lastSavedSnapshot = useRef<string | null>(null);
   const loadSettled = draftStatus !== "restoring" && hydrateListingId == null;
@@ -1576,26 +1561,28 @@ function MockupsPageInner() {
   }, [included, designs, jobCount, buildBatchForm]);
 
   /**
-   * Why this listing can't be published yet, or `null` when it's ready. Shared
-   * by Publish and "Schedule for later" — a listing that couldn't publish now
+   * Every reason this listing can't be published yet, each with the section
+   * to fix it in (`null` for page-wide ones), in sidebar order. Shared by
+   * Publish and "Schedule for later" — a listing that couldn't publish now
    * shouldn't be queued to publish later.
    */
-  const publishBlocker = useCallback((): string | null => {
-    if (photoSlots.length === 0) return "Add at least one photo first.";
+  const publishErrors = useMemo((): { section: EditorSection | null; message: string }[] => {
+    const errors: { section: EditorSection | null; message: string }[] = [];
+    if (photoSlots.length === 0) errors.push({ section: "photos", message: "Add at least one photo first." });
     if ((publishMode === "copy" || publishMode === "existing") && publishId == null) {
-      return "No target listing — go back to Listings and choose one.";
+      errors.push({ section: null, message: "No target listing — go back to Listings and choose one." });
     }
     if (publishMode === "existing" && etsyMedia == null) {
-      return etsyMediaError ?? "Still loading this listing's current photos.";
+      errors.push({ section: "photos", message: etsyMediaError ?? "Still loading this listing's current photos." });
     }
     if (publishMode === "new" && !listingForm.title.trim()) {
-      return "Enter a title for the new draft (Listing information form).";
+      errors.push({ section: "title", message: "Enter a title for the new draft (Title section)." });
     }
     if (publishMode === "new" && publishId == null && listingForm.taxonomyId == null) {
-      return "Choose a category for the new listing (Details tab).";
+      errors.push({ section: "details", message: "Choose a category for the new listing (Details section)." });
     }
     if (publishMode === "new" && listingForm.readinessStateId == null) {
-      return "Choose a processing profile for the new draft (Shipping tab).";
+      errors.push({ section: "shipping", message: "Choose a processing profile for the new draft (Shipping section)." });
     }
     if (publishMode !== "existing") {
       const howError = howItsMadeError({
@@ -1604,14 +1591,24 @@ function MockupsPageInner() {
         whenMade: listingForm.whenMade,
         productionPartnerIds: listingForm.productionPartnerIds,
       });
-      if (howError) return `${howError} (How it's made tab)`;
+      if (howError) errors.push({ section: "howMade", message: `${howError} (How it's made section)` });
       const personalizationError = personalizationQuestionsError(
         listingForm.personalizationQuestions.filter((q) => q.questionText.trim() !== ""),
       );
-      if (personalizationError) return `${personalizationError} (Personalization tab)`;
+      if (personalizationError) {
+        errors.push({ section: "personalization", message: `${personalizationError} (Personalization section)` });
+      }
     }
-    return null;
+    return errors.sort((a, b) => compareSections(a.section, b.section));
   }, [photoSlots.length, publishMode, publishId, listingForm, etsyMedia, etsyMediaError]);
+
+  /** Why this listing can't be published yet, or `null` when it's ready. */
+  const publishBlocker = useCallback((): string | null => publishErrors[0]?.message ?? null, [publishErrors]);
+
+  const erroredSections = useMemo(
+    () => new Set(showSectionErrors ? publishErrors.map((e) => e.section) : []),
+    [showSectionErrors, publishErrors],
+  );
 
   /**
    * The `publishTo` payload — everything about the listing itself, minus the
@@ -1671,11 +1668,14 @@ function MockupsPageInner() {
 
   const publishToEtsy = useCallback(async () => {
     if (photoSlots.length === 0) return;
-    const blocker = publishBlocker();
+    const blocker = publishErrors[0];
     if (blocker) {
-      setError(blocker);
+      setError(blocker.message);
+      setShowSectionErrors(true);
+      if (blocker.section) goToSection(blocker.section);
       return;
     }
+    setShowSectionErrors(false);
     setError(null);
     setPublishResult(null);
     try {
@@ -1722,7 +1722,8 @@ function MockupsPageInner() {
     publishId,
     publishMode,
     buildBatchForm,
-    publishBlocker,
+    publishErrors,
+    goToSection,
     buildPublishTo,
     editRevision,
   ]);
@@ -1843,8 +1844,8 @@ function MockupsPageInner() {
   const areaIndex = Math.min(activeArea, Math.max(0, areaCount - 1));
 
   /** Drives the small incomplete-field dot next to each nav item — a light heuristic, not full Etsy validation. */
-  function isTabIncomplete(tab: NavTab): boolean {
-    switch (tab) {
+  function isSectionIncomplete(section: EditorSection): boolean {
+    switch (section) {
       case "photos":
         return photoSlots.length === 0;
       case "title":
@@ -1913,8 +1914,11 @@ function MockupsPageInner() {
   });
 
   return (
-    <div className="min-h-screen bg-zinc-50 font-sans dark:bg-black">
-      <header className="sticky top-0 z-20 border-b border-black/10 bg-zinc-50/95 px-6 py-3 backdrop-blur dark:border-white/15 dark:bg-black/95">
+    <div
+      className="min-h-screen bg-zinc-50 font-sans dark:bg-black"
+      style={{ [SECTION_SCROLL_OFFSET_VAR]: `${scrollOffset}px` } as React.CSSProperties}
+    >
+      <header ref={headerRef} className="sticky top-0 z-20 border-b border-black/10 bg-zinc-50/95 px-6 py-3 backdrop-blur dark:border-white/15 dark:bg-black/95">
         <div className="mx-auto flex w-full max-w-7xl flex-wrap items-center gap-3">
           <Link
             href="/listings"
@@ -1984,7 +1988,7 @@ function MockupsPageInner() {
             <button
               type="button"
               onClick={publishToEtsy}
-              disabled={!!busy || publishCount === 0 || needsReadinessState || !!publishBlockedReason}
+              disabled={!!busy || publishCount === 0 || !!publishBlockedReason}
               title={publishBlockedReason ?? undefined}
               className="h-9 rounded-full border border-primary px-4 text-sm font-medium text-primary transition-colors hover:bg-primary/10 disabled:opacity-40"
             >
@@ -2026,7 +2030,7 @@ function MockupsPageInner() {
           )}
           {needsReadinessState && (
             <p className="text-xs font-medium text-primary">
-              Choose a processing profile on the Shipping tab before creating this draft.
+              Choose a processing profile in the Shipping section before creating this draft.
             </p>
           )}
           <p className="text-xs text-zinc-500">
@@ -2079,24 +2083,46 @@ function MockupsPageInner() {
         )}
 
         <div className="flex flex-col gap-6 lg:flex-row">
-          {/* ---- left nav ---- */}
-          <nav className="lg:w-[200px] lg:shrink-0">
+          {/* ---- left nav: jumps to a section of the form on the right ---- */}
+          <nav
+            aria-label="Listing sections"
+            className="lg:sticky lg:w-[200px] lg:shrink-0 lg:self-start"
+            style={{ top: scrollOffset }}
+          >
             <ul className="space-y-0.5">
-              {NAV_ITEMS.map((item) => {
-                const isActive = activeTab === item.key;
-                const incomplete = isTabIncomplete(item.key);
+              {EDITOR_SECTIONS.map((item) => {
+                const isActive = activeSection === item.key;
+                const errored = erroredSections.has(item.key);
+                const incomplete = !errored && isSectionIncomplete(item.key);
                 return (
                   <li key={item.key}>
-                    <button
-                      type="button"
-                      onClick={() => setActiveTab(item.key)}
-                      className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition-colors ${
+                    <a
+                      href={`#${item.anchor}`}
+                      aria-current={isActive ? "location" : undefined}
+                      data-errored={errored || undefined}
+                      onClick={(e) => {
+                        if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+                        e.preventDefault();
+                        goToSection(item.key);
+                      }}
+                      className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary ${
                         isActive
                           ? "bg-black text-white dark:bg-white dark:text-black"
-                          : "text-zinc-600 hover:bg-black/[.04] dark:text-zinc-400 dark:hover:bg-white/[.06]"
+                          : errored
+                            ? "text-red-600 hover:bg-black/[.04] dark:text-red-400 dark:hover:bg-white/[.06]"
+                            : "text-zinc-600 hover:bg-black/[.04] dark:text-zinc-400 dark:hover:bg-white/[.06]"
                       }`}
                     >
                       <span>{item.label}</span>
+                      {errored && (
+                        <span
+                          role="img"
+                          aria-label={`${item.label} has errors`}
+                          className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-red-600 text-[10px] font-bold text-white"
+                        >
+                          !
+                        </span>
+                      )}
                       {incomplete && (
                         <span
                           aria-label={`${item.label} incomplete`}
@@ -2105,297 +2131,294 @@ function MockupsPageInner() {
                           }`}
                         />
                       )}
-                    </button>
+                    </a>
                   </li>
                 );
               })}
             </ul>
           </nav>
 
-          {/* ---- right: active tab's panel ---- */}
-          <div className="min-w-0 flex-1 rounded-xl border border-black/10 bg-white p-4 dark:border-white/15 dark:bg-zinc-950 md:p-6">
-            {activeTab === "photos" && (
-              <div>
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <h3 className="text-base font-bold text-zinc-900 dark:text-zinc-50">Photos</h3>
+          {/* ---- right: every section of the form, top to bottom ---- */}
+          <div className="min-w-0 flex-1 space-y-6">
+            <EditorSectionCard
+              section="photos"
+              aside={
+                <button
+                  type="button"
+                  onClick={runBatch}
+                  disabled={!!busy || jobCount === 0}
+                  className="h-9 rounded-full bg-primary px-4 text-sm font-medium text-white transition-colors hover:bg-primary-dark disabled:opacity-40"
+                >
+                  {busy ?? `Batch render & download (${jobCount})`}
+                </button>
+              }
+            >
+              <div className="mt-4 grid gap-6 lg:grid-cols-[260px_1fr_260px]">
+                {/* ---- left: lists ---- */}
+                <div className="space-y-6">
+                  <Dropzone
+                    label="Mockup PSDs"
+                    accept=".psd"
+                    inputRef={psdInput}
+                    onFiles={edit(addPsds)}
+                  />
                   <button
                     type="button"
-                    onClick={runBatch}
-                    disabled={!!busy || jobCount === 0}
-                    className="h-9 rounded-full bg-primary px-4 text-sm font-medium text-white transition-colors hover:bg-primary-dark disabled:opacity-40"
+                    onClick={() => setShowTemplatePicker(true)}
+                    className="h-9 w-full rounded-lg border border-dashed border-black/20 text-sm text-zinc-600 transition-colors hover:bg-black/[.04] dark:border-white/25 dark:text-zinc-300 dark:hover:bg-white/[.06]"
                   >
-                    {busy ?? `Batch render & download (${jobCount})`}
+                    Add from template library
                   </button>
-                </div>
-
-                <div className="mt-4 grid gap-6 lg:grid-cols-[260px_1fr_260px]">
-                  {/* ---- left: lists ---- */}
-                  <div className="space-y-6">
-                    <Dropzone
-                      label="Mockup PSDs"
-                      accept=".psd"
-                      inputRef={psdInput}
-                      onFiles={edit(addPsds)}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowTemplatePicker(true)}
-                      className="h-9 w-full rounded-lg border border-dashed border-black/20 text-sm text-zinc-600 transition-colors hover:bg-black/[.04] dark:border-white/25 dark:text-zinc-300 dark:hover:bg-white/[.06]"
-                    >
-                      Add from template library
-                    </button>
-                    {mockups.length > 0 && (
-                      <ul className="space-y-1">
-                        {mockups.map((m, i) => (
-                          <li
-                            key={m.id}
-                            draggable
-                            onDragStart={(e) => {
-                              e.dataTransfer.effectAllowed = "move";
-                              e.dataTransfer.setData("text/plain", String(i));
-                            }}
-                            onDragOver={(e) => e.preventDefault()}
-                            onDrop={(e) => {
-                              e.preventDefault();
-                              const from = Number(e.dataTransfer.getData("text/plain"));
-                              if (Number.isFinite(from)) edit(moveMockup)(from, i);
-                            }}
+                  {mockups.length > 0 && (
+                    <ul className="space-y-1">
+                      {mockups.map((m, i) => (
+                        <li
+                          key={m.id}
+                          draggable
+                          onDragStart={(e) => {
+                            e.dataTransfer.effectAllowed = "move";
+                            e.dataTransfer.setData("text/plain", String(i));
+                          }}
+                          onDragOver={(e) => e.preventDefault()}
+                          onDrop={(e) => {
+                            e.preventDefault();
+                            const from = Number(e.dataTransfer.getData("text/plain"));
+                            if (Number.isFinite(from)) edit(moveMockup)(from, i);
+                          }}
+                        >
+                          <div
+                            className={`flex items-center gap-2 rounded-lg border px-2 py-1.5 text-sm ${
+                              m.id === activeId
+                                ? "border-primary bg-primary/5"
+                                : "border-black/10 hover:bg-black/[.03] dark:border-white/15 dark:hover:bg-white/[.05]"
+                            }`}
                           >
-                            <div
-                              className={`flex items-center gap-2 rounded-lg border px-2 py-1.5 text-sm ${
-                                m.id === activeId
-                                  ? "border-primary bg-primary/5"
-                                  : "border-black/10 hover:bg-black/[.03] dark:border-white/15 dark:hover:bg-white/[.05]"
-                              }`}
-                            >
-                              <span className="cursor-grab select-none text-zinc-400" aria-hidden="true">
-                                ⠿
-                              </span>
-                              <input
-                                type="checkbox"
-                                checked={m.include}
-                                onChange={(e) =>
-                                  edit(setMockups)((prev) =>
-                                    prev.map((x) =>
-                                      x.id === m.id
-                                        ? { ...x, include: e.target.checked }
-                                        : x,
-                                    ),
-                                  )
-                                }
-                                className="accent-primary"
-                              />
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setActiveId(m.id);
-                                  setActiveArea(0);
-                                  setCalibrationNote(null);
-                                }}
-                                className="flex-1 truncate text-left"
-                              >
-                                {m.name}
-                              </button>
-                              {m.tone && <ToneBadge tone={m.tone} />}
-                              <button
-                                type="button"
-                                onClick={() => edit(deleteMockup)(m.id)}
-                                aria-label={`Delete ${m.name}`}
-                                className="text-zinc-400 hover:text-red-600"
-                              >
-                                ×
-                              </button>
-                            </div>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-
-                    <Dropzone
-                      label="Designs"
-                      accept="image/*"
-                      inputRef={designInput}
-                      onFiles={edit(addDesigns)}
-                    />
-                    {designs.length > 0 && (
-                      <ul className="grid grid-cols-3 gap-2">
-                        {designs.map((d) => (
-                          <li key={d.id}>
+                            <span className="cursor-grab select-none text-zinc-400" aria-hidden="true">
+                              ⠿
+                            </span>
+                            <input
+                              type="checkbox"
+                              checked={m.include}
+                              onChange={(e) =>
+                                edit(setMockups)((prev) =>
+                                  prev.map((x) =>
+                                    x.id === m.id
+                                      ? { ...x, include: e.target.checked }
+                                      : x,
+                                  ),
+                                )
+                              }
+                              className="accent-primary"
+                            />
                             <button
                               type="button"
-                              onClick={() => setPreviewDesignId(d.id)}
-                              title={d.name}
-                              className={`block aspect-square w-full overflow-hidden rounded-lg border ${
-                                d.id === previewDesign?.id
-                                  ? "border-primary ring-2 ring-primary/40"
-                                  : "border-black/10 dark:border-white/15"
-                              }`}
+                              onClick={() => {
+                                setActiveId(m.id);
+                                setActiveArea(0);
+                                setCalibrationNote(null);
+                              }}
+                              className="flex-1 truncate text-left"
                             >
-                              {/* eslint-disable-next-line @next/next/no-img-element */}
-                              <img
-                                src={d.url}
-                                alt={d.name}
-                                className="h-full w-full object-contain"
-                              />
+                              {m.name}
                             </button>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-
-                  {/* ---- center: editor ---- */}
-                  <div>
-                    {active ? (
-                      <>
-                        {areaCount > 1 && (
-                          <div className="mb-3 flex flex-wrap gap-1.5">
-                            {Array.from({ length: areaCount }).map((_, i) => (
-                              <button
-                                key={i}
-                                type="button"
-                                onClick={() => setActiveArea(i)}
-                                className={`h-7 rounded-full px-2.5 text-xs font-medium ${
-                                  i === areaIndex
-                                    ? "bg-black text-white dark:bg-white dark:text-black"
-                                    : "border border-black/10 dark:border-white/15"
-                                }`}
-                              >
-                                {active.areaNames[i] || `Area ${i + 1}`}
-                              </button>
-                            ))}
+                            {m.tone && <ToneBadge tone={m.tone} />}
+                            <button
+                              type="button"
+                              onClick={() => edit(deleteMockup)(m.id)}
+                              aria-label={`Delete ${m.name}`}
+                              className="text-zinc-400 hover:text-red-600"
+                            >
+                              ×
+                            </button>
                           </div>
-                        )}
-                        <MockupCanvas
-                          key={active.id}
-                          mock={active.mockRaster}
-                          overlays={previewOverlays}
-                          design={previewDesign?.raster ?? null}
-                          calibration={active.calibration}
-                          activeArea={areaIndex}
-                          cornerMode={cornerMode}
-                          onAreaChange={edit(onAreaChange)}
-                        />
-                        <p className="mt-2 text-center text-xs text-zinc-500">
-                          {active.psdW}×{active.psdH}px · drag the corners, grab inside the area to move it
-                        </p>
-                      </>
-                    ) : (
-                      <div className="flex h-72 items-center justify-center rounded-lg border border-dashed border-black/15 text-sm text-zinc-500 dark:border-white/20">
-                        Upload a PSD and pick one from the list.
-                      </div>
-                    )}
-                  </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
 
-                  {/* ---- right: controls ---- */}
-                  <div className="space-y-4">
-                    {active ? (
-                      <>
-                        <div>
-                          <span className="mb-1.5 block text-sm text-zinc-600 dark:text-zinc-400">
-                            Corners
-                          </span>
-                          <div className="flex gap-1.5">
-                            {(
-                              [
-                                ["free", "Free"],
-                                ["ratio", "Keep ratio"],
-                              ] as const
-                            ).map(([m, label]) => (
-                              <button
-                                key={m}
-                                type="button"
-                                onClick={() => setCornerMode(m)}
-                                className={`h-8 flex-1 rounded-full text-xs font-medium transition-colors ${
-                                  cornerMode === m
-                                    ? "bg-black text-white dark:bg-white dark:text-black"
-                                    : "border border-black/10 text-zinc-600 dark:border-white/15 dark:text-zinc-400"
-                                }`}
-                              >
-                                {label}
-                              </button>
-                            ))}
-                          </div>
-                          <p className="mt-1 text-xs text-zinc-500">
-                            {cornerMode === "ratio"
-                              ? "Dragging one corner scales the area proportionally from the opposite corner."
-                              : "Each corner drags independently (perspective)."}
-                          </p>
-                        </div>
-
-                        {SLIDERS.map((s) => {
-                          const value = Number(active.calibration[s.key] ?? s.min);
-                          return (
-                            <label key={s.key} className="block text-sm">
-                              <span className="flex justify-between text-zinc-600 dark:text-zinc-400">
-                                <span>{s.label}</span>
-                                <span className="font-mono">{Math.round(value)}</span>
-                              </span>
-                              <input
-                                type="range"
-                                min={s.min}
-                                max={s.max}
-                                value={value}
-                                onChange={(e) => edit(onSlider)(s.key, Number(e.target.value))}
-                                className="mt-1 w-full accent-primary"
-                              />
-                            </label>
-                          );
-                        })}
-
-                        <div className="border-t border-black/10 pt-4 dark:border-white/15">
+                  <Dropzone
+                    label="Designs"
+                    accept="image/*"
+                    inputRef={designInput}
+                    onFiles={edit(addDesigns)}
+                  />
+                  {designs.length > 0 && (
+                    <ul className="grid grid-cols-3 gap-2">
+                      {designs.map((d) => (
+                        <li key={d.id}>
                           <button
                             type="button"
-                            onClick={saveActiveCalibration}
-                            className="h-9 w-full rounded-full border border-black/10 text-sm font-medium transition-colors hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
+                            onClick={() => setPreviewDesignId(d.id)}
+                            title={d.name}
+                            className={`block aspect-square w-full overflow-hidden rounded-lg border ${
+                              d.id === previewDesign?.id
+                                ? "border-primary ring-2 ring-primary/40"
+                                : "border-black/10 dark:border-white/15"
+                            }`}
                           >
-                            Save calibration
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img
+                              src={d.url}
+                              alt={d.name}
+                              className="h-full w-full object-contain"
+                            />
                           </button>
-                          <p className="mt-1.5 text-center text-xs text-zinc-500">
-                            {calibrationNote ??
-                              (active.hasSavedCalibration
-                                ? "A saved calibration was loaded for this template."
-                                : "No saved calibration yet for this template — your corner/slider settings only persist for this session.")}
-                          </p>
-                        </div>
-                      </>
-                    ) : (
-                      <p className="text-sm text-zinc-500">Select a mockup to adjust its settings.</p>
-                    )}
-                  </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
 
-                <p className="mt-6 text-sm text-zinc-500 dark:text-zinc-400">
-                  {mockups.length} templates ({included.length} checked) × {designs.length}{" "}
-                  designs = <span className="font-medium">{jobCount}</span> images.
-                  Preview runs in the browser, batch rendering on the server — same core.
-                </p>
+                {/* ---- center: editor ---- */}
+                <div>
+                  {active ? (
+                    <>
+                      {areaCount > 1 && (
+                        <div className="mb-3 flex flex-wrap gap-1.5">
+                          {Array.from({ length: areaCount }).map((_, i) => (
+                            <button
+                              key={i}
+                              type="button"
+                              onClick={() => setActiveArea(i)}
+                              className={`h-7 rounded-full px-2.5 text-xs font-medium ${
+                                i === areaIndex
+                                  ? "bg-black text-white dark:bg-white dark:text-black"
+                                  : "border border-black/10 dark:border-white/15"
+                              }`}
+                            >
+                              {active.areaNames[i] || `Area ${i + 1}`}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      <MockupCanvas
+                        key={active.id}
+                        mock={active.mockRaster}
+                        overlays={previewOverlays}
+                        design={previewDesign?.raster ?? null}
+                        calibration={active.calibration}
+                        activeArea={areaIndex}
+                        cornerMode={cornerMode}
+                        onAreaChange={edit(onAreaChange)}
+                      />
+                      <p className="mt-2 text-center text-xs text-zinc-500">
+                        {active.psdW}×{active.psdH}px · drag the corners, grab inside the area to move it
+                      </p>
+                    </>
+                  ) : (
+                    <div className="flex h-72 items-center justify-center rounded-lg border border-dashed border-black/15 text-sm text-zinc-500 dark:border-white/20">
+                      Upload a PSD and pick one from the list.
+                    </div>
+                  )}
+                </div>
 
-                <ListingMediaEditor
-                  slots={photoSlots}
-                  altTextBySlot={altTextBySlot}
-                  onMovePhoto={edit(moveImageSlot)}
-                  onRemovePhoto={edit(removeImageSlot)}
-                  onAltTextChange={edit(setAltText)}
-                  onAddPhotos={edit(addOwnImages)}
-                  videos={videos}
-                  videoErrors={videoErrors}
-                  onSelectVideo={edit(selectVideo)}
-                  onMoveVideo={edit(moveVideoSlot)}
-                />
+                {/* ---- right: controls ---- */}
+                <div className="space-y-4">
+                  {active ? (
+                    <>
+                      <div>
+                        <span className="mb-1.5 block text-sm text-zinc-600 dark:text-zinc-400">
+                          Corners
+                        </span>
+                        <div className="flex gap-1.5">
+                          {(
+                            [
+                              ["free", "Free"],
+                              ["ratio", "Keep ratio"],
+                            ] as const
+                          ).map(([m, label]) => (
+                            <button
+                              key={m}
+                              type="button"
+                              onClick={() => setCornerMode(m)}
+                              className={`h-8 flex-1 rounded-full text-xs font-medium transition-colors ${
+                                cornerMode === m
+                                  ? "bg-black text-white dark:bg-white dark:text-black"
+                                  : "border border-black/10 text-zinc-600 dark:border-white/15 dark:text-zinc-400"
+                              }`}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                        <p className="mt-1 text-xs text-zinc-500">
+                          {cornerMode === "ratio"
+                            ? "Dragging one corner scales the area proportionally from the opposite corner."
+                            : "Each corner drags independently (perspective)."}
+                        </p>
+                      </div>
+
+                      {SLIDERS.map((s) => {
+                        const value = Number(active.calibration[s.key] ?? s.min);
+                        return (
+                          <label key={s.key} className="block text-sm">
+                            <span className="flex justify-between text-zinc-600 dark:text-zinc-400">
+                              <span>{s.label}</span>
+                              <span className="font-mono">{Math.round(value)}</span>
+                            </span>
+                            <input
+                              type="range"
+                              min={s.min}
+                              max={s.max}
+                              value={value}
+                              onChange={(e) => edit(onSlider)(s.key, Number(e.target.value))}
+                              className="mt-1 w-full accent-primary"
+                            />
+                          </label>
+                        );
+                      })}
+
+                      <div className="border-t border-black/10 pt-4 dark:border-white/15">
+                        <button
+                          type="button"
+                          onClick={saveActiveCalibration}
+                          className="h-9 w-full rounded-full border border-black/10 text-sm font-medium transition-colors hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
+                        >
+                          Save calibration
+                        </button>
+                        <p className="mt-1.5 text-center text-xs text-zinc-500">
+                          {calibrationNote ??
+                            (active.hasSavedCalibration
+                              ? "A saved calibration was loaded for this template."
+                              : "No saved calibration yet for this template — your corner/slider settings only persist for this session.")}
+                        </p>
+                      </div>
+                    </>
+                  ) : (
+                    <p className="text-sm text-zinc-500">Select a mockup to adjust its settings.</p>
+                  )}
+                </div>
               </div>
-            )}
 
-            {hydrateListingId != null && isListingFormTab(activeTab) ? (
-              <p className="text-sm text-zinc-500">Loading listing…</p>
-            ) : (
-              <ListingForm
-                value={listingForm}
-                onChange={edit(setListingForm)}
-                activeTab={isListingFormTab(activeTab) ? activeTab : null}
-                onGoToTab={setActiveTab}
+              <p className="mt-6 text-sm text-zinc-500 dark:text-zinc-400">
+                {mockups.length} templates ({included.length} checked) × {designs.length}{" "}
+                designs = <span className="font-medium">{jobCount}</span> images.
+                Preview runs in the browser, batch rendering on the server — same core.
+              </p>
+
+              <ListingMediaEditor
+                slots={photoSlots}
+                altTextBySlot={altTextBySlot}
+                onMovePhoto={edit(moveImageSlot)}
+                onRemovePhoto={edit(removeImageSlot)}
+                onAltTextChange={edit(setAltText)}
+                onAddPhotos={edit(addOwnImages)}
+                videos={videos}
+                videoErrors={videoErrors}
+                onSelectVideo={edit(selectVideo)}
+                onMoveVideo={edit(moveVideoSlot)}
               />
+            </EditorSectionCard>
+
+            {hydrateListingId != null ? (
+              <p className="rounded-xl border border-black/10 bg-white p-4 text-sm text-zinc-500 dark:border-white/15 dark:bg-zinc-950 md:p-6">
+                Loading listing…
+              </p>
+            ) : (
+              <ListingForm value={listingForm} onChange={edit(setListingForm)} onGoToSection={goToSection} />
             )}
+            {/* Lets the last sections scroll up to the top, so each can become the active one. */}
+            <div aria-hidden className="h-[50vh]" />
           </div>
         </div>
       </div>
