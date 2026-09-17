@@ -680,7 +680,10 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
     const changed = mediaChanges(l, media[l.listingId]);
     return changed.photos || changed.videos;
   }).length;
-  const { dialog: unsavedDialog } = useUnsavedChangesGuard(unsavedCount);
+  const { dialog: unsavedDialog } = useUnsavedChangesGuard(unsavedCount, {
+    onSave: () => save(),
+    saveLabel: "Sync updates and leave",
+  });
 
   const mediaFor = (listing: BulkListingDetail) => media[listing.listingId] ?? initialExistingMedia(listing);
 
@@ -854,7 +857,7 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
    * failure while the run carries on. Progress is counted per listing, and the
    * run always ends — the buttons can't be left stuck in the syncing state.
    */
-  async function save() {
+  async function save(): Promise<boolean> {
     const mediaIds = new Set(mediaUpdates.map((l) => l.listingId));
     const runIds = [...new Set([...mediaIds, ...updates.map((u) => u.listingId)])];
     setSaving(true);
@@ -890,6 +893,7 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
       setProgress(null);
       setSaving(false);
     }
+    return done.length > 0 && done.every((r) => r.ok);
   }
 
   /** Ask Claude for a new value of the AI field for one listing, filling its row. */
@@ -1124,7 +1128,7 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
             </button>
             <button
               type="button"
-              onClick={save}
+              onClick={() => void save()}
               disabled={saving || syncCount === 0}
               className="inline-flex h-9 items-center gap-2 rounded-full bg-primary px-4 text-sm font-medium text-white transition-colors hover:bg-primary-dark disabled:opacity-40"
             >

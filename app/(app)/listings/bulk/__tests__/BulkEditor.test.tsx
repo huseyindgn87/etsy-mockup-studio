@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import BulkEditor from "../BulkEditor";
@@ -1091,7 +1091,7 @@ describe("leaving with unsaved edits", () => {
     expect(screen.getByRole("alertdialog")).toHaveTextContent("2 listings have unsaved changes");
     expect(reload().defaultPrevented).toBe(true);
 
-    fireEvent.click(screen.getByRole("button", { name: "Stay" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
     expect(rowField("Title", 101)).toHaveValue("Changed");
 
@@ -1112,6 +1112,37 @@ describe("leaving with unsaved edits", () => {
     const { cancel, reached } = sinkCancel();
     fireEvent.click(cancel);
     expect(reached).toHaveBeenCalled();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  test("the browser Back button is held while edits are pending", async () => {
+    await renderEditor();
+    const go = vi.spyOn(window.history, "go").mockImplementation(() => {});
+    openField("Title", "Listings");
+    fireEvent.change(rowField("Title", 101), { target: { value: "Changed" } });
+
+    await act(async () => {
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    expect(screen.getByRole("alertdialog")).toHaveTextContent("1 listing has unsaved changes");
+    expect(go).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    expect(go).toHaveBeenCalledWith(-2);
+    go.mockRestore();
+  });
+
+  test("Sync updates and leave writes the edits, then carries on", async () => {
+    await renderEditor();
+    openField("Title", "Listings");
+    fireEvent.change(rowField("Title", 101), { target: { value: "Saved on the way out" } });
+
+    const { cancel, reached } = sinkCancel();
+    fireEvent.click(cancel);
+    fireEvent.click(screen.getByRole("button", { name: "Sync updates and leave" }));
+
+    await waitFor(() => expect(reached).toHaveBeenCalledTimes(1));
+    expect(savedUpdates()).toEqual([{ listingId: 101, patch: { title: "Saved on the way out" } }]);
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   });
 });

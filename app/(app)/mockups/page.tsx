@@ -1272,8 +1272,13 @@ function MockupsPageInner() {
   const lastSavedSnapshot = useRef<string | null>(null);
   const loadSettled = draftStatus !== "restoring" && hydrateListingId == null;
 
-  /** Saves now. Resolves to the draft's id, or `null` when there was nothing to save or saving failed. */
-  const saveDraftNow = useCallback(async (): Promise<string | null> => {
+  /**
+   * Saves now. Resolves to the draft's id, or `null` when there was nothing to
+   * save or saving failed. Only an `explicit` save — the Save draft button, a
+   * schedule, the unsaved-changes dialog — clears the unsaved-changes flag: the
+   * debounced autosave is a safety net, not the user saying they are done.
+   */
+  const saveDraftNow = useCallback(async ({ explicit = false } = {}): Promise<string | null> => {
     if (!loadSettled) return null;
     if (!draftId && !hasDraftableContent()) return null;
     setDraftStatus("saving");
@@ -1319,7 +1324,7 @@ function MockupsPageInner() {
       lastSavedSnapshot.current = draftSnapshot;
       setDraftStatus("saved");
       setDraftError(null);
-      setSavedRevision(editRevision);
+      if (explicit) setSavedRevision(editRevision);
       return id;
     } catch (err) {
       setDraftStatus("error");
@@ -1338,6 +1343,11 @@ function MockupsPageInner() {
     searchParams,
   ]);
 
+  const saveDraftRef = useRef(saveDraftNow);
+  useEffect(() => {
+    saveDraftRef.current = saveDraftNow;
+  }, [saveDraftNow]);
+
   const hasPendingUploads =
     mockups.some((m) => m.psdFile && !uploadedAssetKeys.has(`psd:${m.id}`)) ||
     designs.some((d) => !uploadedAssetKeys.has(`design:${d.id}`)) ||
@@ -1345,9 +1355,14 @@ function MockupsPageInner() {
     videos.some((v) => v?.kind === "file" && !(v.id && uploadedAssetKeys.has(`video:${v.id}`)));
   const hasUnsavedChanges =
     loadSettled &&
+    editRevision > 0 &&
     editRevision !== publishedRevision &&
     (editRevision !== savedRevision || hasPendingUploads);
-  const { dialog: unsavedDialog } = useUnsavedChangesGuard(hasUnsavedChanges ? 1 : 0);
+  const saveFromGuard = useCallback(async () => (await saveDraftRef.current({ explicit: true })) != null, []);
+  const { dialog: unsavedDialog } = useUnsavedChangesGuard(hasUnsavedChanges ? 1 : 0, {
+    onSave: saveFromGuard,
+    saveLabel: "Save draft and leave",
+  });
 
   // ---- autosave, debounced so a closed tab doesn't lose the work ----
   // Only after a user edit, and only when the content differs from what was
@@ -1355,10 +1370,6 @@ function MockupsPageInner() {
   useEffect(() => {
     if (loadSettled && editRevision === 0) lastSavedSnapshot.current = draftSnapshot;
   }, [loadSettled, editRevision, draftSnapshot]);
-  const saveDraftRef = useRef(saveDraftNow);
-  useEffect(() => {
-    saveDraftRef.current = saveDraftNow;
-  }, [saveDraftNow]);
   useEffect(() => {
     if (!loadSettled || editRevision === 0 || draftSnapshot === lastSavedSnapshot.current) return;
     const t = setTimeout(() => {
@@ -1723,7 +1734,7 @@ function MockupsPageInner() {
       );
 
       setScheduleProgress("Saving…");
-      const id = await saveDraftNow();
+      const id = await saveDraftNow({ explicit: true });
       if (!id) {
         await discardRenderSet(uploaded.renderSetId);
         return "The draft couldn't be saved, so it can't be scheduled yet.";
@@ -1878,7 +1889,7 @@ function MockupsPageInner() {
             </span>
             <button
               type="button"
-              onClick={() => void saveDraftNow()}
+              onClick={() => void saveDraftNow({ explicit: true })}
               disabled={draftStatus === "saving" || !loadSettled}
               className="h-9 rounded-full border border-black/10 px-4 text-sm font-medium transition-colors hover:bg-black/[.04] disabled:opacity-40 dark:border-white/15 dark:hover:bg-white/[.06]"
             >
