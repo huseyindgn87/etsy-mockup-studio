@@ -93,6 +93,8 @@ let fetchMock: ReturnType<typeof vi.fn>;
 let saveResults:
   | ((updates: { listingId: number }[]) => { listingId: number; ok: boolean; partial?: boolean; error?: string }[])
   | null = null;
+/** Held before a listing's save answers, so a test can keep a write in flight. */
+let saveDelay: ((listingId: number) => Promise<void>) | null = null;
 /** What AI Edits answers for one request body. */
 let aiAnswer: (body: { field: string; listing: { title: string } }) => { status: number; body: unknown } = (body) => ({
   status: 200,
@@ -159,6 +161,7 @@ function mockFetch(listings: BulkListingDetail[] = LISTINGS) {
     }
     if (url === "/api/etsy/listings/bulk/save") {
       const { updates } = JSON.parse((init as RequestInit).body as string) as { updates: { listingId: number }[] };
+      if (saveDelay) await saveDelay(updates[0].listingId);
       return jsonResponse({
         results: saveResults ? saveResults(updates) : updates.map((u) => ({ listingId: u.listingId, ok: true })),
       });
@@ -199,13 +202,16 @@ function mockFetch(listings: BulkListingDetail[] = LISTINGS) {
   vi.stubGlobal("fetch", fetchMock);
 }
 
-/** The body of the save request, or null if no save was made. */
+/**
+ * Every listing sent to the save route, in order — a Sync sends one request
+ * per listing, so this flattens them. Null if no save was made.
+ */
 function savedUpdates(): { listingId: number; patch: Record<string, unknown> }[] | null {
-  const call = fetchMock.mock.calls.find(([url]) => url === "/api/etsy/listings/bulk/save");
-  return call ? JSON.parse((call[1] as RequestInit).body as string).updates : null;
+  const saves = allSaves();
+  return saves.length > 0 ? saves.flat() : null;
 }
 
-/** Every save request body, in order. */
+/** Every save request body, in order — one per listing written. */
 const allSaves = (): { listingId: number; patch: Record<string, unknown> }[][] =>
   fetchMock.mock.calls
     .filter(([url]) => url === "/api/etsy/listings/bulk/save")
@@ -240,9 +246,19 @@ async function renderEditor(listings: BulkListingDetail[] = LISTINGS) {
   );
 }
 
+/** A promise a test resolves when it wants a held request to answer. */
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   saveResults = null;
+  saveDelay = null;
   variationImagesFor = () => [];
   aiAnswer = (body) => ({
     status: 200,
@@ -252,6 +268,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 describe("the screen", () => {
@@ -1196,17 +1213,77 @@ describe("saving", () => {
     fireEvent.change(rowField("Title", 102), { target: { value: "Second" } });
     fireEvent.click(syncButton());
 
-    const status = await screen.findByRole("status");
-    expect(status).toHaveTextContent("Saved 1 of 2 listings. Rows that failed keep their changes below.");
+    const status = await screen.findByText(/Updated 1 of 2 listings/);
+    expect(status).toHaveTextContent("1 failed.");
     expect(status).toHaveTextContent("Listing 102: Etsy said no");
     expect(inRow(102).getByText(/Etsy said no/)).toBeInTheDocument();
     expect(rowField("Title", 102)).toHaveValue("Second");
     expect(syncButton()).toHaveTextContent("Sync updates (1)");
+    // Only the listing that failed stays selected, so a second Sync retries it alone.
+    expect(screen.getByLabelText("Include Listing 102 in the save")).toBeChecked();
+    expect(screen.getByLabelText("Include First in the save")).not.toBeChecked();
 
     saveResults = null;
     fireEvent.click(syncButton());
-    await waitFor(() => expect(allSaves()).toHaveLength(2));
-    expect(allSaves()[1]).toEqual([{ listingId: 102, patch: { title: "Second" } }]);
+    await waitFor(() => expect(allSaves()).toHaveLength(3));
+    expect(allSaves()[2]).toEqual([{ listingId: 102, patch: { title: "Second" } }]);
+  });
+
+  test("while syncing, the button spins and Cancel and Schedule are closed off", async () => {
+    const gate = deferred();
+    saveDelay = () => gate.promise;
+    await renderEditor();
+    openField("Title", "Listings");
+    fireEvent.change(rowField("Title", 101), { target: { value: "First" } });
+    fireEvent.click(syncButton());
+
+    const syncing = await screen.findByRole("button", { name: "Syncing…" });
+    expect(syncing).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Schedule" })).toBeDisabled();
+    expect(screen.getByRole("link", { name: "Cancel" })).toHaveAttribute("aria-disabled", "true");
+
+    gate.resolve();
+    await waitFor(() => expect(syncButton()).toHaveTextContent(/^Sync updates$/));
+    expect(screen.getByRole("button", { name: "Schedule" })).toBeEnabled();
+    expect(screen.getByRole("link", { name: "Cancel" })).not.toHaveAttribute("aria-disabled");
+  });
+
+  test("the progress line counts the listings written so far", async () => {
+    const gates = new Map([101, 102, 103].map((id) => [id, deferred()]));
+    saveDelay = (id) => gates.get(id)!.promise;
+    await renderEditor();
+    openField("Title", "Listings");
+    for (const id of [101, 102, 103]) fireEvent.change(rowField("Title", id), { target: { value: `New ${id}` } });
+    fireEvent.click(syncButton());
+
+    expect(await screen.findByText("Syncing 0 of 3…")).toBeInTheDocument();
+    gates.get(101)!.resolve();
+    expect(await screen.findByText("Syncing 1 of 3…")).toBeInTheDocument();
+    gates.get(102)!.resolve();
+    expect(await screen.findByText("Syncing 2 of 3…")).toBeInTheDocument();
+    gates.get(103)!.resolve();
+
+    await screen.findByText(/Updated 3 of 3 listings/);
+    expect(screen.queryByText(/^Syncing/)).not.toBeInTheDocument();
+  });
+
+  test("a write that never answers is failed after 30 seconds and the rest still go out", async () => {
+    saveDelay = (id) => (id === 101 ? new Promise<void>(() => {}) : Promise.resolve());
+    await renderEditor();
+    openField("Title", "Listings");
+    fireEvent.change(rowField("Title", 101), { target: { value: "First" } });
+    fireEvent.change(rowField("Title", 102), { target: { value: "Second" } });
+
+    vi.useFakeTimers();
+    fireEvent.click(syncButton());
+    await vi.advanceTimersByTimeAsync(30_000);
+    vi.useRealTimers();
+
+    const status = await screen.findByText(/Updated 1 of 2 listings/);
+    expect(status).toHaveTextContent("Listing 101: Timed out after 30 seconds.");
+    expect(savedUpdates()!.map((u) => u.listingId)).toEqual([101, 102]);
+    expect(syncButton()).toBeEnabled();
+    expect(screen.queryByText(/^Syncing/)).not.toBeInTheDocument();
   });
 });
 

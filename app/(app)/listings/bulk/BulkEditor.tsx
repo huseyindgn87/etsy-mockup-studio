@@ -79,6 +79,43 @@ async function errorFrom(res: Response): Promise<string> {
   return body?.error || `Request failed (${res.status})`;
 }
 
+/** How long one listing's write may take before the run gives up on it. */
+const WRITE_TIMEOUT_MS = 30_000;
+
+/**
+ * One listing's write, abandoned if it hasn't answered in 30 s: the request is
+ * aborted and the caller told, so a hanging listing can't hold up the others.
+ */
+async function writeWithTimeout(url: string, init: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`Timed out after ${WRITE_TIMEOUT_MS / 1000} seconds.`));
+    }, WRITE_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([fetch(url, { ...init, signal: controller.signal }), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** One listing's media and field writes, reported as a single row result. */
+function mergeResults(listingId: number, steps: SaveResult[]): SaveResult {
+  return steps.reduce((earlier, step) => {
+    const ok = earlier.ok && step.ok;
+    const failedOutright = [earlier, step].some((r) => !r.ok && !r.partial);
+    return {
+      listingId,
+      ok,
+      ...(!ok && !failedOutright ? { partial: true } : {}),
+      ...(ok ? {} : { error: [earlier.error, step.error].filter(Boolean).join("; ") }),
+    };
+  });
+}
+
 interface TaxonomyNode {
   id: number;
   name: string;
@@ -173,6 +210,8 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
   /** Edited values, per listing and field. Absent means "untouched". */
   const [edited, setEdited] = useState<Record<number, Partial<Record<BulkFieldKey, FieldValue>>>>({});
   const [saving, setSaving] = useState(false);
+  /** How many of the run's listings have been written, while a Sync is going. */
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [results, setResults] = useState<SaveResult[] | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [scheduleNote, setScheduleNote] = useState(false);
@@ -718,138 +757,137 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
 
   const targetedCount = (listings ?? []).filter((l) => targeted[l.listingId]).length;
 
+  /** Write one listing's photo/video grid. */
+  async function saveListingMedia(listing: BulkListingDetail): Promise<SaveResult> {
+    const id = listing.listingId;
+    try {
+      const res = await writeWithTimeout(`/api/etsy/listings/${id}/media`, {
+        method: "POST",
+        body: mediaSaveForm(mediaFor(listing)),
+      });
+      if (!res.ok) throw new Error(await errorFrom(res));
+      const body = (await res.json()) as {
+        ok: boolean;
+        failed: { name: string; error: string }[];
+        images: BulkListingDetail["images"] | null;
+        videos: BulkListingDetail["videos"] | null;
+      };
+      if (body.images && body.videos) {
+        const images = body.images;
+        const videos = body.videos;
+        setListings((prev) =>
+          (prev ?? []).map((l) =>
+            l.listingId === id ? { ...l, images, videos, thumbnailUrl: images[0]?.url ?? l.thumbnailUrl } : l,
+          ),
+        );
+        resetMedia(id);
+      }
+      return body.ok
+        ? { listingId: id, ok: true }
+        : { listingId: id, ok: false, error: body.failed.map((f) => `${f.name}: ${f.error}`).join("; ") };
+    } catch (err) {
+      return { listingId: id, ok: false, error: err instanceof Error ? err.message : "Save failed." };
+    }
+  }
+
+  /** Write one listing's field patch, and fold what landed back into its row. */
+  async function saveListingFields(update: { listingId: number; patch: BulkListingPatch }): Promise<SaveResult> {
+    const id = update.listingId;
+    // A variation grid with errors is refused for that listing only — the rest still go out.
+    const listing = (listings ?? []).find((l) => l.listingId === id);
+    const form = update.patch.variations || update.patch.variationImages ? variationEdits[id] : undefined;
+    const slotIds = listing ? variationPhotoSlots(listing).map((slot) => slot.slotId) : [];
+    const invalid = form ? validateOfferings(form, slotIds)[0] : undefined;
+    if (invalid) {
+      setShowVariationErrors(true);
+      setExpandedBlocks((prev) => ({ ...prev, [id]: true }));
+      return { listingId: id, ok: false, error: `Variations: ${invalid.message}` };
+    }
+
+    let result: SaveResult;
+    try {
+      const res = await writeWithTimeout("/api/etsy/listings/bulk/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ updates: [update] }),
+      });
+      if (!res.ok) throw new Error(await errorFrom(res));
+      const saved = ((await res.json()) as { results: SaveResult[] }).results;
+      result = saved.find((r) => r.listingId === id) ?? { listingId: id, ok: false, error: "Etsy said nothing." };
+    } catch (err) {
+      return { listingId: id, ok: false, error: err instanceof Error ? err.message : "Save failed." };
+    }
+    if (!result.ok && !result.partial) return result;
+
+    // Saved values are now the listing's own values — clear the edits that
+    // landed so the row stops showing them as pending. Failed rows keep theirs.
+    // A partial save landed everything but the variation photos: those
+    // selections stay in the form so the next Sync sends them again.
+    setListings((prev) =>
+      (prev ?? []).map((l) => {
+        if (l.listingId !== id) return l;
+        const next = applySaved(l, patchFor(l));
+        return form ? { ...next, hasVariations: form.variations.length > 0 } : next;
+      }),
+    );
+    setEdited((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    if (form) setVariationOriginals((prev) => ({ ...prev, [id]: form }));
+    const images = update.patch.variationImages;
+    if (images) setVariationImageOriginals((prev) => ({ ...prev, [id]: result.ok ? images : "unknown" }));
+    if (form && result.ok) {
+      setVariationEdits((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+    }
+    return result;
+  }
+
+  /**
+   * Write every ticked listing, one at a time, so a slow or dead request costs
+   * that listing only: each write is abandoned after 30 s and reported as a
+   * failure while the run carries on. Progress is counted per listing, and the
+   * run always ends — the buttons can't be left stuck in the syncing state.
+   */
   async function save() {
+    const mediaIds = new Set(mediaUpdates.map((l) => l.listingId));
+    const runIds = [...new Set([...mediaIds, ...updates.map((u) => u.listingId)])];
     setSaving(true);
+    setProgress({ done: 0, total: runIds.length });
     setSaveError(null);
     setResults(null);
+    const done: SaveResult[] = [];
     try {
-      // Media goes first, one listing at a time (each carries its own files):
-      // variation photos can only name photos already on the listing, and are
-      // checked against the listing's photos as they are once media has landed.
-      const mediaResults: SaveResult[] = [];
-      for (const listing of mediaUpdates) {
-        const id = listing.listingId;
-        try {
-          const res = await fetch(`/api/etsy/listings/${id}/media`, {
-            method: "POST",
-            body: mediaSaveForm(mediaFor(listing)),
-          });
-          if (!res.ok) throw new Error(await errorFrom(res));
-          const body = (await res.json()) as {
-            ok: boolean;
-            failed: { name: string; error: string }[];
-            images: BulkListingDetail["images"] | null;
-            videos: BulkListingDetail["videos"] | null;
-          };
-          if (body.images && body.videos) {
-            const images = body.images;
-            const videos = body.videos;
-            setListings((prev) =>
-              (prev ?? []).map((l) =>
-                l.listingId === id ? { ...l, images, videos, thumbnailUrl: images[0]?.url ?? l.thumbnailUrl } : l,
-              ),
-            );
-            resetMedia(id);
-          }
-          mediaResults.push(
-            body.ok
-              ? { listingId: id, ok: true }
-              : { listingId: id, ok: false, error: body.failed.map((f) => `${f.name}: ${f.error}`).join("; ") },
-          );
-        } catch (err) {
-          mediaResults.push({ listingId: id, ok: false, error: err instanceof Error ? err.message : "Save failed." });
-        }
+      for (const id of runIds) {
+        const listing = (listings ?? []).find((l) => l.listingId === id);
+        const steps: SaveResult[] = [];
+        // Media goes first for each listing: variation photos can only name
+        // photos already on the listing, and are checked against the listing's
+        // photos as they are once its media has landed.
+        if (listing && mediaIds.has(id)) steps.push(await saveListingMedia(listing));
+        const update = updates.find((u) => u.listingId === id);
+        if (update) steps.push(await saveListingFields(update));
+        done.push(mergeResults(id, steps));
+        setProgress({ done: done.length, total: runIds.length });
       }
-
-      // A variation grid with errors is refused for that listing only — the rest still go out.
-      const refused: SaveResult[] = [];
-      const sendable = updates.filter((u) => {
-        const listing = (listings ?? []).find((l) => l.listingId === u.listingId);
-        const form = u.patch.variations || u.patch.variationImages ? variationEdits[u.listingId] : undefined;
-        const slotIds = listing ? variationPhotoSlots(listing).map((slot) => slot.slotId) : [];
-        const error = form ? validateOfferings(form, slotIds)[0] : undefined;
-        if (error) refused.push({ listingId: u.listingId, ok: false, error: `Variations: ${error.message}` });
-        return !error;
-      });
-      if (refused.length > 0) {
-        setShowVariationErrors(true);
-        setExpandedBlocks((prev) => ({ ...prev, ...Object.fromEntries(refused.map((r) => [r.listingId, true])) }));
-      }
-
-      let fieldResults: SaveResult[] = [...refused];
-      if (sendable.length > 0) {
-        const res = await fetch("/api/etsy/listings/bulk/save", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ updates: sendable }),
-        });
-        if (!res.ok) throw new Error(await errorFrom(res));
-        const saved = ((await res.json()) as { results: SaveResult[] }).results;
-        fieldResults = [...fieldResults, ...saved];
-        // Saved values are now the listings' own values — clear the edits that
-        // landed so the rows stop showing them as pending. Failed rows keep theirs.
-        // A partial save landed everything but the variation photos: those
-        // selections stay in the form so the next Sync sends them again.
-        const savedIds = new Set(saved.filter((r) => r.ok).map((r) => r.listingId));
-        const partialIds = new Set(saved.filter((r) => r.partial).map((r) => r.listingId));
-        const landed = (id: number) => savedIds.has(id) || partialIds.has(id);
-        const savedForms = Object.fromEntries(
-          sendable
-            .filter((u) => landed(u.listingId) && (u.patch.variations || u.patch.variationImages))
-            .map((u) => [u.listingId, variationEdits[u.listingId]]),
-        );
-        setListings((prev) =>
-          (prev ?? []).map((l) => {
-            if (!landed(l.listingId)) return l;
-            const next = applySaved(l, patchFor(l));
-            const form = savedForms[l.listingId];
-            return form ? { ...next, hasVariations: form.variations.length > 0 } : next;
-          }),
-        );
-        setEdited((prev) => {
-          const next = { ...prev };
-          for (const id of [...savedIds, ...partialIds]) delete next[id];
-          return next;
-        });
-        setVariationOriginals((prev) => ({ ...prev, ...savedForms }));
-        setVariationImageOriginals((prev) => {
-          const next = { ...prev };
-          for (const u of sendable) {
-            if (!u.patch.variationImages) continue;
-            if (savedIds.has(u.listingId)) next[u.listingId] = u.patch.variationImages;
-            else if (partialIds.has(u.listingId)) next[u.listingId] = "unknown";
-          }
-          return next;
-        });
-        setVariationEdits((prev) => {
-          const next = { ...prev };
-          for (const id of Object.keys(savedForms)) {
-            if (savedIds.has(Number(id))) delete next[Number(id)];
-          }
-          return next;
-        });
-      }
-
-      const byId = new Map<number, SaveResult>();
-      for (const result of [...mediaResults, ...fieldResults]) {
-        const earlier = byId.get(result.listingId);
-        if (!earlier) {
-          byId.set(result.listingId, result);
-          continue;
-        }
-        const ok = earlier.ok && result.ok;
-        const failedOutright = [earlier, result].some((r) => !r.ok && !r.partial);
-        byId.set(result.listingId, {
-          listingId: result.listingId,
-          ok,
-          ...(!ok && !failedOutright ? { partial: true } : {}),
-          ...(ok ? {} : { error: [earlier.error, result.error].filter(Boolean).join("; ") }),
-        });
-      }
-      setResults([...byId.values()]);
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : "Save failed.");
     } finally {
+      setResults(done);
+      // If anything failed, only the failures stay ticked, so a second Sync
+      // retries those alone. A run where everything landed leaves the ticks be.
+      const written = new Set(done.filter((r) => r.ok).map((r) => r.listingId));
+      if (done.some((r) => !r.ok)) {
+        setTargeted((prev) =>
+          Object.fromEntries(Object.entries(prev).map(([id, on]) => [id, on && !written.has(Number(id))])),
+        );
+      }
+      setProgress(null);
       setSaving(false);
     }
   }
@@ -1062,7 +1100,16 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
           <div className="flex items-center gap-2">
             <Link
               href="/listings"
-              className="inline-flex h-9 items-center rounded-full border border-black/[.08] px-4 text-sm font-medium transition-colors hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-white/[.06]"
+              // Leaving mid-write would abandon listings half-saved, so the way
+              // out is closed until the run has finished.
+              aria-disabled={saving || undefined}
+              tabIndex={saving ? -1 : undefined}
+              onClick={(e) => {
+                if (saving) e.preventDefault();
+              }}
+              className={`inline-flex h-9 items-center rounded-full border border-black/[.08] px-4 text-sm font-medium transition-colors dark:border-white/[.145] ${
+                saving ? "pointer-events-none opacity-40" : "hover:bg-black/[.04] dark:hover:bg-white/[.06]"
+              }`}
             >
               Cancel
             </Link>
@@ -1070,7 +1117,8 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
               type="button"
               onClick={() => setScheduleNote((open) => !open)}
               aria-expanded={scheduleNote}
-              className="inline-flex h-9 items-center rounded-full border border-black/[.08] px-4 text-sm font-medium transition-colors hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-white/[.06]"
+              disabled={saving}
+              className="inline-flex h-9 items-center rounded-full border border-black/[.08] px-4 text-sm font-medium transition-colors hover:bg-black/[.04] disabled:opacity-40 dark:border-white/[.145] dark:hover:bg-white/[.06]"
             >
               Schedule
             </button>
@@ -1078,8 +1126,14 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
               type="button"
               onClick={save}
               disabled={saving || syncCount === 0}
-              className="inline-flex h-9 items-center rounded-full bg-primary px-4 text-sm font-medium text-white transition-colors hover:bg-primary-dark disabled:opacity-40"
+              className="inline-flex h-9 items-center gap-2 rounded-full bg-primary px-4 text-sm font-medium text-white transition-colors hover:bg-primary-dark disabled:opacity-40"
             >
+              {saving && (
+                <svg aria-hidden="true" viewBox="0 0 16 16" className="h-4 w-4 animate-spin" fill="none">
+                  <circle cx="8" cy="8" r="6" stroke="currentColor" strokeOpacity="0.3" strokeWidth="2" />
+                  <path d="M14 8a6 6 0 0 0-6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                </svg>
+              )}
               {saving ? "Syncing…" : `Sync updates${syncCount > 0 ? ` (${syncCount})` : ""}`}
             </button>
           </div>
@@ -1087,6 +1141,11 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
         <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
           Changes are written to Etsy only when you press Sync updates. Untick a row to leave that listing alone.
         </p>
+        {progress && (
+          <p role="status" className="mt-2 text-sm font-medium text-zinc-700 dark:text-zinc-200">
+            Syncing {progress.done} of {progress.total}…
+          </p>
+        )}
 
         {scheduleNote && (
           <div className="mt-4 rounded-xl border border-black/10 bg-white px-4 py-3 text-sm dark:border-white/15 dark:bg-zinc-950">
@@ -1120,10 +1179,11 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
             role="status"
             className="mt-4 rounded-xl border border-black/10 bg-white px-4 py-3 text-sm dark:border-white/15 dark:bg-zinc-950"
           >
-            Saved {results.filter((r) => r.ok).length} of {results.length} listings.
+            Updated {results.filter((r) => r.ok).length} of {results.length} listings.
+            {results.some((r) => !r.ok) && ` ${results.filter((r) => !r.ok).length} failed.`}
             {results.some((r) => r.partial) &&
               ` ${results.filter((r) => r.partial).length} partly saved — everything but their variation photos.`}
-            {results.some((r) => !r.ok) && " Rows that failed keep their changes below."}
+            {results.some((r) => !r.ok) && " Rows that failed keep their changes below and stay selected."}
             {results.some((r) => !r.ok) && (
               <ul className="mt-1 list-disc pl-5 text-xs text-red-600 dark:text-red-400">
                 {results
