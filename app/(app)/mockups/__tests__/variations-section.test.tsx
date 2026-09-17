@@ -580,3 +580,75 @@ describe("Variations section — per-combination tabs", () => {
     expect(white).not.toHaveAttribute("aria-invalid");
   });
 });
+
+/** Size (5 options) × Primary color (2) = 10 combinations, priced individually. */
+function tenRows(extra: Partial<ListingFormValue> = {}): Partial<ListingFormValue> {
+  return {
+    taxonomyId: 482,
+    taxonomyPath: T_SHIRTS,
+    variations: [
+      { propertyId: 100, name: "Size", isCustom: false, valueIds: [11, 12, 13, 14, 15], values: ["S", "M", "L", "XL", "2XL"], linksPhotos: false },
+      { propertyId: 200, name: "Primary color", isCustom: false, valueIds: [21, 22], values: ["Black", "White"], linksPhotos: false },
+    ],
+    variationToggles: { ...EMPTY_LISTING_FORM.variationToggles, price: { enabled: true, appliesTo: [0, 1] } },
+    ...extra,
+  };
+}
+
+const showMore = () => section().getByRole("button", { name: /^Show more rows/ });
+
+describe("Variations section — collapsed combination table", () => {
+  it("renders the first 6 rows, reports the hidden count, and expands and collapses again", () => {
+    renderSection(tenRows({ price: "9.00" }));
+    openTab("Price");
+    expect(rowsOf("Price per combination")).toHaveLength(6);
+    expect(showMore()).toHaveTextContent("Show more (4 more)");
+
+    fireEvent.click(showMore());
+    expect(rowsOf("Price per combination")).toHaveLength(10);
+
+    fireEvent.click(section().getByRole("button", { name: "Show less rows" }));
+    expect(rowsOf("Price per combination")).toHaveLength(6);
+    expect(showMore()).toHaveTextContent("Show more (4 more)");
+  });
+
+  it("shows no button when the table has 6 rows or fewer", () => {
+    renderSection(
+      sizeByColor({ variationToggles: { ...EMPTY_LISTING_FORM.variationToggles, price: { enabled: true, appliesTo: [0, 1] } } }),
+    );
+    openTab("Price");
+    expect(rowsOf("Price per combination")).toHaveLength(6);
+    expect(section().queryByRole("button", { name: /^Show more rows/ })).not.toBeInTheDocument();
+    expect(section().queryByRole("button", { name: "Show less rows" })).not.toBeInTheDocument();
+  });
+
+  it("expands itself when a refused publish jumps to a collapsed row", () => {
+    const priced = Object.fromEntries(
+      [11, 12, 13, 14, 15].flatMap((s) => [21, 22].map((c) => [`${s}:${c}`, "9.00"])),
+    );
+    delete priced["15:22"];
+    const state = renderSection(tenRows({ price: "", variationRows: { ...EMPTY_LISTING_FORM.variationRows, price: priced } }));
+    openTab("Price");
+    expect(rowsOf("Price per combination")).toHaveLength(6);
+
+    state.rerender({ showErrors: true, errorJump: 1 });
+    expect(rowsOf("Price per combination")).toHaveLength(10);
+    expect(section().getByLabelText("Price for 2XL / White")).toHaveAttribute("aria-invalid", "true");
+  });
+
+  it("keeps hidden rows in the form: they take bulk edits, and edits after expanding are saved", () => {
+    const state = renderSection(tenRows({ price: "10.00" }));
+    openTab("Price");
+    expect(rowsOf("Price per combination")).toHaveLength(6);
+
+    fireEvent.change(section().getByLabelText("Bulk amount"), { target: { value: "5.00" } });
+    fireEvent.click(section().getByRole("button", { name: "Apply" }));
+    expect(section().getByRole("status")).toHaveTextContent("Applied to 10 of 10 rows.");
+    expect(state.value.variationRows.price["15:22"]).toBe("5.00");
+
+    fireEvent.click(showMore());
+    fireEvent.change(section().getByLabelText("Price for 2XL / White"), { target: { value: "12.00" } });
+    fireEvent.click(section().getByRole("button", { name: "Show less rows" }));
+    expect(state.value.variationRows.price["15:22"]).toBe("12.00");
+  });
+});

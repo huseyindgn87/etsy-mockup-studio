@@ -60,6 +60,8 @@ export const ROW_HEIGHT = 44;
 const PHOTO_ROW_HEIGHT = 76;
 const VIEWPORT_HEIGHT = 440;
 const OVERSCAN = 5;
+/** Rows shown before "Show more" is pressed. The rest stay in the form, just unrendered. */
+export const COLLAPSED_ROWS = 6;
 
 const inputCls =
   "h-8 w-full rounded-md border border-black/10 bg-white px-2 text-sm outline-none focus:border-primary aria-[invalid=true]:border-red-500 dark:border-white/15 dark:bg-zinc-950";
@@ -139,6 +141,60 @@ function VirtualRows({
       className="overflow-y-auto"
     >
       <div style={{ position: "relative", height: count * rowHeight }}>{rows}</div>
+    </div>
+  );
+}
+
+/**
+ * The bordered table plus its collapse: only the first `COLLAPSED_ROWS` rows are
+ * rendered until "Show more" is pressed. Collapsing never changes the form —
+ * every row's value stays in `variationRows`, and bulk edits still reach them all.
+ */
+function RowTable({
+  label,
+  names,
+  last,
+  trailing,
+  count,
+  rowHeight = ROW_HEIGHT,
+  scrollTo,
+  renderRow,
+}: {
+  label: string;
+  names: string[];
+  last: string;
+  trailing: string;
+  count: number;
+  rowHeight?: number;
+  scrollTo: { index: number } | null;
+  renderRow: (index: number, style: CSSProperties) => ReactNode;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [seen, setSeen] = useState(scrollTo);
+  if (scrollTo !== seen) {
+    setSeen(scrollTo);
+    // A jump to a collapsed row (a refused Publish) opens the table rather than scrolling to nothing.
+    if (scrollTo && scrollTo.index >= COLLAPSED_ROWS) setExpanded(true);
+  }
+  const visible = expanded ? count : Math.min(count, COLLAPSED_ROWS);
+  const hidden = count - visible;
+
+  return (
+    <div className="space-y-2">
+      <div role="table" aria-label={label} aria-rowcount={count + 1} className="rounded-lg border border-black/10 dark:border-white/15">
+        <TableHeader names={names} last={last} trailing={trailing} />
+        <VirtualRows count={visible} rowHeight={rowHeight} scrollTo={scrollTo} renderRow={renderRow} />
+      </div>
+      {(hidden > 0 || expanded) && count > COLLAPSED_ROWS && (
+        <button
+          type="button"
+          aria-label={expanded ? "Show less rows" : `Show more rows (${hidden} more)`}
+          onClick={() => setExpanded(!expanded)}
+          className={buttonCls}
+        >
+          {expanded ? "Show less" : `Show more (${hidden} more)`}
+        </button>
+      )}
     </div>
   );
 }
@@ -590,35 +646,36 @@ export function FieldTabPanel({
         <>
           {tab === "sku" && <SkuGenerator onGenerate={generate} />}
           <RowFilter query={query} onQuery={setQuery} shown={shown.length} total={rows.length} />
-          <div role="table" aria-label={`${Noun} per combination`} aria-rowcount={shown.length + 1} className="rounded-lg border border-black/10 dark:border-white/15">
-            <TableHeader names={indices.map((i) => variations[i].name || `Variation ${i + 1}`)} last={Noun} trailing="minmax(10rem, 1.4fr)" />
-            <VirtualRows
-              count={shown.length}
-              scrollTo={scrollTo}
-              renderRow={(i, style) => {
-                const row = shown[i];
-                return (
-                  <FieldRow
-                    key={row.key}
-                    rowKey={row.key}
-                    labels={row.labels}
-                    hidden={hiddenKeys.has(row.key)}
-                    rowIndex={i}
-                    noun={Noun}
-                    style={style}
-                    columns={columns}
-                    kind={kind}
-                    text={value.variationRows[field][row.key] ?? ""}
-                    placeholder={base}
-                    error={errorByKey.get(row.key)}
-                    symbol={symbol}
-                    profiles={profiles}
-                    onCell={onCell}
-                  />
-                );
-              }}
-            />
-          </div>
+          <RowTable
+            label={`${Noun} per combination`}
+            names={indices.map((i) => variations[i].name || `Variation ${i + 1}`)}
+            last={Noun}
+            trailing="minmax(10rem, 1.4fr)"
+            count={shown.length}
+            scrollTo={scrollTo}
+            renderRow={(i, style) => {
+              const row = shown[i];
+              return (
+                <FieldRow
+                  key={row.key}
+                  rowKey={row.key}
+                  labels={row.labels}
+                  hidden={hiddenKeys.has(row.key)}
+                  rowIndex={i}
+                  noun={Noun}
+                  style={style}
+                  columns={columns}
+                  kind={kind}
+                  text={value.variationRows[field][row.key] ?? ""}
+                  placeholder={base}
+                  error={errorByKey.get(row.key)}
+                  symbol={symbol}
+                  profiles={profiles}
+                  onCell={onCell}
+                />
+              );
+            }}
+          />
           {tab !== "sku" && field !== "readiness" && base && (
             <p className="text-xs text-zinc-500">A blank row uses the listing&apos;s {noun.one} ({base}).</p>
           )}
@@ -706,24 +763,25 @@ export function VisibilityPanel({ value, patch, model }: PanelProps) {
         {hiddenCount > 0 && ` ${hiddenCount} of ${rows.length} hidden.`}
       </p>
       <RowFilter query={query} onQuery={setQuery} shown={shown.length} total={rows.length} />
-      <div role="table" aria-label="Visibility per combination" aria-rowcount={shown.length + 1} className="rounded-lg border border-black/10 dark:border-white/15">
-        <TableHeader names={variations.map((v, i) => v.name || `Variation ${i + 1}`)} last="Visibility" trailing="minmax(8rem, 1fr)" />
-        <VirtualRows
-          count={shown.length}
-          scrollTo={null}
-          renderRow={(i, style) => (
-            <VisibilityRow
-              key={shown[i].key}
-              row={shown[i]}
-              visible={value.variationRowEnabled[shown[i].key] !== false}
-              rowIndex={i}
-              style={style}
-              columns={columns}
-              onToggle={onToggle}
-            />
-          )}
-        />
-      </div>
+      <RowTable
+        label="Visibility per combination"
+        names={variations.map((v, i) => v.name || `Variation ${i + 1}`)}
+        last="Visibility"
+        trailing="minmax(8rem, 1fr)"
+        count={shown.length}
+        scrollTo={null}
+        renderRow={(i, style) => (
+          <VisibilityRow
+            key={shown[i].key}
+            row={shown[i]}
+            visible={value.variationRowEnabled[shown[i].key] !== false}
+            rowIndex={i}
+            style={style}
+            columns={columns}
+            onToggle={onToggle}
+          />
+        )}
+      />
     </div>
   );
 }
@@ -794,76 +852,77 @@ export function PhotosPanel({
       {photoVariation == null ? null : photoSlots.length === 0 ? (
         <p className="text-sm text-zinc-500">Add photos in the Photos section first.</p>
       ) : (
-        <div role="table" aria-label={`Photo per ${photoVariation.name || "option"}`} aria-rowcount={photoVariation.valueIds.length + 1} className="rounded-lg border border-black/10 dark:border-white/15">
-          <TableHeader names={[photoVariation.name || `Variation ${photoIndex! + 1}`]} last="Photo" trailing="minmax(0, 4fr)" />
-          <VirtualRows
-            count={photoVariation.valueIds.length}
-            rowHeight={PHOTO_ROW_HEIGHT}
-            scrollTo={scrollTo}
-            renderRow={(i, style) => {
-              const valueId = photoVariation.valueIds[i];
-              const name = photoVariation.values[i];
-              const chosen = value.variationPhotos[String(valueId)] ?? null;
-              const error = errorByKey.get(String(valueId));
-              const combos = model.combinations.filter((c) => c.valueIds[photoIndex!] === valueId);
-              const hidden = combos.length > 0 && combos.every((c) => value.variationRowEnabled[c.key] === false);
-              return (
-                <div
-                  key={valueId}
-                  role="row"
-                  aria-rowindex={i + 2}
-                  data-row-key={String(valueId)}
-                  data-error={error ? "true" : undefined}
-                  style={{ ...style, ...gridColumns(1, "minmax(0, 4fr)") }}
-                  className={`grid items-center gap-3 border-b border-black/5 px-2 dark:border-white/10 ${
-                    error ? "bg-red-50 dark:bg-red-950/20" : ""
-                  } ${hidden ? "text-zinc-400 dark:text-zinc-500" : ""}`}
-                >
-                  <span role="cell" className="min-w-0 text-sm">
-                    <span className="block truncate">
-                      {name}
-                      {hidden && <span className="ml-1.5 text-xs">(hidden)</span>}
-                    </span>
-                    {error && <span className="block truncate text-xs text-red-600">{error}</span>}
+        <RowTable
+          label={`Photo per ${photoVariation.name || "option"}`}
+          names={[photoVariation.name || `Variation ${photoIndex! + 1}`]}
+          last="Photo"
+          trailing="minmax(0, 4fr)"
+          count={photoVariation.valueIds.length}
+          rowHeight={PHOTO_ROW_HEIGHT}
+          scrollTo={scrollTo}
+          renderRow={(i, style) => {
+            const valueId = photoVariation.valueIds[i];
+            const name = photoVariation.values[i];
+            const chosen = value.variationPhotos[String(valueId)] ?? null;
+            const error = errorByKey.get(String(valueId));
+            const combos = model.combinations.filter((c) => c.valueIds[photoIndex!] === valueId);
+            const hidden = combos.length > 0 && combos.every((c) => value.variationRowEnabled[c.key] === false);
+            return (
+              <div
+                key={valueId}
+                role="row"
+                aria-rowindex={i + 2}
+                data-row-key={String(valueId)}
+                data-error={error ? "true" : undefined}
+                style={{ ...style, ...gridColumns(1, "minmax(0, 4fr)") }}
+                className={`grid items-center gap-3 border-b border-black/5 px-2 dark:border-white/10 ${
+                  error ? "bg-red-50 dark:bg-red-950/20" : ""
+                } ${hidden ? "text-zinc-400 dark:text-zinc-500" : ""}`}
+              >
+                <span role="cell" className="min-w-0 text-sm">
+                  <span className="block truncate">
+                    {name}
+                    {hidden && <span className="ml-1.5 text-xs">(hidden)</span>}
                   </span>
-                  <div role="cell" className={`flex min-w-0 gap-1.5 overflow-x-auto py-1 ${hidden ? "opacity-60" : ""}`}>
+                  {error && <span className="block truncate text-xs text-red-600">{error}</span>}
+                </span>
+                <div role="cell" className={`flex min-w-0 gap-1.5 overflow-x-auto py-1 ${hidden ? "opacity-60" : ""}`}>
+                  <button
+                    type="button"
+                    aria-pressed={chosen == null}
+                    aria-label={`No photo for ${name}`}
+                    onClick={() => assign(valueId, null)}
+                    className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-md border text-[10px] text-zinc-500 ${
+                      chosen == null ? "border-primary ring-2 ring-primary/40" : "border-black/10 dark:border-white/15"
+                    }`}
+                  >
+                    None
+                  </button>
+                  {photoSlots.map((slot, n) => (
                     <button
+                      key={slot.slotId}
                       type="button"
-                      aria-pressed={chosen == null}
-                      aria-label={`No photo for ${name}`}
-                      onClick={() => assign(valueId, null)}
-                      className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-md border text-[10px] text-zinc-500 ${
-                        chosen == null ? "border-primary ring-2 ring-primary/40" : "border-black/10 dark:border-white/15"
+                      aria-pressed={chosen === slot.slotId}
+                      aria-label={`Photo ${n + 1} for ${name}`}
+                      title={slot.label}
+                      onClick={() => assign(valueId, slot.slotId)}
+                      className={`relative h-14 w-14 shrink-0 overflow-hidden rounded-md border ${
+                        chosen === slot.slotId ? "border-primary ring-2 ring-primary/40" : "border-black/10 dark:border-white/15"
                       }`}
                     >
-                      None
+                      {slot.thumbnailUrl ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img src={slot.thumbnailUrl} alt="" className="h-full w-full object-cover" />
+                      ) : (
+                        <span className="text-xs text-zinc-500">{n + 1}</span>
+                      )}
                     </button>
-                    {photoSlots.map((slot, n) => (
-                      <button
-                        key={slot.slotId}
-                        type="button"
-                        aria-pressed={chosen === slot.slotId}
-                        aria-label={`Photo ${n + 1} for ${name}`}
-                        title={slot.label}
-                        onClick={() => assign(valueId, slot.slotId)}
-                        className={`relative h-14 w-14 shrink-0 overflow-hidden rounded-md border ${
-                          chosen === slot.slotId ? "border-primary ring-2 ring-primary/40" : "border-black/10 dark:border-white/15"
-                        }`}
-                      >
-                        {slot.thumbnailUrl ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img src={slot.thumbnailUrl} alt="" className="h-full w-full object-cover" />
-                        ) : (
-                          <span className="text-xs text-zinc-500">{n + 1}</span>
-                        )}
-                      </button>
-                    ))}
-                  </div>
+                  ))}
                 </div>
-              );
-            }}
-          />
-        </div>
+              </div>
+            );
+          }}
+        />
       )}
     </div>
   );
