@@ -73,17 +73,25 @@ describe("parseScheduledPublishSpec", () => {
     expect(parseScheduledPublishSpec(null).ok).toBe(false);
   });
 
-  test("variation images tied to render jobs are never carried into a scheduled listing", () => {
+  test("variation images tied to render jobs are dropped from a scheduled listing; ones by image position are kept", () => {
     const result = parseScheduledPublishSpec({
       ...VALID_SPEC,
       newListing: {
         ...VALID_SPEC.newListing,
-        variations: { products: [], imagesByValue: [{ propertyId: 1, valueId: 2, jobIndex: 0 }] },
+        variations: {
+          products: [],
+          imagesByValue: [
+            { propertyId: 1, valueId: 2, jobIndex: 0 },
+            { propertyId: 1, valueId: 3, value: "Red", imageIndex: 4 },
+          ],
+        },
       },
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.spec.newListing?.variations?.imagesByValue).toEqual([]);
+    expect(result.spec.newListing?.variations?.imagesByValue).toEqual([
+      { propertyId: 1, valueId: 3, value: "Red", imageIndex: 4 },
+    ]);
   });
 });
 

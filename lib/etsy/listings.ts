@@ -176,17 +176,23 @@ export async function getShopId(): Promise<number> {
 interface EtsyShopResponse {
   shop_id: number;
   shop_name: string;
+  currency_code?: string;
 }
 
-const shopNameCache = new TtlCache<number, string>(SHOP_CACHE_MS);
+const shopSummaryCache = new TtlCache<number, { shopName: string; currencyCode: string | null }>(SHOP_CACHE_MS);
+
+/** The connected user's shop name and currency, for display (e.g. the listing editor header and prices). */
+export async function getShopSummary(): Promise<{ shopName: string; currencyCode: string | null }> {
+  const shopId = await getShopId();
+  return shopSummaryCache.get(shopId, async () => {
+    const shop = await etsyGetJson<EtsyShopResponse>(`/shops/${shopId}`);
+    return { shopName: shop.shop_name, currencyCode: shop.currency_code || null };
+  });
+}
 
 /** The connected user's shop name, for display (e.g. the listing editor header). */
 export async function getShopName(): Promise<string> {
-  const shopId = await getShopId();
-  return shopNameCache.get(shopId, async () => {
-    const shop = await etsyGetJson<EtsyShopResponse>(`/shops/${shopId}`);
-    return shop.shop_name;
-  });
+  return (await getShopSummary()).shopName;
 }
 
 export interface ShopInfo {

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { fireEvent, render, screen, within } from "@testing-library/react";
-import { useState } from "react";
+import { useState, type ComponentProps } from "react";
 import { describe, expect, it } from "vitest";
 import type { TaxonomyNode, TaxonomyProperty } from "@/lib/etsy/taxonomy";
 import { EMPTY_LISTING_FORM, type ListingFormValue } from "../ListingForm";
@@ -49,9 +49,9 @@ const PROPERTIES = [
 
 const T_SHIRTS = "Clothing > Gender-Neutral Adult Clothing > Tops & Tees > T-shirts";
 
-function renderSection(initial: Partial<ListingFormValue> = {}) {
+function renderSection(initial: Partial<ListingFormValue> = {}, extra: Partial<SectionExtras> = {}) {
   const current: { value: ListingFormValue } = { value: { ...EMPTY_LISTING_FORM, ...initial } };
-  function Harness() {
+  function Harness(props: Partial<SectionExtras>) {
     const [value, setValue] = useState(current.value);
     return (
       <VariationsSection
@@ -67,12 +67,18 @@ function renderSection(initial: Partial<ListingFormValue> = {}) {
         variationProperties={value.taxonomyId === 482 ? PROPERTIES : []}
         propertiesLoading={false}
         propertiesError={null}
+        {...props}
       />
     );
   }
-  render(<Harness />);
-  return current;
+  const { rerender } = render(<Harness {...extra} />);
+  return Object.assign(current, { rerender: (next: Partial<SectionExtras>) => rerender(<Harness {...next} />) });
 }
+
+type SectionExtras = Pick<
+  ComponentProps<typeof VariationsSection>,
+  "processingProfiles" | "photoSlots" | "currencyCode" | "showErrors" | "errorJump"
+>;
 
 const section = () => within(screen.getByRole("region", { name: "Variations" }));
 const combo = (name: string) => section().getByRole("combobox", { name });
@@ -151,7 +157,7 @@ describe("Variations section — taxonomy cascade", () => {
 });
 
 describe("Variations section — tabs and columns", () => {
-  it("shows the seven sub-tabs, placeholders for all but Variations, and collapses to the tab bar", () => {
+  it("shows the seven sub-tabs and collapses to the tab bar", () => {
     renderSection(sizeByColor());
     const tabs = section().getAllByRole("tab");
     expect(tabs.map((t) => t.textContent)).toEqual([
@@ -166,7 +172,7 @@ describe("Variations section — tabs and columns", () => {
     expect(tabs[0]).toHaveAttribute("aria-selected", "true");
 
     fireEvent.click(section().getByRole("tab", { name: "Price" }));
-    expect(section().getByRole("tabpanel")).toHaveTextContent("Price per combination isn't editable here yet (6 combinations).");
+    expect(section().getByRole("checkbox", { name: "Individual price (Size)" })).not.toBeChecked();
     fireEvent.keyDown(section().getByRole("tab", { name: "Price" }), { key: "ArrowRight" });
     expect(section().getByRole("tab", { name: "Quantity" })).toHaveAttribute("aria-selected", "true");
 
@@ -327,5 +333,250 @@ describe("Variations section — destructive changes", () => {
     fireEvent.keyDown(section().getByRole("button", { name: "Move S" }), { key: "ArrowDown" });
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
     expect(optionNames("Size")).toEqual(["M", "S", "L"]);
+  });
+});
+
+function openTab(name: string) {
+  fireEvent.click(section().getByRole("tab", { name }));
+}
+
+const rowsOf = (table: string) =>
+  within(section().getByRole("table", { name: table }))
+    .getAllByRole("row")
+    .slice(1);
+
+const PROFILES = [
+  { readinessStateId: 1, readinessState: "made_to_order" as const, minProcessingDays: 1, maxProcessingDays: 3, displayLabel: "1-3 days" },
+  { readinessStateId: 2, readinessState: "made_to_order" as const, minProcessingDays: 3, maxProcessingDays: 5, displayLabel: "3-5 days" },
+];
+
+describe("Variations section — per-combination tabs", () => {
+  it("an Individual price checkbox turns one listing-wide price into a row per option", () => {
+    const state = renderSection(sizeByColor({ price: "10" }), { currencyCode: "USD" });
+    openTab("Price");
+    expect(section().getByLabelText("Price for every combination")).toHaveValue("10");
+
+    fireEvent.click(section().getByRole("checkbox", { name: "Individual price (Primary color)" }));
+    expect(state.value.variationToggles.price).toEqual({ enabled: true, appliesTo: [1] });
+    expect(rowsOf("Price per combination").map((r) => within(r).getAllByRole("cell")[0].textContent)).toEqual(["Black", "White"]);
+    expect(section().getByLabelText("Price for Black")).toHaveValue("10");
+    expect(section().getAllByText("$")).toHaveLength(2);
+
+    fireEvent.click(section().getByRole("checkbox", { name: "Individual price (Size)" }));
+    expect(rowsOf("Price per combination")).toHaveLength(6);
+    expect(section().getByLabelText("Price for M / White")).toHaveValue("10");
+  });
+
+  it("warns before unchecking discards different values, and keeps them on Cancel", () => {
+    const state = renderSection(
+      sizeByColor({
+        variationToggles: { ...EMPTY_LISTING_FORM.variationToggles, price: { enabled: true, appliesTo: [0] } },
+        variationRows: { ...EMPTY_LISTING_FORM.variationRows, price: { "11": "12.00", "12": "15.00", "13": "12.00" } },
+      }),
+    );
+    openTab("Price");
+    fireEvent.click(section().getByRole("checkbox", { name: "Individual price (Size)" }));
+    const dialog = screen.getByRole("alertdialog");
+    expect(dialog).toHaveTextContent(
+      "Turning off individual price for “Size” keeps one price per merged row and discards 1 different price.",
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(state.value.variationToggles.price.appliesTo).toEqual([0]);
+    expect(section().getByRole("checkbox", { name: "Individual price (Size)" })).toBeChecked();
+
+    fireEvent.click(section().getByRole("checkbox", { name: "Individual price (Size)" }));
+    fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Delete" }));
+    expect(state.value.variationToggles.price).toEqual({ enabled: false, appliesTo: [] });
+    expect(state.value.price).toBe("12.00");
+    expect(section().getByLabelText("Price for every combination")).toHaveValue("12.00");
+  });
+
+  it("price and quantity inputs refuse negatives and extra decimals; price is padded to two decimals", () => {
+    const state = renderSection(
+      sizeByColor({ variationToggles: { ...EMPTY_LISTING_FORM.variationToggles, price: { enabled: true, appliesTo: [0] }, quantity: { enabled: true, appliesTo: [0] } } }),
+    );
+    openTab("Price");
+    const s = section().getByLabelText("Price for S");
+    fireEvent.change(s, { target: { value: "-4" } });
+    fireEvent.change(s, { target: { value: "4.567" } });
+    expect(state.value.variationRows.price["11"]).toBeUndefined();
+    fireEvent.change(s, { target: { value: "4.5" } });
+    fireEvent.blur(s);
+    expect(state.value.variationRows.price["11"]).toBe("4.50");
+
+    openTab("Quantity");
+    const q = section().getByLabelText("Quantity for M");
+    fireEvent.change(q, { target: { value: "-1" } });
+    fireEvent.change(q, { target: { value: "1.5" } });
+    fireEvent.change(q, { target: { value: "0" } });
+    expect(state.value.variationRows.quantity["12"]).toBe("0");
+  });
+
+  it("virtualizes a 450-row grid and edits one row without touching the rest", () => {
+    const state = renderSection({
+      taxonomyId: 482,
+      taxonomyPath: T_SHIRTS,
+      variations: [
+        { propertyId: 513, name: "Style", isCustom: true, valueIds: Array.from({ length: 45 }, (_, i) => i + 1), values: Array.from({ length: 45 }, (_, i) => `Comfort C Shirt ${i}`), linksPhotos: false },
+        { propertyId: 200, name: "Primary color", isCustom: false, valueIds: Array.from({ length: 10 }, (_, i) => i + 101), values: Array.from({ length: 10 }, (_, i) => `Color ${i}`), linksPhotos: false },
+      ],
+      variationToggles: { ...EMPTY_LISTING_FORM.variationToggles, sku: { enabled: true, appliesTo: [0, 1] } },
+    });
+    openTab("SKU");
+    const table = section().getByRole("table", { name: "SKU per combination" });
+    expect(table).toHaveAttribute("aria-rowcount", "451");
+    const rendered = rowsOf("SKU per combination");
+    expect(rendered.length).toBeGreaterThan(5);
+    expect(rendered.length).toBeLessThan(30);
+
+    fireEvent.change(section().getByLabelText("SKU for Comfort C Shirt 0 / Color 1"), { target: { value: "ABC" } });
+    expect(state.value.variationRows.sku).toEqual({ "1:102": "ABC" });
+  });
+
+  it("the bulk bar applies to every row shown, respecting the filter", () => {
+    const state = renderSection(
+      sizeByColor({
+        variationToggles: { ...EMPTY_LISTING_FORM.variationToggles, price: { enabled: true, appliesTo: [0, 1] } },
+        variationRows: { ...EMPTY_LISTING_FORM.variationRows, price: { "11:21": "10.00", "11:22": "10.00", "12:21": "11.00" } },
+        price: "9.00",
+      }),
+    );
+    openTab("Price");
+    fireEvent.change(section().getByLabelText("Filter combinations"), { target: { value: "black" } });
+    expect(rowsOf("Price per combination")).toHaveLength(3);
+    fireEvent.change(section().getByLabelText("Bulk operation"), { target: { value: "increasePercent" } });
+    fireEvent.change(section().getByLabelText("Bulk amount"), { target: { value: "10" } });
+    fireEvent.click(section().getByRole("button", { name: "Apply" }));
+    expect(state.value.variationRows.price).toEqual({
+      "11:21": "11.00",
+      "11:22": "10.00",
+      "12:21": "12.10",
+      "13:21": "9.90",
+    });
+    expect(section().getByRole("status")).toHaveTextContent("Applied to 3 of 3 rows.");
+
+    fireEvent.change(section().getByLabelText("Bulk operation"), { target: { value: "decrease" } });
+    fireEvent.change(section().getByLabelText("Bulk amount"), { target: { value: "20" } });
+    fireEvent.click(section().getByRole("button", { name: "Apply" }));
+    expect(section().getByRole("alert")).toHaveTextContent("That would make 3 prices negative — nothing was changed.");
+    expect(state.value.variationRows.price["11:21"]).toBe("11.00");
+  });
+
+  it("the processing bulk bar sets a profile on every shown row", () => {
+    const state = renderSection(
+      sizeByColor({ variationToggles: { ...EMPTY_LISTING_FORM.variationToggles, readiness: { enabled: true, appliesTo: [0] } } }),
+      { processingProfiles: PROFILES },
+    );
+    openTab("Processing");
+    fireEvent.change(section().getByLabelText("Bulk amount"), { target: { value: "2" } });
+    fireEvent.click(section().getByRole("button", { name: "Apply" }));
+    expect(state.value.variationRows.readiness).toEqual({ "11": "2", "12": "2", "13": "2" });
+    expect(section().getByLabelText("Processing profile for L")).toHaveValue("2");
+  });
+
+  it("the SKU pattern generator fills every row in one action", () => {
+    const state = renderSection(
+      sizeByColor({ variationToggles: { ...EMPTY_LISTING_FORM.variationToggles, sku: { enabled: true, appliesTo: [0, 1] } } }),
+    );
+    openTab("SKU");
+    fireEvent.change(section().getByLabelText("SKU pattern"), { target: { value: "TEE-{Size}-{Primary color}-{##}" } });
+    fireEvent.click(section().getByRole("button", { name: "Generate SKUs" }));
+    expect(Object.values(state.value.variationRows.sku)).toEqual([
+      "TEE-S-Black-01",
+      "TEE-S-White-02",
+      "TEE-M-Black-03",
+      "TEE-M-White-04",
+      "TEE-L-Black-05",
+      "TEE-L-White-06",
+    ]);
+    expect(section().getByLabelText("SKU for L / White")).toHaveValue("TEE-L-White-06");
+
+    fireEvent.change(section().getByLabelText("SKU pattern"), { target: { value: "{Fabric}" } });
+    fireEvent.click(section().getByRole("button", { name: "Generate SKUs" }));
+    expect(section().getByRole("alert")).toHaveTextContent("Unknown token {Fabric}.");
+  });
+
+  it("Visibility hides a combination, which stays greyed in the other tabs with its data", () => {
+    const state = renderSection(
+      sizeByColor({
+        variationToggles: { ...EMPTY_LISTING_FORM.variationToggles, price: { enabled: true, appliesTo: [0, 1] } },
+        variationRows: { ...EMPTY_LISTING_FORM.variationRows, price: { "12:22": "18.00" } },
+      }),
+    );
+    openTab("Visibility");
+    expect(rowsOf("Visibility per combination")).toHaveLength(6);
+    fireEvent.click(section().getByRole("switch", { name: "Offer M / White" }));
+    expect(state.value.variationRowEnabled).toEqual({ "12:22": false });
+    expect(section().getByRole("switch", { name: "Offer M / White" })).toHaveAttribute("aria-checked", "false");
+
+    openTab("Price");
+    const row = rowsOf("Price per combination").find((r) => r.textContent?.includes("(hidden)"))!;
+    expect(row).toHaveTextContent("M");
+    expect(within(row).getByLabelText("Price for M / White")).toHaveValue("18.00");
+
+    openTab("Visibility");
+    fireEvent.click(section().getByRole("switch", { name: "Offer M / White" }));
+    expect(state.value.variationRowEnabled).toEqual({});
+    expect(state.value.variationRows.price["12:22"]).toBe("18.00");
+  });
+
+  it("Photos assigns on one variation only, one row per option, and warns before moving it", () => {
+    const photoSlots = [
+      { slotId: "job:a", thumbnailUrl: null, label: "Front" },
+      { slotId: "own:b", thumbnailUrl: null, label: "Back" },
+    ];
+    const state = renderSection(sizeByColor(), { photoSlots });
+    openTab("Photos");
+    expect(section().getAllByRole("combobox", { name: "Photos vary by" })).toHaveLength(1);
+    expect(section().queryByRole("table")).not.toBeInTheDocument();
+
+    fireEvent.change(section().getByRole("combobox", { name: "Photos vary by" }), { target: { value: "1" } });
+    expect(state.value.variations.map((v) => v.linksPhotos)).toEqual([false, true]);
+    expect(rowsOf("Photo per Primary color").map((r) => r.querySelector("span")!.textContent)).toEqual(["Black", "White"]);
+
+    fireEvent.click(section().getByRole("button", { name: "Photo 2 for White" }));
+    expect(state.value.variationPhotos).toEqual({ "22": "own:b" });
+    expect(section().getByRole("button", { name: "Photo 2 for White" })).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.change(section().getByRole("combobox", { name: "Photos vary by" }), { target: { value: "0" } });
+    expect(screen.getByRole("alertdialog")).toHaveTextContent("discards 1 photo assignment");
+    fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Delete" }));
+    expect(state.value.variations.map((v) => v.linksPhotos)).toEqual([true, false]);
+    expect(state.value.variationPhotos).toEqual({});
+    expect(rowsOf("Photo per Size")).toHaveLength(3);
+  });
+
+  it("removing a value with an assigned photo asks first", () => {
+    renderSection(
+      sizeByColor({
+        variations: sizeByColor().variations!.map((v, i) => ({ ...v, linksPhotos: i === 1 })),
+        variationPhotos: { "21": "job:a" },
+      }),
+    );
+    fireEvent.click(section().getByRole("button", { name: "Remove Black" }));
+    expect(screen.getByRole("alertdialog")).toHaveTextContent("Removing “Black” deletes 1 photo assignment.");
+  });
+
+  it("marks errored rows and tabs, and a refused publish jumps to the first error", () => {
+    const initial = sizeByColor({
+      price: "",
+      variationToggles: { ...EMPTY_LISTING_FORM.variationToggles, quantity: { enabled: true, appliesTo: [0] }, price: { enabled: true, appliesTo: [1] } },
+      variationRows: { ...EMPTY_LISTING_FORM.variationRows, price: { "21": "5.00" }, quantity: { "11": "1", "12": "1", "13": "1" } },
+    });
+    const state = renderSection(initial);
+    expect(section().getByRole("tab", { name: "Price" })).not.toHaveTextContent("!");
+
+    state.rerender({ showErrors: true, errorJump: 1 });
+    expect(section().getByRole("tab", { name: "Price, has errors" })).toHaveAttribute("aria-selected", "true");
+    expect(section().getByRole("tab", { name: "Quantity" })).toBeInTheDocument();
+    const white = section().getByLabelText("Price for White");
+    expect(white).toHaveAttribute("aria-invalid", "true");
+    expect(white.closest('[role="row"]')).toHaveAttribute("data-error", "true");
+    expect(section().getByText("Enter a price.")).toBeInTheDocument();
+    expect(section().getByLabelText("Price for Black")).not.toHaveAttribute("aria-invalid");
+
+    fireEvent.change(white, { target: { value: "7" } });
+    expect(section().getByRole("tab", { name: "Price" })).toBeInTheDocument();
+    expect(white).not.toHaveAttribute("aria-invalid");
   });
 });

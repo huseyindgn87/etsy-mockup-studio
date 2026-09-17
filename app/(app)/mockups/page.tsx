@@ -8,7 +8,7 @@ import { compose } from "@/lib/mockup/compose";
 import { quadList } from "@/lib/mockup/geometry";
 import type { Calibration, Overlay, Quad, Raster } from "@/lib/mockup/types";
 import { normalizeBlendMode } from "@/lib/mockup/validate";
-import { MAX_COMBINATIONS_HARD_CAP } from "@/lib/etsy/variation-limits";
+import { buildInventoryPayload, validateOfferings } from "@/lib/etsy/variation-offerings";
 import { MAX_DRAFT_PSDS } from "@/lib/drafts/constants";
 import { publishBlockedBySchedule, scheduleBlocker } from "@/lib/scheduling/publish-guard";
 import type { ScheduledListingSummary, ScheduleTimeInput } from "@/lib/scheduling/types";
@@ -50,8 +50,8 @@ import { MAX_LISTING_VIDEOS } from "@/lib/etsy/video-limits";
 import ListingForm, {
   EMPTY_LISTING_FORM,
   type ListingFormValue,
-  type VariationToggleKey,
 } from "./ListingForm";
+import { VARIATION_SUB_TABS } from "./VariationsSection";
 import {
   ListingMediaEditor,
   type ListingVideoItem,
@@ -261,92 +261,6 @@ function formatPreviewPrice(form: ListingFormValue): string {
   return min === max ? `$${min.toFixed(2)}` : `$${min.toFixed(2)}+`;
 }
 
-/**
- * Turn the form's variation cards + toggles into the wire shape
- * `publishTo.newListing.variations` expects — the cartesian product of every
- * variation's values, with each row's price/quantity/SKU/processing-profile
- * read from whichever cell the form stored it under (a field left off, or a
- * blank cell, falls back to the base form price/quantity server-side).
- */
-function buildVariationsPayload(
-  form: ListingFormValue,
-):
-  | {
-      priceOnProperty: number[];
-      quantityOnProperty: number[];
-      skuOnProperty: number[];
-      readinessStateOnProperty: number[];
-      products: {
-        propertyValues: { propertyId: number; name: string; valueIds: (number | null)[]; values: string[] }[];
-        price?: number;
-        quantity?: number;
-        sku?: string;
-        readinessStateId?: number;
-        enabled: boolean;
-      }[];
-    }
-  | undefined {
-  const dims = form.variations;
-  if (dims.length === 0) return undefined;
-
-  let combos: { valueIds: number[]; values: string[] }[] = [{ valueIds: [], values: [] }];
-  for (const dim of dims) {
-    const next: typeof combos = [];
-    for (const a of combos) {
-      for (let i = 0; i < dim.valueIds.length; i++) {
-        next.push({
-          valueIds: [...a.valueIds, dim.valueIds[i]],
-          values: [...a.values, dim.values[i]],
-        });
-      }
-    }
-    combos = next;
-  }
-  combos = combos.slice(0, MAX_COMBINATIONS_HARD_CAP);
-
-  const read = (key: VariationToggleKey, valueIds: number[]): string | undefined => {
-    const toggle = form.variationToggles[key];
-    if (!toggle.enabled) return undefined;
-    return form.variationRows[key][comboKeyFor(toggle.appliesTo, valueIds)];
-  };
-
-  const products = combos.map((c) => {
-    const rp = Number.parseFloat(read("price", c.valueIds) ?? "");
-    const rq = Number.parseInt(read("quantity", c.valueIds) ?? "", 10);
-    const rSku = read("sku", c.valueIds);
-    const rReadiness = Number.parseInt(read("readiness", c.valueIds) ?? "", 10);
-    return {
-      propertyValues: dims.map((d, i) => ({
-        propertyId: d.propertyId,
-        name: d.name,
-        // A negative id is a free-text value added on top of a real Etsy
-        // property (see VariationValuePicker) — Etsy expects value_id:null for those.
-        valueIds: [c.valueIds[i] < 0 ? null : c.valueIds[i]],
-        values: [c.values[i]],
-      })),
-      price: Number.isFinite(rp) && rp > 0 ? rp : undefined,
-      quantity: Number.isFinite(rq) && rq >= 0 ? rq : undefined,
-      sku: rSku?.trim() || undefined,
-      readinessStateId: Number.isFinite(rReadiness) && rReadiness > 0 ? rReadiness : undefined,
-      // Disabled rows are still sent — Etsy requires every combination — just marked inactive.
-      enabled: form.variationRowEnabled[c.valueIds.join(":")] !== false,
-    };
-  });
-
-  const onProperty = (key: VariationToggleKey): number[] =>
-    form.variationToggles[key].enabled
-      ? form.variationToggles[key].appliesTo.map((i) => dims[i].propertyId)
-      : [];
-
-  return {
-    priceOnProperty: onProperty("price"),
-    quantityOnProperty: onProperty("quantity"),
-    skuOnProperty: onProperty("sku"),
-    readinessStateOnProperty: onProperty("readiness"),
-    products,
-  };
-}
-
 type PublishMode = "existing" | "copy" | "new";
 
 interface PublishResult {
@@ -423,6 +337,9 @@ function MockupsPageInner() {
   const [showTemplatePicker, setShowTemplatePicker] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
   const [shopName, setShopName] = useState<string | null>(null);
+  const [currencyCode, setCurrencyCode] = useState<string | null>(null);
+  /** Bumped when a refused Publish should open the Variations section's first error. */
+  const [variationErrorJump, setVariationErrorJump] = useState(0);
   const [videos, setVideos] = useState<(ListingVideoItem | null)[]>(() => Array(MAX_LISTING_VIDEOS).fill(null));
   const [videoErrors, setVideoErrors] = useState<(string | null)[]>(() =>
     Array(MAX_LISTING_VIDEOS).fill(null),
@@ -631,7 +548,10 @@ function MockupsPageInner() {
   useEffect(() => {
     fetch("/api/etsy/shop")
       .then((res) => (res.ok ? res.json() : null))
-      .then((body: { shopName?: string } | null) => setShopName(body?.shopName ?? null))
+      .then((body: { shopName?: string; currencyCode?: string | null } | null) => {
+        setShopName(body?.shopName ?? null);
+        setCurrencyCode(body?.currencyCode ?? null);
+      })
       .catch(() => {
         /* not connected / no shop — header falls back to a placeholder */
       });
@@ -972,6 +892,7 @@ function MockupsPageInner() {
     [imageOrder, jobThumbs, included, designs, ownImages, etsyMedia],
   );
   const publishCount = Math.min(photoSlots.length, MAX_LISTING_IMAGES);
+  const photoSlotIds = useMemo(() => photoSlots.map((s) => s.slotId), [photoSlots]);
 
   // Photos + videos, in the same rail order the preview modal shows them —
   // only built while the modal is open, so opening it is what creates the
@@ -1584,6 +1505,13 @@ function MockupsPageInner() {
     if (publishMode === "new" && listingForm.readinessStateId == null) {
       errors.push({ section: "shipping", message: "Choose a processing profile for the new draft (Shipping section)." });
     }
+    if (publishMode === "new") {
+      const offeringError = validateOfferings(listingForm, photoSlotIds)[0];
+      if (offeringError) {
+        const tab = VARIATION_SUB_TABS.find((t) => t.key === offeringError.tab)?.label ?? "";
+        errors.push({ section: "variations", message: `${offeringError.message} (Variations section, ${tab} tab)` });
+      }
+    }
     if (publishMode !== "existing") {
       const howError = howItsMadeError({
         whoMade: listingForm.whoMade,
@@ -1600,7 +1528,7 @@ function MockupsPageInner() {
       }
     }
     return errors.sort((a, b) => compareSections(a.section, b.section));
-  }, [photoSlots.length, publishMode, publishId, listingForm, etsyMedia, etsyMediaError]);
+  }, [photoSlots.length, photoSlotIds, publishMode, publishId, listingForm, etsyMedia, etsyMediaError]);
 
   /** Why this listing can't be published yet, or `null` when it's ready. */
   const publishBlocker = useCallback((): string | null => publishErrors[0]?.message ?? null, [publishErrors]);
@@ -1656,7 +1584,7 @@ function MockupsPageInner() {
         price: Number.isFinite(price) && price > 0 ? price : undefined,
         quantity: Number.isInteger(quantity) && quantity > 0 ? quantity : undefined,
         sku: listingForm.sku.trim() || undefined,
-        variations: buildVariationsPayload(listingForm),
+        variations: buildInventoryPayload(listingForm, photoSlotIds),
         // featured_rank/should_auto_renew aren't settable on createDraftListing —
         // the server sends them via a follow-up updateListing call.
         featuredRank: listingForm.featureListing ? 1 : undefined,
@@ -1664,7 +1592,7 @@ function MockupsPageInner() {
       };
     }
     return publishTo;
-  }, [listingForm, publishMode, publishId]);
+  }, [listingForm, publishMode, publishId, photoSlotIds]);
 
   const publishToEtsy = useCallback(async () => {
     if (photoSlots.length === 0) return;
@@ -1673,6 +1601,7 @@ function MockupsPageInner() {
       setError(blocker.message);
       setShowSectionErrors(true);
       if (blocker.section) goToSection(blocker.section);
+      if (blocker.section === "variations") setVariationErrorJump((n) => n + 1);
       return;
     }
     setShowSectionErrors(false);
@@ -2415,7 +2344,15 @@ function MockupsPageInner() {
                 Loading listing…
               </p>
             ) : (
-              <ListingForm value={listingForm} onChange={edit(setListingForm)} onGoToSection={goToSection} />
+              <ListingForm
+                value={listingForm}
+                onChange={edit(setListingForm)}
+                onGoToSection={goToSection}
+                photoSlots={photoSlots}
+                currencyCode={currencyCode}
+                showVariationErrors={showSectionErrors}
+                variationErrorJump={variationErrorJump}
+              />
             )}
             {/* Lets the last sections scroll up to the top, so each can become the active one. */}
             <div aria-hidden className="h-[50vh]" />

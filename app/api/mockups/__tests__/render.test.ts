@@ -1381,6 +1381,69 @@ describe("POST /api/mockups/render", () => {
     ]);
   }, 30_000);
 
+  test("mode:new maps imagesByValue imageIndex to the photo at that position in the upload order", async () => {
+    uploadCalls.length = 0;
+    inventoryCalls.length = 0;
+    variationImageCalls.length = 0;
+    inventoryShouldFail = false;
+    const mockA = await png(60, 60, [0, 0, 0]);
+    const designRed = await png(10, 10, [255, 0, 0]);
+    const designBlue = await png(10, 10, [0, 0, 255]);
+
+    const res = await POST(
+      form(
+        {
+          publishTo: {
+            mode: "new",
+            listingId: 500,
+            howItsMade: HOW_ITS_MADE_OK,
+            newListing: {
+              title: "Tee with photos per colour",
+              price: 10,
+              quantity: 1,
+              variations: {
+                products: [
+                  { propertyValues: [{ propertyId: 200, name: "Color", valueIds: [1], values: ["Red"] }] },
+                  { propertyValues: [{ propertyId: 200, name: "Color", valueIds: [2], values: ["Blue"] }] },
+                ],
+                imagesByValue: [
+                  { propertyId: 200, valueId: 1, value: "Red", imageIndex: 1 },
+                  { propertyId: 200, valueId: 2, value: "Blue", imageIndex: 0 },
+                ],
+              },
+            },
+          },
+          mockups: [{ name: "m", calibration: {} }],
+          designs: [{ name: "red" }, { name: "blue" }],
+          jobs: [
+            { mockup: 0, design: 0 },
+            { mockup: 0, design: 1 },
+          ],
+          // Blue's render goes first in the grid.
+          imageOrder: [
+            { kind: "job", index: 1 },
+            { kind: "job", index: 0 },
+          ],
+        },
+        [
+          { field: "mockup", buf: mockA, name: "m.png" },
+          { field: "design", buf: designRed, name: "red.png" },
+          { field: "design", buf: designBlue, name: "blue.png" },
+        ],
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { failed: unknown[]; uploaded: { listingImageId: number }[] };
+    expect(body.failed).toEqual([]);
+    expect(variationImageCalls).toEqual([
+      [
+        { propertyId: 200, valueId: 1, imageId: body.uploaded[1].listingImageId },
+        { propertyId: 200, valueId: 2, imageId: body.uploaded[0].listingImageId },
+      ],
+    ]);
+  }, 30_000);
+
   test("mode:new reports an inventory-grid failure without failing the whole publish, and skips the image-assignment call", async () => {
     uploadCalls.length = 0;
     inventoryCalls.length = 0;

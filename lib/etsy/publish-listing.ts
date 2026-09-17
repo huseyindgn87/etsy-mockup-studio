@@ -105,8 +105,12 @@ export interface PublishSpec {
         /** Etsy still requires every combination to be supplied; false just marks it inactive. Defaults to true. */
         enabled?: boolean;
       }[];
-      /** Assign an already-rendered job's uploaded image to a specific property value. */
-      imagesByValue?: { propertyId: number; valueId: number; jobIndex: number }[];
+      /**
+       * The photo for a value of the one photo variation: by rendered job
+       * (`jobIndex`) or by position in the upload order (`imageIndex`).
+       * `value` finds the id Etsy assigned to a free-text value.
+       */
+      imagesByValue?: { propertyId: number; valueId: number; value?: string; jobIndex?: number; imageIndex?: number }[];
     };
   };
 }
@@ -185,7 +189,15 @@ export interface CleanVariations {
   quantityOnProperty: number[];
   skuOnProperty: number[];
   readinessStateOnProperty: number[];
-  imagesByValue: { propertyId: number; valueId: number; jobIndex: number }[];
+  imagesByValue: VariationImageByValue[];
+}
+
+export interface VariationImageByValue {
+  propertyId: number;
+  valueId: number;
+  value?: string;
+  jobIndex?: number;
+  imageIndex?: number;
 }
 
 export const positiveIntArray = (v: unknown): number[] =>
@@ -261,21 +273,29 @@ export function sanitizeVariations(raw: unknown): CleanVariations | null {
   }
   if (products.length === 0) return null;
 
+  // Etsy takes variation images on one property only, with no duplicate values.
   const imagesRaw = Array.isArray(r.imagesByValue) ? r.imagesByValue : [];
-  const imagesByValue = imagesRaw
-    .filter((i): i is { propertyId: number; valueId: number; jobIndex: number } => {
-      if (!i || typeof i !== "object") return false;
-      const o = i as Record<string, unknown>;
-      return (
-        Number.isInteger(o.propertyId) &&
-        (o.propertyId as number) > 0 &&
-        Number.isInteger(o.valueId) &&
-        (o.valueId as number) > 0 &&
-        Number.isInteger(o.jobIndex) &&
-        (o.jobIndex as number) >= 0
-      );
-    })
-    .map((i) => ({ propertyId: i.propertyId, valueId: i.valueId, jobIndex: i.jobIndex }));
+  const imagesByValue: VariationImageByValue[] = [];
+  const seenValues = new Set<string>();
+  for (const i of imagesRaw) {
+    if (!i || typeof i !== "object") continue;
+    const o = i as Record<string, unknown>;
+    const index = (x: unknown) => Number.isInteger(x) && (x as number) >= 0;
+    if (!Number.isInteger(o.propertyId) || (o.propertyId as number) <= 0 || !Number.isInteger(o.valueId)) continue;
+    const value = typeof o.value === "string" && o.value.trim() ? o.value.trim() : undefined;
+    if ((o.valueId as number) <= 0 && !value) continue;
+    if (!index(o.jobIndex) && !index(o.imageIndex)) continue;
+    if (imagesByValue.length > 0 && imagesByValue[0].propertyId !== o.propertyId) continue;
+    const valueKey = value ? `n:${value.toLowerCase()}` : `i:${o.valueId as number}`;
+    if (seenValues.has(valueKey)) continue;
+    seenValues.add(valueKey);
+    imagesByValue.push({
+      propertyId: o.propertyId as number,
+      valueId: o.valueId as number,
+      ...(value ? { value } : {}),
+      ...(index(o.imageIndex) ? { imageIndex: o.imageIndex as number } : { jobIndex: o.jobIndex as number }),
+    });
+  }
 
   return {
     products,
@@ -285,6 +305,36 @@ export function sanitizeVariations(raw: unknown): CleanVariations | null {
     readinessStateOnProperty: positiveIntArray(r.readinessStateOnProperty),
     imagesByValue,
   };
+}
+
+/**
+ * Variation images need the value ids Etsy holds, and Etsy assigns those
+ * itself for free-text values (sent as `value_id: null`). Looks each value up
+ * by property and name in the inventory Etsy returned; a value it can't find
+ * keeps its own positive id, or is dropped.
+ */
+export function resolveVariationImageValueIds(
+  images: readonly VariationImageByValue[],
+  inventory: unknown,
+): VariationImageByValue[] {
+  const products = (inventory as { products?: unknown } | null)?.products;
+  const ids = new Map<string, number>();
+  for (const p of Array.isArray(products) ? products : []) {
+    const pvs = (p as { property_values?: unknown } | null)?.property_values;
+    for (const pv of Array.isArray(pvs) ? pvs : []) {
+      const { property_id, value_ids, values } = (pv ?? {}) as { property_id?: unknown; value_ids?: unknown; values?: unknown };
+      if (!Array.isArray(values) || !Array.isArray(value_ids)) continue;
+      values.forEach((v, k) => {
+        const id = value_ids[k];
+        if (typeof v === "string" && Number.isInteger(id) && id > 0) ids.set(`${property_id}:${v.trim().toLowerCase()}`, id);
+      });
+    }
+  }
+  return images.flatMap((i) => {
+    const found = i.value != null ? ids.get(`${i.propertyId}:${i.value.toLowerCase()}`) : undefined;
+    const valueId = found ?? (i.valueId > 0 ? i.valueId : null);
+    return valueId == null ? [] : [{ ...i, valueId }];
+  });
 }
 
 export const WHO_MADE_VALUES = WHO_MADE_OPTIONS.map((o) => o.value);
@@ -523,7 +573,7 @@ export async function applyListingDetails(
       // A variation grid replaces the single default product outright —
       // sending both would just have the second PUT overwrite the first.
       try {
-        await updateListingInventory(listingId, {
+        const saved = await updateListingInventory(listingId, {
           products: variations.products.map((p) => ({
             sku: p.sku,
             propertyValues: p.propertyValues,
@@ -537,6 +587,7 @@ export async function applyListingDetails(
           skuOnProperty: variations.skuOnProperty,
           readinessStateOnProperty: variations.readinessStateOnProperty,
         });
+        variations = { ...variations, imagesByValue: resolveVariationImageValueIds(variations.imagesByValue, saved) };
       } catch (err) {
         onStepError("Variations", err);
         variations = null; // grid failed to save -> don't try to attach images to it

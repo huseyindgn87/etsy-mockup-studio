@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { EditorSectionCard } from "./editor-sections";
-import VariationsSection from "./VariationsSection";
+import VariationsSection, { type VariationPhotoOption } from "./VariationsSection";
 import {
   WHEN_MADE_VALUES,
   WHO_MADE_OPTIONS,
@@ -138,6 +138,11 @@ export interface ListingFormValue {
    * value combination to be supplied, so they're sent with is_enabled:false.
    */
   variationRowEnabled: Record<string, boolean>;
+  /**
+   * The photo grid slot id (see `slotIdFor`) shown for each value of the one
+   * variation with `linksPhotos`, keyed by that value's id.
+   */
+  variationPhotos: Record<string, string>;
   /** Shows the listing at the top of the shop's home page. Sent as `featured_rank` on an existing listing (not settable at draft creation). */
   featureListing: boolean;
   /**
@@ -172,6 +177,7 @@ export const EMPTY_LISTING_FORM: ListingFormValue = {
   variationToggles: EMPTY_VARIATION_TOGGLES,
   variationRows: EMPTY_VARIATION_ROWS,
   variationRowEnabled: {},
+  variationPhotos: {},
   featureListing: false,
   promoteWithAds: false,
   autoRenew: true,
@@ -260,11 +266,23 @@ export default function ListingForm({
   value,
   onChange,
   onGoToSection,
+  photoSlots = [],
+  currencyCode = null,
+  showVariationErrors = false,
+  variationErrorJump = 0,
 }: {
   value: ListingFormValue;
   onChange: (next: ListingFormValue) => void;
   /** Lets a sub-panel (e.g. the Variations modal) send the user to another section, such as Details to pick a category. */
   onGoToSection?: (section: ListingFormTab) => void;
+  /** The photo grid, in upload order — what the Variations Photos tab picks from. */
+  photoSlots?: VariationPhotoOption[];
+  /** The shop's currency, for the Variations Price tab. */
+  currencyCode?: string | null;
+  /** Mark per-combination errors (after a refused Publish). */
+  showVariationErrors?: boolean;
+  /** Changes when a refused Publish should open the first per-combination error. */
+  variationErrorJump?: number;
 }) {
   const patch = (partial: Partial<ListingFormValue>) => onChange({ ...value, ...partial });
 
@@ -623,6 +641,7 @@ export default function ListingForm({
                             variationToggles: EMPTY_VARIATION_TOGGLES,
                             variationRows: EMPTY_VARIATION_ROWS,
                             variationRowEnabled: {},
+                            variationPhotos: {},
                           });
                           setCategoryOpen(false);
                           setCategoryQuery("");
@@ -834,6 +853,11 @@ export default function ListingForm({
         variationProperties={variationProperties}
         propertiesLoading={propertiesLoading}
         propertiesError={propertiesError}
+        processingProfiles={processingProfiles}
+        photoSlots={photoSlots}
+        currencyCode={currencyCode}
+        showErrors={showVariationErrors}
+        errorJump={variationErrorJump}
       />
 
       <PersonalizationSection value={value} patch={patch} />

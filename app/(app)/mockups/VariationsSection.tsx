@@ -23,6 +23,20 @@ import {
   type VariationState,
 } from "@/lib/etsy/variation-combinations";
 import {
+  OFFERING_TABS,
+  prunedVariationPhotos,
+  validateOfferings,
+  type OfferingTab,
+  type ProcessingProfile,
+} from "@/lib/etsy/variation-offerings";
+import {
+  FieldTabPanel,
+  PhotosPanel,
+  VisibilityPanel,
+  type OfferingJump,
+  type VariationPhotoOption,
+} from "./VariationOfferingTabs";
+import {
   MAX_OPTIONS_PER_VARIATION,
   MAX_VARIATIONS,
   maxCombinationsFor,
@@ -40,7 +54,11 @@ export const VARIATION_SUB_TABS = [
 
 type SubTab = (typeof VARIATION_SUB_TABS)[number]["key"];
 
+export type { VariationPhotoOption };
+
 const COLUMN_ORDINALS = ["first", "second", "third"] as const;
+
+const NO_PHOTOS: readonly VariationPhotoOption[] = [];
 
 const selectCls =
   "h-9 w-full rounded-lg border border-black/10 bg-white px-2 text-sm outline-none focus:border-primary disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/15 dark:bg-zinc-950";
@@ -50,19 +68,22 @@ interface PendingChange {
   partial: Partial<ListingFormValue>;
 }
 
-function variationPartial(state: VariationState): Partial<ListingFormValue> {
+function variationPartial(state: VariationState, photos: Record<string, string>): Partial<ListingFormValue> {
   return {
     variations: state.variations,
     variationToggles: state.variationToggles,
     variationRows: state.variationRows,
     variationRowEnabled: state.variationRowEnabled,
+    variationPhotos: prunedVariationPhotos(state.variations, photos),
   };
 }
 
 /**
  * The Variations section: cascading category dropdowns, then an inner tab bar
  * (Variations, Price, … Processing) over one combination model shared by
- * every tab. The Variations tab edits up to three property columns.
+ * every tab. The Variations tab edits up to three property columns; the
+ * others edit each combination's price, quantity, SKU, visibility, photo and
+ * processing profile.
  */
 export default function VariationsSection({
   value,
@@ -72,6 +93,11 @@ export default function VariationsSection({
   variationProperties,
   propertiesLoading,
   propertiesError,
+  processingProfiles = null,
+  photoSlots = NO_PHOTOS,
+  currencyCode = null,
+  showErrors = false,
+  errorJump = 0,
 }: {
   value: ListingFormValue;
   patch: (partial: Partial<ListingFormValue>) => void;
@@ -80,6 +106,14 @@ export default function VariationsSection({
   variationProperties: TaxonomyProperty[];
   propertiesLoading: boolean;
   propertiesError: string | null;
+  processingProfiles?: readonly ProcessingProfile[] | null;
+  /** The listing's photo grid, in upload order. */
+  photoSlots?: readonly VariationPhotoOption[];
+  currencyCode?: string | null;
+  /** Mark rows and tabs with errors (after a refused Publish). */
+  showErrors?: boolean;
+  /** Each change opens the tab and row of the first error. */
+  errorJump?: number;
 }) {
   const [tab, setTab] = useState<SubTab>("variations");
   const [expanded, setExpanded] = useState(true);
@@ -88,16 +122,46 @@ export default function VariationsSection({
   const model = combinationsFor(value.variations);
   const bodyId = useId();
 
+  const photoSlotIds = useMemo(() => photoSlots.map((s) => s.slotId), [photoSlots]);
+  const errors = useMemo(() => validateOfferings(value, photoSlotIds), [value, photoSlotIds]);
+  const errorsByTab = useMemo(() => {
+    const byTab = new Map<OfferingTab, typeof errors>(OFFERING_TABS.map((t) => [t, []]));
+    if (showErrors) for (const e of errors) byTab.get(e.tab)!.push(e);
+    return byTab;
+  }, [errors, showErrors]);
+
+  const [jump, setJump] = useState<(OfferingJump & { tab: OfferingTab }) | null>(null);
+  const [seenErrorJump, setSeenErrorJump] = useState(errorJump);
+  if (errorJump !== seenErrorJump) {
+    setSeenErrorJump(errorJump);
+    const first = errors[0];
+    if (first) {
+      setTab(first.tab);
+      setExpanded(true);
+      setJump({ tab: first.tab, key: first.key, nonce: errorJump });
+    }
+  }
+
   /** Applies a structural edit, asking first when it would delete combination data. */
   function commit(next: VariationState, what: string, extra: Partial<ListingFormValue> = {}) {
-    const partial = { ...variationPartial(next), ...extra };
+    const partial = { ...variationPartial(next, value.variationPhotos), ...extra };
     const loss = combinationDataLoss(value, next);
-    if (loss.combinations > 0) {
-      setPending({ message: `${what} deletes ${describeDataLoss(loss)}.`, partial });
+    const photosBefore = Object.keys(prunedVariationPhotos(value.variations, value.variationPhotos)).length;
+    const photosLost = photosBefore - Object.keys(partial.variationPhotos ?? {}).length;
+    const lost = [
+      ...(loss.combinations > 0 ? [describeDataLoss(loss)] : []),
+      ...(photosLost > 0 ? [`${photosLost} photo ${photosLost === 1 ? "assignment" : "assignments"}`] : []),
+    ];
+    if (lost.length > 0) {
+      setPending({ message: `${what} deletes ${lost.join(" and ")}.`, partial });
     } else {
       patch(partial);
     }
   }
+
+  const confirm = (message: string, partial: Partial<ListingFormValue>) => setPending({ message, partial });
+  const panelProps = { value, patch, confirm, model };
+  const jumpFor = (t: OfferingTab) => (jump && jump.tab === t ? jump : null);
 
   function onTabKey(e: KeyboardEvent<HTMLButtonElement>, index: number) {
     const last = VARIATION_SUB_TABS.length - 1;
@@ -150,6 +214,12 @@ export default function VariationsSection({
               }`}
             >
               {t.label}
+              {t.key !== "variations" && (errorsByTab.get(t.key)?.length ?? 0) > 0 && (
+                <>
+                  <span aria-hidden="true" className="ml-1 font-bold text-red-600">!</span>
+                  <span className="sr-only">, has errors</span>
+                </>
+              )}
             </button>
           ))}
         </div>
@@ -180,10 +250,19 @@ export default function VariationsSection({
               commit={commit}
               patch={patch}
             />
+          ) : tab === "visibility" ? (
+            <VisibilityPanel {...panelProps} errors={errorsByTab.get("visibility")!} jump={jumpFor("visibility")} />
+          ) : tab === "photos" ? (
+            <PhotosPanel {...panelProps} errors={errorsByTab.get("photos")!} jump={jumpFor("photos")} photoSlots={photoSlots} />
           ) : (
-            <SubTabPlaceholder
-              label={VARIATION_SUB_TABS.find((t) => t.key === tab)!.label}
-              model={model}
+            <FieldTabPanel
+              key={tab}
+              tab={tab}
+              {...panelProps}
+              errors={errorsByTab.get(tab)!}
+              jump={jumpFor(tab)}
+              currencyCode={currencyCode}
+              profiles={processingProfiles}
             />
           )}
         </div>
@@ -332,15 +411,15 @@ function VariationColumns({
             onClear={() =>
               commit(removeColumn(value, column), `Removing “${variations[column]?.name || "this variation"}”`)
             }
-            onRename={(name) => patch(variationPartial(renameColumn(value, column, name)))}
+            onRename={(name) => patch(variationPartial(renameColumn(value, column, name), value.variationPhotos))}
             onScale={(scaleId) =>
               commit(setColumnScale(value, column, scaleId), `Changing the scale of “${variations[column].name}”`)
             }
-            onAdd={(input) => patch(variationPartial(addColumnValue(value, column, input)))}
+            onAdd={(input) => patch(variationPartial(addColumnValue(value, column, input), value.variationPhotos))}
             onRemove={(i) =>
               commit(removeColumnValue(value, column, i), `Removing “${variations[column].values[i]}”`)
             }
-            onMove={(from, to) => patch(variationPartial(moveColumnValue(value, column, from, to)))}
+            onMove={(from, to) => patch(variationPartial(moveColumnValue(value, column, from, to), value.variationPhotos))}
           />
         ))}
       </div>
@@ -596,17 +675,6 @@ function AddValue({
       >
         Add
       </button>
-    </div>
-  );
-}
-
-function SubTabPlaceholder({ label, model }: { label: string; model: CombinationModel }) {
-  return (
-    <div className="flex items-center justify-center rounded-lg border border-dashed border-black/20 py-10 text-center dark:border-white/25">
-      <p className="text-sm text-zinc-500">
-        {label} per combination isn&apos;t editable here yet
-        {model.count > 0 ? ` (${model.count} ${model.count === 1 ? "combination" : "combinations"})` : ""}.
-      </p>
     </div>
   );
 }

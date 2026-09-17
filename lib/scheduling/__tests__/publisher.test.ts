@@ -35,7 +35,18 @@ vi.mock("@/lib/etsy/listing-create", () => ({
     calls.push("property");
   }),
   setListingInventorySku: vi.fn(async () => {}),
-  updateListingInventory: vi.fn(async () => {}),
+  updateListingInventory: vi.fn(async () => {
+    calls.push("inventory");
+    return {
+      products: [
+        { property_values: [{ property_id: 513, value_ids: [9001], values: ["Glossy"] }] },
+        { property_values: [{ property_id: 513, value_ids: [9002], values: ["Matte"] }] },
+      ],
+    };
+  }),
+  updateVariationImages: vi.fn(async () => {
+    calls.push("variation-images");
+  }),
   updateListingPersonalization: vi.fn(async () => {}),
   updateListingSettings: vi.fn(async () => {
     calls.push("settings");
@@ -55,7 +66,12 @@ vi.mock("@/lib/storage/r2", () => ({
 
 import type { ScheduledListing } from "@prisma/client";
 import { withEtsyAccessToken } from "@/lib/etsy/auth";
-import { activateListing, createDraftListing, setListingProperty } from "@/lib/etsy/listing-create";
+import {
+  activateListing,
+  createDraftListing,
+  setListingProperty,
+  updateVariationImages,
+} from "@/lib/etsy/listing-create";
 import { uploadListingImage } from "@/lib/etsy/listing-images";
 import { refreshSession } from "@/lib/etsy/oauth";
 import { getDecryptedRefreshToken, updateConnectionRefreshToken } from "@/lib/etsy/shop-connections";
@@ -128,6 +144,34 @@ describe("publishScheduledListing", () => {
     expect(calls.at(-1)).toBe("activate");
     expect(calls.indexOf("activate")).toBeGreaterThan(calls.indexOf("image:20"));
     expect(activateListing).toHaveBeenCalledWith(111, 4242);
+  });
+
+  test("assigns variation photos by stored image position, with the value ids Etsy gave the grid, before activating", async () => {
+    storeImages(3);
+    const spec = {
+      ...VALID_SPEC,
+      newListing: {
+        ...VALID_SPEC.newListing,
+        variations: {
+          products: [
+            { propertyValues: [{ propertyId: 513, name: "Finish", valueIds: [1], values: ["Glossy"] }] },
+            { propertyValues: [{ propertyId: 513, name: "Finish", valueIds: [2], values: ["Matte"] }] },
+          ],
+          imagesByValue: [
+            { propertyId: 513, valueId: 1, value: "Glossy", imageIndex: 2 },
+            { propertyId: 513, valueId: 2, value: "Matte", imageIndex: 0 },
+          ],
+        },
+      },
+    };
+    await publishScheduledListing(makeRow({ publishSpec: spec }), hooks());
+    // uploadListingImage's mock gives rank r the id 100 + r.
+    expect(updateVariationImages).toHaveBeenCalledWith(111, 4242, [
+      { propertyId: 513, valueId: 9001, imageId: 103 },
+      { propertyId: 513, valueId: 9002, imageId: 101 },
+    ]);
+    expect(calls.indexOf("variation-images")).toBeGreaterThan(calls.indexOf("image:3"));
+    expect(calls.indexOf("activate")).toBeGreaterThan(calls.indexOf("variation-images"));
   });
 
   test("authenticates with the stored refresh token and saves Etsy's rotated one", async () => {

@@ -501,7 +501,7 @@ export async function POST(request: Request) {
     const failed: { name: string; error: string }[] = [];
     // Set only in "new" mode when the form sent a variation grid — the single-SKU
     // path below is skipped in that case, and the upload loop below resolves
-    // `imagesByValue`'s jobIndex against the images actually uploaded.
+    // `imagesByValue`'s jobIndex/imageIndex against the images actually uploaded.
     let variations: CleanVariations | null = null;
 
     try {
@@ -680,9 +680,10 @@ export async function POST(request: Request) {
       listingImageId: number;
       url: string | null;
       jobIndex?: number;
+      orderIndex: number;
     }[] = [];
 
-    for (const entry of capped) {
+    for (const [orderIndex, entry] of capped.entries()) {
       if (entry.kind === "job") {
         const j = jobs[entry.index];
         const res = renderedByJobIndex.get(entry.index);
@@ -707,6 +708,7 @@ export async function POST(request: Request) {
             listingImageId: img.listingImageId,
             url: img.url,
             jobIndex: entry.index,
+            orderIndex,
           });
         } catch (err) {
           failed.push({
@@ -734,6 +736,7 @@ export async function POST(request: Request) {
             rank: img.rank,
             listingImageId: img.listingImageId,
             url: img.url,
+            orderIndex,
           });
         } catch (err) {
           failed.push({
@@ -750,9 +753,11 @@ export async function POST(request: Request) {
     // silently dropped here; the underlying failure is already in `failed`.
     if (variations && variations.imagesByValue.length > 0) {
       const byJobIndex = new Map(uploaded.map((u) => [u.jobIndex, u.listingImageId]));
+      const byOrderIndex = new Map(uploaded.map((u) => [u.orderIndex, u.listingImageId]));
       const resolved = variations.imagesByValue
         .map((i) => {
-          const listingImageId = byJobIndex.get(i.jobIndex);
+          const listingImageId =
+            i.imageIndex != null ? byOrderIndex.get(i.imageIndex) : byJobIndex.get(i.jobIndex);
           return listingImageId != null
             ? { propertyId: i.propertyId, valueId: i.valueId, imageId: listingImageId }
             : null;

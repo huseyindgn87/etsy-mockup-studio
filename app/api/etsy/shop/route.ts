@@ -1,17 +1,17 @@
 import { NextResponse } from "next/server";
 import { getEtsySession } from "@/lib/etsy/auth";
-import { EtsyApiError, getShopName } from "@/lib/etsy/listings";
+import { EtsyApiError, getShopSummary } from "@/lib/etsy/listings";
 
 export const dynamic = "force-dynamic";
 
-/** The connected user's shop name, for the listing editor header. */
+/** The connected user's shop name and currency, for the listing editor. */
 export async function GET() {
   if (!(await getEtsySession())) {
     return NextResponse.json({ error: "Not connected to Etsy." }, { status: 401 });
   }
   try {
-    const shopName = await getShopName();
-    return NextResponse.json({ shopName });
+    const { shopName, currencyCode } = await getShopSummary();
+    return NextResponse.json({ shopName, currencyCode });
   } catch (err) {
     if (err instanceof EtsyApiError) {
       const status = err.status >= 400 && err.status <= 599 ? err.status : 502;

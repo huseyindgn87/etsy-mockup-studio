@@ -14,7 +14,7 @@
 
 import type { ScheduledListing } from "@prisma/client";
 import { withEtsyAccessToken } from "@/lib/etsy/auth";
-import { activateListing, createDraftListing } from "@/lib/etsy/listing-create";
+import { activateListing, createDraftListing, updateVariationImages } from "@/lib/etsy/listing-create";
 import { uploadListingImage } from "@/lib/etsy/listing-images";
 import { refreshSession } from "@/lib/etsy/oauth";
 import { applyListingDetails, resolveDraftListingInput } from "@/lib/etsy/publish-listing";
@@ -54,16 +54,17 @@ export async function publishScheduledListing(row: ScheduledListing, hooks: Publ
 
     // Unlike the editor's Publish, any failed step fails the attempt: the
     // listing is about to go live, so it must never go live half set up.
-    await applyListingDetails(shopId, listingId, parsed.plan, resolved, (step, err) => {
+    const variations = await applyListingDetails(shopId, listingId, parsed.plan, resolved, (step, err) => {
       throw new Error(`${step}: ${message(err)}`);
     });
 
+    const imageIds: number[] = [];
     for (let i = 0; i < images.length; i++) {
       const image = images[i];
       const object = await getObject(image.key);
       if (!object) throw new Error(`Image ${i + 1} is missing from storage.`);
       try {
-        await uploadListingImage({
+        const uploaded = await uploadListingImage({
           shopId,
           listingId,
           bytes: new Uint8Array(object.body),
@@ -73,8 +74,23 @@ export async function publishScheduledListing(row: ScheduledListing, hooks: Publ
           overwrite: true,
           altText: image.altText,
         });
+        imageIds.push(uploaded.listingImageId);
       } catch (err) {
         throw new Error(`Image ${i + 1}: ${message(err)}`);
+      }
+    }
+
+    // The stored images are the photo grid in order, so `imageIndex` is their position.
+    const variationImages = (variations?.imagesByValue ?? []).flatMap((v) =>
+      v.imageIndex != null && imageIds[v.imageIndex] != null
+        ? [{ propertyId: v.propertyId, valueId: v.valueId, imageId: imageIds[v.imageIndex] }]
+        : [],
+    );
+    if (variationImages.length > 0) {
+      try {
+        await updateVariationImages(shopId, listingId, variationImages);
+      } catch (err) {
+        throw new Error(`Variation photos: ${message(err)}`);
       }
     }
 

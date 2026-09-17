@@ -292,6 +292,7 @@ export function listingFormFromSource(src: EditorListingSource): ListingFormValu
     variationToggles,
     variationRows,
     variationRowEnabled,
+    variationPhotos: {},
     featureListing: src.featured,
     promoteWithAds: false,
     autoRenew: src.autoRenew,

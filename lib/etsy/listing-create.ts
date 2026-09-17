@@ -268,12 +268,13 @@ export interface UpdateInventoryInput {
  * it the single default product or a full variation grid).
  *
  * `max_variations_supported=3` is required to write a 3rd variation type —
- * harmless to always send since 1-2 variation listings ignore it.
+ * harmless to always send since 1-2 variation listings ignore it. Returns
+ * the saved inventory as Etsy sends it back.
  */
 export async function updateListingInventory(
   listingId: number,
   input: UpdateInventoryInput,
-): Promise<void> {
+): Promise<unknown> {
   const requestBody = {
     products: input.products.map((p) => ({
       sku: p.sku ? p.sku.slice(0, 500) : null,
@@ -297,7 +298,7 @@ export async function updateListingInventory(
     sku_on_property: input.skuOnProperty ?? [],
     readiness_state_on_property: input.readinessStateOnProperty ?? [],
   };
-  await readEtsyResponse(
+  return readEtsyResponse(
     await etsyFetch(`/listings/${listingId}/inventory?max_variations_supported=3`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
