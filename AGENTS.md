@@ -20,7 +20,8 @@ an actual `vitest run`, pending manual steps from the migrations folder and
 
 _Last updated 2026-09-17._
 
-- **HEAD:** 5faf7ce (plus the commit wiring bulk edit's variation photos to Etsy, which also updates this file). `tsc --noEmit`, `eslint .`, `next build` clean; **1089 vitest tests passing**.
+- **HEAD:** 1025447 (plus the commit making `npm test` build first, which also updates this file). `tsc --noEmit`, `eslint .`, `next build` clean; **1089 vitest tests passing**.
+- **`npm test` runs `next build && vitest run`**, so a file the bundler can't parse fails the test command (vitest alone passed while `BulkEditor.tsx` didn't parse in dev — that error, logged by `next dev`, came from a mid-edit state; the committed file builds). `npm run test:unit` is vitest only.
 - **Shipped:**
   - Listing editor at `/mockups` (variations, photos + video, personalization, settings tab, price-by-variation).
   - `/listings` backed by a DB listings cache with on-demand refresh; multiple Etsy shop connections per user (refresh tokens encrypted at rest).
