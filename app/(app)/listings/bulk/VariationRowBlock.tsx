@@ -2,7 +2,7 @@
 
 import { useId, useMemo } from "react";
 import type { ListingFormValue } from "@/app/(app)/mockups/ListingForm";
-import { VariationBlock, type VariationSubTab } from "@/app/(app)/mockups/VariationsSection";
+import { VariationBlock, type VariationPhotoOption, type VariationSubTab } from "@/app/(app)/mockups/VariationsSection";
 import type { BulkFieldKey } from "@/lib/etsy/bulk-edit";
 import { buildCombinationModel, cellKeyFor } from "@/lib/etsy/variation-combinations";
 import { individualIndices, validateOfferings } from "@/lib/etsy/variation-offerings";
@@ -28,8 +28,8 @@ const TAB_FOR_FIELD: Partial<Record<BulkFieldKey, VariationSubTab>> = {
 
 const PREVIEW_ROWS = 3;
 
-const PHOTOS_NOTE =
-  "Photos per variation aren't saved from bulk edit — Etsy assigns them with a separate call this screen doesn't make yet.";
+const PHOTOS_NOT_LOADED =
+  "Etsy didn't return this listing's variation photos, so they can't be changed here.";
 
 /**
  * One listing's variation block in the bulk editor. Collapsed (the default)
@@ -49,6 +49,8 @@ export default function VariationRowBlock({
   processingProfiles,
   currencyCode,
   showErrors,
+  photoSlots,
+  photosLoaded,
 }: {
   listing: BulkListingDetail;
   field: BulkFieldKey;
@@ -62,6 +64,9 @@ export default function VariationRowBlock({
   processingProfiles: ProcessingProfileOption[];
   currencyCode: string | null;
   showErrors: boolean;
+  /** Photos already on the listing — the only ones Etsy lets a variation value show. */
+  photoSlots: readonly VariationPhotoOption[];
+  photosLoaded: boolean;
 }) {
   const regionId = useId();
   const model = useMemo(() => buildCombinationModel(form?.variations ?? []), [form?.variations]);
@@ -76,7 +81,7 @@ export default function VariationRowBlock({
     );
   }
 
-  const errors = showErrors ? validateOfferings(form, []) : [];
+  const errors = showErrors ? validateOfferings(form, photoSlots.map((slot) => slot.slotId)) : [];
   const initialTab = errors[0]?.tab ?? TAB_FOR_FIELD[field] ?? "variations";
 
   const toggle = (
@@ -107,7 +112,8 @@ export default function VariationRowBlock({
             currencyCode={currencyCode}
             showErrors={showErrors}
             initialTab={initialTab}
-            photosNote={PHOTOS_NOTE}
+            photoSlots={photoSlots}
+            photosNote={photosLoaded ? undefined : PHOTOS_NOT_LOADED}
             label={`Variation details for ${listing.title}`}
           />
         </div>

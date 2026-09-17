@@ -16,6 +16,7 @@
  *   - `updateListingProperty`    — the Optional group's category attributes
  *   - the personalization resource
  *   - the inventory record again — a full variation grid
+ *   - `updateVariationImages`    — the photo per variation value, after the grid
  */
 
 import {
@@ -180,6 +181,18 @@ export interface BulkVariations {
   readinessStateOnProperty: number[];
 }
 
+/**
+ * One value's photo. `value` is what the save matches against the inventory
+ * Etsy holds after the grid write; `valueId` is only a fallback (null for a
+ * free-text value).
+ */
+export interface BulkVariationImage {
+  propertyId: number;
+  valueId: number | null;
+  value: string;
+  imageId: number;
+}
+
 /** One edit to one listing. Every key absent means "leave this listing's value alone". */
 export interface BulkListingPatch {
   title?: string;
@@ -217,6 +230,8 @@ export interface BulkListingPatch {
   attributes?: BulkAttributeValue[];
   /** Replaces the listing's whole product grid. */
   variations?: BulkVariations;
+  /** Replaces the listing's whole set of variation photos — empty clears them. */
+  variationImages?: BulkVariationImage[];
 }
 
 /** Fields written with `updateListing` (`PATCH /shops/{shop}/listings/{listing}`). */
@@ -419,6 +434,7 @@ export function splitPatch(patch: BulkListingPatch): {
   attributes: BulkAttributeValue[];
   personalization: PersonalizationQuestionInput[] | null;
   variations: BulkVariations | null;
+  variationImages: BulkVariationImage[] | null;
 } {
   const listing: BulkListingPatch = {};
   const inventory: BulkListingPatch = {};
@@ -434,6 +450,7 @@ export function splitPatch(patch: BulkListingPatch): {
     attributes: patch.attributes ?? [],
     personalization: patch.personalization ?? null,
     variations: patch.variations ?? null,
+    variationImages: patch.variationImages ?? null,
   };
 }
 
@@ -712,7 +729,40 @@ export function parseBulkPatch(raw: unknown): ParsedPatch {
     patch.variations = parsed.value;
   }
 
+  if ("variationImages" in r) {
+    const parsed = parseVariationImages(r.variationImages);
+    if ("error" in parsed) return invalid(parsed.error);
+    patch.variationImages = parsed.value;
+  }
+
   return { ok: true, value: patch };
+}
+
+/** Well above Etsy's option count per variation; bounds the request only. */
+const MAX_VARIATION_IMAGES = 200;
+
+/**
+ * The shape of a variation photo set. Etsy's own rules (one property, values
+ * and photos that exist on the listing) are checked at save time against the
+ * listing as it is then — see lib/etsy/variation-images.ts.
+ */
+function parseVariationImages(raw: unknown): Parsed<BulkVariationImage[]> {
+  if (!Array.isArray(raw)) return { error: "Variation photos must be a list." };
+  if (raw.length > MAX_VARIATION_IMAGES) return { error: "Too many variation photos." };
+  const value: BulkVariationImage[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") return { error: "Each variation photo must be an object." };
+    const e = entry as Record<string, unknown>;
+    const propertyId = positiveInt(e, "propertyId");
+    const imageId = positiveInt(e, "imageId");
+    const valueId = e.valueId === null ? null : positiveInt(e, "valueId");
+    const name = typeof e.value === "string" ? e.value.trim() : "";
+    if (propertyId == null || imageId == null || (e.valueId !== null && valueId == null) || !name) {
+      return { error: "A variation photo is missing its property, option or photo." };
+    }
+    value.push({ propertyId, valueId, value: name, imageId });
+  }
+  return { value };
 }
 
 type Parsed<T> = { value: T } | { error: string };

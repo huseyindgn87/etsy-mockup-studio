@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { applyBulkUpdates } from "@/lib/etsy/bulk-apply";
+import { applyBulkUpdates, type BulkResult } from "@/lib/etsy/bulk-apply";
 import { parseBulkUpdates } from "@/lib/etsy/bulk-edit";
 import { resolveListingScope } from "@/lib/etsy/listing-scope";
 import { applyStoredListingPatch, listStoredListingsByIds } from "@/lib/etsy/listing-store";
@@ -13,7 +13,7 @@ export const dynamic = "force-dynamic";
  * The one place bulk editing writes to Etsy. Each listing gets only the
  * fields targeted at it, as a PATCH, so untouched fields keep their values;
  * one listing failing doesn't stop the rest, and the response says per
- * listing what happened.
+ * listing what happened — `partial` when only its variation photos failed.
  *
  * Every id is checked against the caller's own cached listings first, so a
  * listing belonging to another user (or to another of this user's shops) is
@@ -49,16 +49,18 @@ export async function POST(request: Request) {
   const written = await applyBulkUpdates(Number(shopId), toWrite);
 
   // Mirror what actually landed into the cached rows the listings table reads.
+  // A partial save landed everything but the variation photos.
   for (const result of written) {
-    if (!result.ok) continue;
+    if (!result.ok && !result.partial) continue;
     const patch = toWrite.find((u) => u.listingId === result.listingId)!.patch;
     await applyStoredListingPatch(userId, shopId, result.listingId, patch);
   }
 
-  const results = [...written, ...notFound];
+  const results: BulkResult[] = [...written, ...notFound];
   return NextResponse.json({
     results,
     saved: results.filter((r) => r.ok).length,
-    failed: results.filter((r) => !r.ok).length,
+    partial: results.filter((r) => r.partial).length,
+    failed: results.filter((r) => !r.ok && !r.partial).length,
   });
 }

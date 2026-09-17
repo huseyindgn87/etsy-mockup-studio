@@ -552,6 +552,161 @@ describe("a variation grid replaces the inventory", () => {
   });
 });
 
+describe("variation photos are sent after the inventory", () => {
+  const grid = {
+    products: [
+      { propertyValues: [{ propertyId: 200, name: "Color", valueIds: [1], values: ["Red"] }], price: 10, quantity: 2, enabled: true },
+      { propertyValues: [{ propertyId: 200, name: "Color", valueIds: [null], values: ["Sunset"] }], price: 12, quantity: 1, enabled: true },
+    ],
+    priceOnProperty: [200],
+  };
+  /** What Etsy answers the grid PUT with: the replace gave both values new ids. */
+  const REPLACED = {
+    products: [
+      { property_values: [{ property_id: 200, value_ids: [7001], values: ["Red"] }] },
+      { property_values: [{ property_id: 200, value_ids: [7002], values: ["Sunset"] }] },
+    ],
+  };
+  const IMAGES = { results: [{ listing_image_id: 900 }, { listing_image_id: 901 }] };
+
+  /** Routes Etsy calls; `failImages` makes the variation-images POST fail. */
+  function etsy({ failInventory = false, failImages = false } = {}) {
+    etsyFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      if (method === "PUT" && path.includes("/inventory")) {
+        return failInventory ? jsonResponse({ error: "Inventory refused." }, 400) : jsonResponse(REPLACED);
+      }
+      if (method === "GET" && path === "/listings/101/inventory") return jsonResponse(VARIATION_INVENTORY);
+      if (method === "GET" && path === "/listings/101/images") return jsonResponse(IMAGES);
+      if (method === "POST" && path.endsWith("/variation-images")) {
+        return failImages ? jsonResponse({ error: "Etsy refused the variation images." }, 400) : jsonResponse({});
+      }
+      return jsonResponse({});
+    });
+  }
+  const imagesPost = () =>
+    etsyFetchMock.mock.calls.find(([path, init]) => init?.method === "POST" && String(path).endsWith("/variation-images"));
+
+  test("the images call comes after the inventory PUT, with value ids re-read from its response", async () => {
+    etsy();
+    const { body } = await save([
+      {
+        listingId: 101,
+        patch: {
+          title: "Colors",
+          variations: grid,
+          variationImages: [
+            { propertyId: 200, valueId: 1, value: "Red", imageId: 900 },
+            { propertyId: 200, valueId: null, value: "Sunset", imageId: 901 },
+          ],
+        },
+      },
+    ]);
+    expect(body).toMatchObject({ saved: 1, partial: 0, failed: 0 });
+
+    const writes = etsyWrites();
+    expect(writes.indexOf("PUT /listings/101/inventory?max_variations_supported=3")).toBeLessThan(
+      writes.indexOf(`POST /shops/${SHOP_A}/listings/101/variation-images`),
+    );
+    // The PUT's own response is the inventory used — no second read.
+    expect(etsyCalls()).not.toContain("GET /listings/101/inventory");
+    expect(JSON.parse(imagesPost()![1]!.body as string)).toEqual({
+      variation_images: [
+        { property_id: 200, value_id: 7001, image_id: 900 },
+        { property_id: 200, value_id: 7002, image_id: 901 },
+      ],
+    });
+  });
+
+  test("without a grid change the current inventory is read for the ids", async () => {
+    etsy();
+    await save([{ listingId: 101, patch: { variationImages: [{ propertyId: 200, valueId: 2, value: "Blue", imageId: 900 }] } }]);
+    const calls = etsyCalls();
+    expect(calls.indexOf("GET /listings/101/inventory")).toBeLessThan(
+      calls.indexOf(`POST /shops/${SHOP_A}/listings/101/variation-images`),
+    );
+    expect(JSON.parse(imagesPost()![1]!.body as string)).toEqual({
+      variation_images: [{ property_id: 200, value_id: 2, image_id: 900 }],
+    });
+  });
+
+  test("a cleared set is sent as an empty list, not skipped", async () => {
+    etsy();
+    const { body } = await save([{ listingId: 101, patch: { variationImages: [] } }]);
+    expect(body.saved).toBe(1);
+    expect(JSON.parse(imagesPost()![1]!.body as string)).toEqual({ variation_images: [] });
+  });
+
+  test("assignments on two properties are refused without calling Etsy, and the grid still counts as saved", async () => {
+    etsy();
+    const { body } = await save([
+      {
+        listingId: 101,
+        patch: {
+          variations: grid,
+          variationImages: [
+            { propertyId: 200, valueId: 1, value: "Red", imageId: 900 },
+            { propertyId: 100, valueId: 11, value: "S", imageId: 901 },
+          ],
+        },
+      },
+    ]);
+    expect(imagesPost()).toBeUndefined();
+    expect(body.results).toEqual([
+      { listingId: 101, ok: false, partial: true, error: "Variation photos: Photos can vary by one variation only." },
+    ]);
+  });
+
+  test("a failed images call reports the listing as partly saved and rolls nothing back", async () => {
+    etsy({ failImages: true });
+    const { body } = await save([
+      {
+        listingId: 101,
+        patch: {
+          title: "Kept title",
+          variations: grid,
+          variationImages: [{ propertyId: 200, valueId: 1, value: "Red", imageId: 900 }],
+        },
+      },
+    ]);
+    expect(body).toMatchObject({ saved: 0, partial: 1, failed: 0 });
+    expect(body.results).toEqual([
+      { listingId: 101, ok: false, partial: true, error: "Variation photos: Etsy refused the variation images." },
+    ]);
+    // Only the grid PUT and the images POST touch the inventory — no undo write.
+    expect(etsyWrites().filter((w) => w.includes("/inventory"))).toHaveLength(1);
+    expect(db.listings.find((l) => l.listingId === "101")!.title).toBe("Kept title");
+  });
+
+  test("a failed inventory update never sends the images", async () => {
+    etsy({ failInventory: true });
+    const { body } = await save([
+      { listingId: 101, patch: { variations: grid, variationImages: [{ propertyId: 200, valueId: 1, value: "Red", imageId: 900 }] } },
+    ]);
+    expect(imagesPost()).toBeUndefined();
+    expect(body.results).toEqual([{ listingId: 101, ok: false, error: "Inventory refused." }]);
+  });
+
+  test("a malformed assignment fails validation before anything reaches Etsy", async () => {
+    const { status } = await save([{ listingId: 101, patch: { variationImages: [{ propertyId: 200, value: "Red" }] } }]);
+    expect(status).toBe(400);
+    expect(etsyFetchMock).not.toHaveBeenCalled();
+  });
+
+  test("the inventory read returns each variation listing's current photos", async () => {
+    etsyFetchMock.mockImplementation(async (path: string) => {
+      if (path === "/listings/101/inventory") return jsonResponse(VARIATION_INVENTORY);
+      if (path === `/shops/${SHOP_A}/listings/101/variation-images`) {
+        return jsonResponse({ results: [{ property_id: 200, value_id: 2, value: "Blue", image_id: 900 }] });
+      }
+      return jsonResponse({});
+    });
+    const { body } = await loadInventory("101");
+    expect(body.variationImages).toEqual({ 101: [{ propertyId: 200, valueId: 2, value: "Blue", imageId: 900 }] });
+    expect(etsyWrites()).toEqual([]);
+  });
+});
+
 describe("the on-demand reads are scoped like every other bulk route", () => {
   test("attributes are read only for the caller's own listings", async () => {
     const { status, body } = await loadAttributes("101");

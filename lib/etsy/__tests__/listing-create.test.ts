@@ -381,8 +381,11 @@ describe("updateVariationImages", () => {
     ]);
   });
 
-  test("does nothing (no request) for an empty list", async () => {
+  test("an empty list is sent, clearing the listing's variation photos", async () => {
+    etsyFetch.mockResolvedValue(json({}));
     await updateVariationImages(42, 555, []);
-    expect(etsyFetch).not.toHaveBeenCalled();
+    const [path, init] = etsyFetch.mock.calls[0];
+    expect(path).toBe("/shops/42/listings/555/variation-images");
+    expect(JSON.parse(init?.body as string)).toEqual({ variation_images: [] });
   });
 });

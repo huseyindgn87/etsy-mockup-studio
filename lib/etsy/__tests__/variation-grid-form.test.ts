@@ -8,7 +8,11 @@ import {
   isUsableNumeric,
 } from "@/lib/etsy/bulk-operations";
 import type { VariationGrid } from "@/lib/etsy/variation-grid";
-import { gridToOfferingState, offeringStateToBulkVariations } from "@/lib/etsy/variation-grid-form";
+import {
+  gridToOfferingState,
+  offeringStateToBulkVariations,
+  offeringStateToVariationImages,
+} from "@/lib/etsy/variation-grid-form";
 
 const combo = (
   valueIds: (number | null)[],
@@ -132,5 +136,38 @@ describe("bulk bar operations", () => {
       readinessStateId: 9,
       variationRows: { readiness: { "21": "9", "22": "9" } },
     });
+  });
+});
+
+describe("variation photos ↔ the form", () => {
+  const images = [
+    { propertyId: 100, valueId: 11, value: "S", imageId: 900 },
+    { propertyId: 100, valueId: 555, value: "XXL", imageId: 901 },
+  ];
+
+  it("marks the photo variation and maps Etsy's photos onto the grid's tiles, free-text values by name", () => {
+    const state = gridToOfferingState(GRID, DEFAULTS, images);
+    expect(state.variations.map((v) => v.linksPhotos)).toEqual([true, false]);
+    expect(state.variationPhotos).toEqual({ "11": "etsy:900", "-1": "etsy:901" });
+  });
+
+  it("turns back into the full set, with free-text values sent by name and no id", () => {
+    expect(offeringStateToVariationImages(gridToOfferingState(GRID, DEFAULTS, images))).toEqual([
+      { propertyId: 100, valueId: 11, value: "S", imageId: 900 },
+      { propertyId: 100, valueId: null, value: "XXL", imageId: 901 },
+    ]);
+  });
+
+  it("a cleared value leaves the set; clearing all gives an empty set", () => {
+    const state = gridToOfferingState(GRID, DEFAULTS, images);
+    expect(offeringStateToVariationImages({ ...state, variationPhotos: { "11": "etsy:900" } })).toEqual([
+      { propertyId: 100, valueId: 11, value: "S", imageId: 900 },
+    ]);
+    expect(offeringStateToVariationImages({ ...state, variationPhotos: {} })).toEqual([]);
+  });
+
+  it("only photos already on the listing can be sent", () => {
+    const state = gridToOfferingState(GRID, DEFAULTS, images);
+    expect(offeringStateToVariationImages({ ...state, variationPhotos: { "11": "own:abc" } })).toEqual([]);
   });
 });

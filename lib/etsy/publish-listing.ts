@@ -309,16 +309,18 @@ export function sanitizeVariations(raw: unknown): CleanVariations | null {
 
 /**
  * Variation images need the value ids Etsy holds, and Etsy assigns those
- * itself for free-text values (sent as `value_id: null`). Looks each value up
- * by property and name in the inventory Etsy returned; a value it can't find
- * keeps its own positive id, or is dropped.
+ * itself for free-text values (sent as `value_id: null`), and a replace can
+ * renumber others. Looks each value up by property and name in the inventory
+ * Etsy returned, then by its own id only if that id is still there; a value
+ * found neither way is dropped (never sent with an id Etsy would refuse).
  */
 export function resolveVariationImageValueIds(
   images: readonly VariationImageByValue[],
   inventory: unknown,
 ): VariationImageByValue[] {
   const products = (inventory as { products?: unknown } | null)?.products;
-  const ids = new Map<string, number>();
+  const byName = new Map<string, number>();
+  const present = new Set<string>();
   for (const p of Array.isArray(products) ? products : []) {
     const pvs = (p as { property_values?: unknown } | null)?.property_values;
     for (const pv of Array.isArray(pvs) ? pvs : []) {
@@ -326,13 +328,16 @@ export function resolveVariationImageValueIds(
       if (!Array.isArray(values) || !Array.isArray(value_ids)) continue;
       values.forEach((v, k) => {
         const id = value_ids[k];
-        if (typeof v === "string" && Number.isInteger(id) && id > 0) ids.set(`${property_id}:${v.trim().toLowerCase()}`, id);
+        if (typeof v !== "string" || !Number.isInteger(id) || id <= 0) return;
+        present.add(`${property_id}:${id}`);
+        const key = `${property_id}:${v.trim().toLowerCase()}`;
+        if (!byName.has(key)) byName.set(key, id);
       });
     }
   }
   return images.flatMap((i) => {
-    const found = i.value != null ? ids.get(`${i.propertyId}:${i.value.toLowerCase()}`) : undefined;
-    const valueId = found ?? (i.valueId > 0 ? i.valueId : null);
+    const found = i.value != null ? byName.get(`${i.propertyId}:${i.value.trim().toLowerCase()}`) : undefined;
+    const valueId = found ?? (present.has(`${i.propertyId}:${i.valueId}`) ? i.valueId : null);
     return valueId == null ? [] : [{ ...i, valueId }];
   });
 }
@@ -587,7 +592,14 @@ export async function applyListingDetails(
           skuOnProperty: variations.skuOnProperty,
           readinessStateOnProperty: variations.readinessStateOnProperty,
         });
-        variations = { ...variations, imagesByValue: resolveVariationImageValueIds(variations.imagesByValue, saved) };
+        const imagesByValue = resolveVariationImageValueIds(variations.imagesByValue, saved);
+        const matched = new Set(imagesByValue.map((i) => `${i.value}:${i.imageIndex}:${i.jobIndex}`));
+        const unmatched = variations.imagesByValue.filter((i) => !matched.has(`${i.value}:${i.imageIndex}:${i.jobIndex}`));
+        if (unmatched.length > 0) {
+          const names = unmatched.map((i) => `“${i.value ?? i.valueId}”`).join(", ");
+          onStepError("Variation photos", new Error(`${names} isn't an option in the saved inventory, so its photo wasn't attached.`));
+        }
+        variations = { ...variations, imagesByValue };
       } catch (err) {
         onStepError("Variations", err);
         variations = null; // grid failed to save -> don't try to attach images to it

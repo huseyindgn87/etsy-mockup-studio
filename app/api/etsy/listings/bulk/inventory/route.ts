@@ -4,13 +4,16 @@ import { fetchListingInventories } from "@/lib/etsy/listing-inventory";
 import { parseListingIds, resolveListingScope } from "@/lib/etsy/listing-scope";
 import { listStoredListingsByIds } from "@/lib/etsy/listing-store";
 import { EtsyApiError } from "@/lib/etsy/listings";
+import { fetchVariationImages } from "@/lib/etsy/variation-images";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
  * `GET /api/etsy/listings/bulk/inventory?ids=1,2,3` — each selected listing's
- * variation grid, for the Inventory group's per-listing Variations cards.
+ * variation grid, for the Inventory group's per-listing Variations cards, and
+ * the variation photos of each listing that has variations (`variationImages`;
+ * a listing whose photos Etsy wouldn't return is left out of it).
  *
  * Separate from `/api/etsy/listings/bulk` because Etsy's batch endpoint can't
  * include inventory: it costs one call per listing, so the editor only asks
@@ -42,8 +45,13 @@ export async function GET(request: NextRequest) {
 
   try {
     const byListing = await fetchListingInventories(ownedIds);
+    const withVariations = [...byListing.values()]
+      .filter((grid) => grid.properties.length > 0)
+      .map((grid) => grid.listingId);
+    const images = await fetchVariationImages(Number(shopId), withVariations);
     return NextResponse.json({
       inventories: Object.fromEntries(byListing),
+      variationImages: Object.fromEntries(images),
       // A listing Etsy wouldn't hand over its inventory for is reported the
       // same way as one that isn't the caller's — the card says so rather
       // than showing an empty grid.

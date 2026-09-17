@@ -178,6 +178,8 @@ export type FieldValue =
 export interface SaveResult {
   listingId: number;
   ok: boolean;
+  /** Everything but the listing's variation photos was saved. */
+  partial?: boolean;
   error?: string;
 }
 

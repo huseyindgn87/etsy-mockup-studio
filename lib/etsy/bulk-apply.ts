@@ -12,24 +12,51 @@
  *                                 full variation grid when the Variations card
  *                                 was edited (never both: a grid already
  *                                 carries the per-combination values)
- *   3. `updateListingProperty`  — one call per Optional-group attribute
- *   4. the personalization resource
+ *   3. `updateVariationImages`  — the photo per variation value. After the
+ *                                 grid, because a replace can give values new
+ *                                 ids: they're re-resolved from the inventory
+ *                                 that write returned (or a fresh read)
+ *   4. `updateListingProperty`  — one call per Optional-group attribute
+ *   5. the personalization resource
  * One listing failing never stops the others — each gets its own result, so a
- * save that half-succeeds reports exactly which listings changed.
+ * save that half-succeeds reports exactly which listings changed. Variation
+ * photos failing after everything else landed is reported as `partial`:
+ * nothing is rolled back.
  *
  * Server-only — calls Etsy.
  */
 
 import { etsyFetch } from "@/lib/etsy/auth";
-import { splitPatch, type BulkListingPatch, type BulkUpdate, type BulkVariations } from "@/lib/etsy/bulk-edit";
-import { setListingProperty, updateListingInventory, updateListingPersonalization } from "@/lib/etsy/listing-create";
-import { updateSimpleInventory, VariationInventoryError } from "@/lib/etsy/listing-inventory";
+import {
+  splitPatch,
+  type BulkListingPatch,
+  type BulkUpdate,
+  type BulkVariationImage,
+  type BulkVariations,
+} from "@/lib/etsy/bulk-edit";
+import {
+  setListingProperty,
+  updateListingInventory,
+  updateListingPersonalization,
+  updateVariationImages,
+} from "@/lib/etsy/listing-create";
+import {
+  readInventory,
+  updateSimpleInventory,
+  VariationInventoryError,
+  type RawInventory,
+} from "@/lib/etsy/listing-inventory";
 import { EtsyApiError, readEtsyResponse } from "@/lib/etsy/listings";
+import { readListingImageIds, resolveVariationImages } from "@/lib/etsy/variation-images";
 
-/** What one listing's write did. `ok: false` carries the message shown against that row. */
+/**
+ * What one listing's write did. `ok: false` carries the message shown against
+ * that row; `partial` means everything but the variation photos was saved.
+ */
 export interface BulkResult {
   listingId: number;
   ok: boolean;
+  partial?: boolean;
   error?: string;
 }
 
@@ -112,8 +139,8 @@ async function writeVariationGrid(
   listingId: number,
   variations: BulkVariations,
   fallback: { price?: number; quantity?: number },
-): Promise<void> {
-  await updateListingInventory(listingId, {
+): Promise<RawInventory> {
+  return (await updateListingInventory(listingId, {
     products: variations.products.map((p) => ({
       sku: p.sku,
       propertyValues: p.propertyValues,
@@ -126,25 +153,55 @@ async function writeVariationGrid(
     quantityOnProperty: variations.quantityOnProperty,
     skuOnProperty: variations.skuOnProperty,
     readinessStateOnProperty: variations.readinessStateOnProperty,
-  });
+  })) as RawInventory;
+}
+
+/**
+ * Send the listing's full set of variation photos, resolved against
+ * `inventory` and the photos on the listing now. Throws with the reason when
+ * the set can't be sent as it is.
+ */
+async function writeVariationImages(
+  shopId: number,
+  listingId: number,
+  assignments: BulkVariationImage[],
+  inventory: RawInventory,
+): Promise<void> {
+  const imageIds = assignments.length > 0 ? await readListingImageIds(listingId) : [];
+  const resolved = resolveVariationImages(assignments, inventory, imageIds);
+  if (!resolved.ok) throw new Error(resolved.error);
+  await updateVariationImages(shopId, listingId, resolved.images);
 }
 
 /** Apply one listing's patch. Never throws — a failure comes back as `ok: false`. */
 export async function applyBulkUpdate(shopId: number, update: BulkUpdate): Promise<BulkResult> {
-  const { listing, inventory, attributes, personalization, variations } = splitPatch(update.patch);
+  const { listing, inventory, attributes, personalization, variations, variationImages } = splitPatch(update.patch);
+  let imagesError: string | null = null;
   try {
     await updateListingFields(shopId, update.listingId, listing);
 
+    let saved: RawInventory | null = null;
     if (variations) {
       // A grid replace already carries every combination's own price,
       // quantity and SKU — sending the single-product write as well would
       // immediately flatten what was just written.
-      await writeVariationGrid(update.listingId, variations, {
+      saved = await writeVariationGrid(update.listingId, variations, {
         price: inventory.price,
         quantity: inventory.quantity,
       });
     } else {
       await updateSimpleInventory(update.listingId, inventory);
+    }
+
+    if (variationImages) {
+      try {
+        // Clearing needs no ids; otherwise resolve against the inventory as it is now.
+        const current =
+          saved?.products || variationImages.length === 0 ? (saved ?? {}) : await readInventory(update.listingId);
+        await writeVariationImages(shopId, update.listingId, variationImages, current);
+      } catch (err) {
+        imagesError = errorMessage(err);
+      }
     }
 
     for (const attribute of attributes) {
@@ -155,9 +212,17 @@ export async function applyBulkUpdate(shopId: number, update: BulkUpdate): Promi
       await updateListingPersonalization(shopId, update.listingId, personalization);
     }
 
+    if (imagesError != null) {
+      return { listingId: update.listingId, ok: false, partial: true, error: `Variation photos: ${imagesError}` };
+    }
     return { listingId: update.listingId, ok: true };
   } catch (err) {
-    return { listingId: update.listingId, ok: false, error: errorMessage(err) };
+    const error = errorMessage(err);
+    return {
+      listingId: update.listingId,
+      ok: false,
+      error: imagesError == null ? error : `${error}; Variation photos: ${imagesError}`,
+    };
   }
 }
 

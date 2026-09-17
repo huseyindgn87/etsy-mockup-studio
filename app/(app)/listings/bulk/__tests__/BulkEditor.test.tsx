@@ -90,13 +90,18 @@ const INVENTORY = {
 
 let fetchMock: ReturnType<typeof vi.fn>;
 /** What the save route answers, per request; defaults to every listing saved. */
-let saveResults: ((updates: { listingId: number }[]) => { listingId: number; ok: boolean; error?: string }[]) | null =
-  null;
+let saveResults:
+  | ((updates: { listingId: number }[]) => { listingId: number; ok: boolean; partial?: boolean; error?: string }[])
+  | null = null;
 /** What AI Edits answers for one request body. */
 let aiAnswer: (body: { field: string; listing: { title: string } }) => { status: number; body: unknown } = (body) => ({
   status: 200,
   body: { value: body.field === "tags" ? ["ai tag", "second tag"] : `AI ${body.listing.title}` },
 });
+
+/** Each listing's variation photos as the inventory read returns them; undefined = Etsy didn't return them. */
+let variationImagesFor: (listingId: number) => { propertyId: number; valueId: number; value: string; imageId: number }[] | undefined =
+  () => [];
 
 /** Listing 101's grid, re-keyed for any listing id. */
 const inventoryFor = (listingId: number) => ({ ...INVENTORY, listingId });
@@ -117,7 +122,17 @@ function mockFetch(listings: BulkListingDetail[] = LISTINGS) {
     }
     if (url.startsWith("/api/etsy/listings/bulk/inventory")) {
       const ids = new URL(url, "http://x").searchParams.get("ids")!.split(",").map(Number);
-      return jsonResponse({ inventories: Object.fromEntries(ids.map((id) => [id, inventoryFor(id)])), missing: [] });
+      const variationImages = Object.fromEntries(
+        ids.flatMap((id) => {
+          const images = variationImagesFor(id);
+          return images ? [[id, images]] : [];
+        }),
+      );
+      return jsonResponse({
+        inventories: Object.fromEntries(ids.map((id) => [id, inventoryFor(id)])),
+        variationImages,
+        missing: [],
+      });
     }
     if (url === "/api/etsy/shop") return jsonResponse({ shopName: "GHCollectiveUS", currencyCode: "USD" });
     if (url === "/api/ai/optimize") {
@@ -228,6 +243,7 @@ async function renderEditor(listings: BulkListingDetail[] = LISTINGS) {
 beforeEach(() => {
   vi.clearAllMocks();
   saveResults = null;
+  variationImagesFor = () => [];
   aiAnswer = (body) => ({
     status: 200,
     body: { value: body.field === "tags" ? ["ai tag", "second tag"] : `AI ${body.listing.title}` },
@@ -915,6 +931,90 @@ describe("Inventory — variation blocks", () => {
     };
     expect(variations.products).toHaveLength(3);
     expect(variations.products[2].propertyValues[0]).toMatchObject({ valueIds: [null], values: ["Green"] });
+  });
+});
+
+describe("Inventory — variation photos", () => {
+  const PHOTOS = [
+    { imageId: 1, url: "https://img/1.jpg", rank: 1, altText: "" },
+    { imageId: 2, url: "https://img/2.jpg", rank: 2, altText: "" },
+  ];
+  const VARIED = [detail(101, { hasVariations: true, images: PHOTOS })];
+
+  async function openPhotos() {
+    await renderEditor(VARIED);
+    openField("Variations", "Inventory");
+    fireEvent.click(await inRow(101).findByRole("button", { name: "Show all variations for Listing 101" }));
+    fireEvent.click(inRow(101).getByRole("tab", { name: "Photos" }));
+  }
+
+  test("a photo picked for an option is sent as the listing's full set, without resending the grid", async () => {
+    await openPhotos();
+    fireEvent.change(inRow(101).getByLabelText("Photos vary by"), { target: { value: "0" } });
+    fireEvent.click(inRow(101).getByRole("button", { name: "Photo 2 for Blue" }));
+
+    fireEvent.click(syncButton());
+    await waitFor(() => expect(savedUpdates()).not.toBeNull());
+    expect(savedUpdates()).toEqual([
+      { listingId: 101, patch: { variationImages: [{ propertyId: 200, valueId: 2, value: "Blue", imageId: 2 }] } },
+    ]);
+  });
+
+  test("the listing's current photos load into the tab, and clearing one sends the cleared set", async () => {
+    variationImagesFor = () => [{ propertyId: 200, valueId: 1, value: "Red", imageId: 1 }];
+    await openPhotos();
+    expect(inRow(101).getByRole("button", { name: "Photo 1 for Red" })).toHaveAttribute("aria-pressed", "true");
+    expect(syncButton()).toHaveTextContent(/^Sync updates$/);
+
+    fireEvent.click(inRow(101).getByRole("button", { name: "No photo for Red" }));
+    fireEvent.click(syncButton());
+    await waitFor(() => expect(savedUpdates()).not.toBeNull());
+    expect(savedUpdates()).toEqual([{ listingId: 101, patch: { variationImages: [] } }]);
+  });
+
+  test("a partial save keeps the photo selections, and the next Sync sends only them", async () => {
+    await openPhotos();
+    fireEvent.change(inRow(101).getByLabelText("Photos vary by"), { target: { value: "0" } });
+    fireEvent.click(inRow(101).getByRole("button", { name: "Photo 1 for Red" }));
+    fireEvent.click(inRow(101).getByRole("tab", { name: "Price" }));
+    fireEvent.change(inRow(101).getByLabelText("Price for Red"), { target: { value: "42" } });
+    saveResults = (updates) =>
+      updates.map((u) => ({ listingId: u.listingId, ok: false, partial: true, error: "Variation photos: Etsy said no." }));
+
+    fireEvent.click(syncButton());
+    await screen.findByText(/1 partly saved/);
+    expect(allSaves()[0][0].patch).toHaveProperty("variations");
+    expect(inRow(101).getByText(/Partly saved\. Variation photos: Etsy said no\./)).toBeInTheDocument();
+    fireEvent.click(inRow(101).getByRole("tab", { name: "Photos" }));
+    expect(inRow(101).getByRole("button", { name: "Photo 1 for Red" })).toHaveAttribute("aria-pressed", "true");
+
+    saveResults = null;
+    fireEvent.click(syncButton());
+    await waitFor(() => expect(allSaves()).toHaveLength(2));
+    expect(allSaves()[1]).toEqual([
+      { listingId: 101, patch: { variationImages: [{ propertyId: 200, valueId: 1, value: "Red", imageId: 1 }] } },
+    ]);
+  });
+
+  test("photos a media edit is saving go out before the variation photos that may name them", async () => {
+    await openPhotos();
+    fireEvent.change(inRow(101).getByLabelText("Photos vary by"), { target: { value: "0" } });
+    fireEvent.click(inRow(101).getByRole("button", { name: "Photo 2 for Red" }));
+    openField("Photos", "Media");
+    dragTile(101, 1, 0);
+
+    fireEvent.click(syncButton());
+    await waitFor(() => expect(savedUpdates()).not.toBeNull());
+    const urls = fetchMock.mock.calls.map(([url]) => url as string);
+    expect(urls.indexOf("/api/etsy/listings/101/media")).toBeGreaterThanOrEqual(0);
+    expect(urls.indexOf("/api/etsy/listings/101/media")).toBeLessThan(urls.indexOf("/api/etsy/listings/bulk/save"));
+  });
+
+  test("photos Etsy didn't return can't be changed from the block", async () => {
+    variationImagesFor = () => undefined;
+    await openPhotos();
+    expect(inRow(101).getByText(/didn't return this listing's variation photos/)).toBeInTheDocument();
+    expect(inRow(101).queryByLabelText("Photos vary by")).not.toBeInTheDocument();
   });
 });
 

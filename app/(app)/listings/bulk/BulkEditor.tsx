@@ -24,7 +24,13 @@ import {
   applySkuToForm,
 } from "@/lib/etsy/bulk-operations";
 import type { VariationGrid } from "@/lib/etsy/variation-grid";
-import { gridToOfferingState, offeringStateToBulkVariations } from "@/lib/etsy/variation-grid-form";
+import type { BulkVariationImage } from "@/lib/etsy/bulk-edit";
+import {
+  gridToOfferingState,
+  offeringStateToBulkVariations,
+  offeringStateToVariationImages,
+  type GridVariationImage,
+} from "@/lib/etsy/variation-grid-form";
 import { validateOfferings } from "@/lib/etsy/variation-offerings";
 import { DEFAULT_AI_MODEL, isUsableAiSettings, type AiField } from "@/lib/ai/listing-ai";
 import type { PersonalizationQuestionInput } from "@/lib/etsy/listing-personalization";
@@ -117,6 +123,11 @@ const numberOr = (value: number | null, digits = 2): string =>
  * individually, with an explicit per-field control for writing one value
  * across the ticked rows. Nothing reaches Etsy until Sync updates is pressed.
  */
+interface InventoryResponse {
+  inventories?: Record<string, VariationGrid>;
+  variationImages?: Record<string, GridVariationImage[]>;
+}
+
 export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
   const [listings, setListings] = useState<BulkListingDetail[] | null>(null);
   const [missing, setMissing] = useState<number[]>([]);
@@ -127,6 +138,14 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
   const [variationOriginals, setVariationOriginals] = useState<Record<number, ListingFormValue>>({});
   /** Edited variation forms, per listing. Absent means "untouched". */
   const [variationEdits, setVariationEdits] = useState<Record<number, ListingFormValue>>({});
+  /**
+   * Each listing's variation photos as Etsy has them. Absent: not read (the
+   * block can't edit them); "unknown": a save's photo call failed after its
+   * grid landed, so the next save sends the set whatever it is.
+   */
+  const [variationImageOriginals, setVariationImageOriginals] = useState<
+    Record<number, BulkVariationImage[] | "unknown">
+  >({});
   /** Listings whose inventory read has come back (with or without a grid). */
   const [inventoryDone, setInventoryDone] = useState<ReadonlySet<number>>(new Set());
   /** Variation blocks the user has expanded — each listing independently. */
@@ -284,13 +303,20 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
     for (const id of needed) requested.current.inventories.add(id);
     fetch(`/api/etsy/listings/bulk/inventory?ids=${needed.join(",")}`)
       .then((res) => (res.ok ? res.json() : null))
-      .then((body: { inventories?: Record<string, VariationGrid> } | null) => {
+      .then((body: InventoryResponse | null) => {
         const forms: Record<number, ListingFormValue> = {};
+        const images: Record<number, BulkVariationImage[]> = {};
         for (const [raw, grid] of Object.entries(body?.inventories ?? {})) {
           const listing = listings.find((l) => l.listingId === Number(raw));
-          if (listing) forms[listing.listingId] = { ...EMPTY_LISTING_FORM, ...gridToOfferingState(grid, listing) };
+          if (!listing) continue;
+          // A listing without variations can't have variation photos, so it needs no read.
+          const read = grid.properties.length === 0 ? [] : body?.variationImages?.[raw];
+          const form: ListingFormValue = { ...EMPTY_LISTING_FORM, ...gridToOfferingState(grid, listing, read ?? []) };
+          forms[listing.listingId] = form;
+          if (read) images[listing.listingId] = offeringStateToVariationImages(form);
         }
         setVariationOriginals((prev) => ({ ...prev, ...forms }));
+        setVariationImageOriginals((prev) => ({ ...prev, ...images }));
       })
       .catch(() => {})
       // Only once the read is back does a block stop saying "Loading…".
@@ -556,13 +582,35 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
     [variationEdits, variationOriginals],
   );
 
+  /**
+   * A listing's full set of variation photos, when it has to be sent: it
+   * differs from Etsy's, or the grid is being replaced and photos are
+   * assigned (so they're re-attached to the values the replace leaves).
+   */
+  const variationImagesPatchFor = useCallback(
+    (listing: BulkListingDetail, gridReplaced: boolean): BulkVariationImage[] | null => {
+      const edit = variationEdits[listing.listingId];
+      const original = variationImageOriginals[listing.listingId];
+      if (!edit || original === undefined) return null;
+      const next = offeringStateToVariationImages(edit);
+      if (original === "unknown" || JSON.stringify(next) !== JSON.stringify(original)) return next;
+      return gridReplaced && next.length > 0 ? next : null;
+    },
+    [variationEdits, variationImageOriginals],
+  );
+
   const fullPatchFor = useCallback(
     (listing: BulkListingDetail): BulkListingPatch => {
       const patch = patchFor(listing);
       const variations = variationPatchFor(listing);
-      return variations ? { ...patch, variations } : patch;
+      const variationImages = variationImagesPatchFor(listing, variations != null);
+      return {
+        ...patch,
+        ...(variations ? { variations } : {}),
+        ...(variationImages ? { variationImages } : {}),
+      };
     },
-    [patchFor, variationPatchFor],
+    [patchFor, variationPatchFor, variationImagesPatchFor],
   );
 
   const updates = useMemo(() => {
@@ -596,6 +644,12 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
   const { dialog: unsavedDialog } = useUnsavedChangesGuard(unsavedCount);
 
   const mediaFor = (listing: BulkListingDetail) => media[listing.listingId] ?? initialExistingMedia(listing);
+
+  /** The photos a variation value can show: those already on the listing, in the grid's order. */
+  const variationPhotoSlots = (listing: BulkListingDetail) =>
+    mediaPhotoSlots(mediaFor(listing), listing)
+      .filter((slot) => slot.ref.kind === "etsy")
+      .map((slot) => ({ slotId: slot.slotId, thumbnailUrl: slot.thumbnailUrl, label: slot.label }));
 
   function updateMedia(listing: BulkListingDetail, change: (state: ExistingMediaState) => ExistingMediaState) {
     setMedia((prev) => ({
@@ -669,57 +723,9 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
     setSaveError(null);
     setResults(null);
     try {
-      // A variation grid with errors is refused for that listing only — the rest still go out.
-      const refused: SaveResult[] = [];
-      const sendable = updates.filter((u) => {
-        const form = u.patch.variations ? variationEdits[u.listingId] : undefined;
-        const error = form ? validateOfferings(form, [])[0] : undefined;
-        if (error) refused.push({ listingId: u.listingId, ok: false, error: `Variations: ${error.message}` });
-        return !error;
-      });
-      if (refused.length > 0) {
-        setShowVariationErrors(true);
-        setExpandedBlocks((prev) => ({ ...prev, ...Object.fromEntries(refused.map((r) => [r.listingId, true])) }));
-      }
-
-      let fieldResults: SaveResult[] = [...refused];
-      if (sendable.length > 0) {
-        const res = await fetch("/api/etsy/listings/bulk/save", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ updates: sendable }),
-        });
-        if (!res.ok) throw new Error(await errorFrom(res));
-        const saved = ((await res.json()) as { results: SaveResult[] }).results;
-        fieldResults = [...fieldResults, ...saved];
-        // Saved values are now the listings' own values — clear the edits that
-        // landed so the rows stop showing them as pending. Failed rows keep theirs.
-        const savedIds = new Set(saved.filter((r) => r.ok).map((r) => r.listingId));
-        const savedForms = Object.fromEntries(
-          sendable.filter((u) => savedIds.has(u.listingId) && u.patch.variations).map((u) => [u.listingId, variationEdits[u.listingId]]),
-        );
-        setListings((prev) =>
-          (prev ?? []).map((l) => {
-            if (!savedIds.has(l.listingId)) return l;
-            const next = applySaved(l, patchFor(l));
-            const form = savedForms[l.listingId];
-            return form ? { ...next, hasVariations: form.variations.length > 0 } : next;
-          }),
-        );
-        setEdited((prev) => {
-          const next = { ...prev };
-          for (const id of savedIds) delete next[id];
-          return next;
-        });
-        setVariationOriginals((prev) => ({ ...prev, ...savedForms }));
-        setVariationEdits((prev) => {
-          const next = { ...prev };
-          for (const id of Object.keys(savedForms)) delete next[Number(id)];
-          return next;
-        });
-      }
-
-      // Media goes one listing at a time: each carries its own files.
+      // Media goes first, one listing at a time (each carries its own files):
+      // variation photos can only name photos already on the listing, and are
+      // checked against the listing's photos as they are once media has landed.
       const mediaResults: SaveResult[] = [];
       for (const listing of mediaUpdates) {
         const id = listing.listingId;
@@ -755,21 +761,90 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
         }
       }
 
-      const byId = new Map<number, SaveResult>();
-      for (const result of [...fieldResults, ...mediaResults]) {
-        const earlier = byId.get(result.listingId);
-        byId.set(
-          result.listingId,
-          !earlier
-            ? result
-            : {
-                listingId: result.listingId,
-                ok: earlier.ok && result.ok,
-                ...(earlier.ok && result.ok
-                  ? {}
-                  : { error: [earlier.error, result.error].filter(Boolean).join("; ") }),
-              },
+      // A variation grid with errors is refused for that listing only — the rest still go out.
+      const refused: SaveResult[] = [];
+      const sendable = updates.filter((u) => {
+        const listing = (listings ?? []).find((l) => l.listingId === u.listingId);
+        const form = u.patch.variations || u.patch.variationImages ? variationEdits[u.listingId] : undefined;
+        const slotIds = listing ? variationPhotoSlots(listing).map((slot) => slot.slotId) : [];
+        const error = form ? validateOfferings(form, slotIds)[0] : undefined;
+        if (error) refused.push({ listingId: u.listingId, ok: false, error: `Variations: ${error.message}` });
+        return !error;
+      });
+      if (refused.length > 0) {
+        setShowVariationErrors(true);
+        setExpandedBlocks((prev) => ({ ...prev, ...Object.fromEntries(refused.map((r) => [r.listingId, true])) }));
+      }
+
+      let fieldResults: SaveResult[] = [...refused];
+      if (sendable.length > 0) {
+        const res = await fetch("/api/etsy/listings/bulk/save", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ updates: sendable }),
+        });
+        if (!res.ok) throw new Error(await errorFrom(res));
+        const saved = ((await res.json()) as { results: SaveResult[] }).results;
+        fieldResults = [...fieldResults, ...saved];
+        // Saved values are now the listings' own values — clear the edits that
+        // landed so the rows stop showing them as pending. Failed rows keep theirs.
+        // A partial save landed everything but the variation photos: those
+        // selections stay in the form so the next Sync sends them again.
+        const savedIds = new Set(saved.filter((r) => r.ok).map((r) => r.listingId));
+        const partialIds = new Set(saved.filter((r) => r.partial).map((r) => r.listingId));
+        const landed = (id: number) => savedIds.has(id) || partialIds.has(id);
+        const savedForms = Object.fromEntries(
+          sendable
+            .filter((u) => landed(u.listingId) && (u.patch.variations || u.patch.variationImages))
+            .map((u) => [u.listingId, variationEdits[u.listingId]]),
         );
+        setListings((prev) =>
+          (prev ?? []).map((l) => {
+            if (!landed(l.listingId)) return l;
+            const next = applySaved(l, patchFor(l));
+            const form = savedForms[l.listingId];
+            return form ? { ...next, hasVariations: form.variations.length > 0 } : next;
+          }),
+        );
+        setEdited((prev) => {
+          const next = { ...prev };
+          for (const id of [...savedIds, ...partialIds]) delete next[id];
+          return next;
+        });
+        setVariationOriginals((prev) => ({ ...prev, ...savedForms }));
+        setVariationImageOriginals((prev) => {
+          const next = { ...prev };
+          for (const u of sendable) {
+            if (!u.patch.variationImages) continue;
+            if (savedIds.has(u.listingId)) next[u.listingId] = u.patch.variationImages;
+            else if (partialIds.has(u.listingId)) next[u.listingId] = "unknown";
+          }
+          return next;
+        });
+        setVariationEdits((prev) => {
+          const next = { ...prev };
+          for (const id of Object.keys(savedForms)) {
+            if (savedIds.has(Number(id))) delete next[Number(id)];
+          }
+          return next;
+        });
+      }
+
+      const byId = new Map<number, SaveResult>();
+      for (const result of [...mediaResults, ...fieldResults]) {
+        const earlier = byId.get(result.listingId);
+        if (!earlier) {
+          byId.set(result.listingId, result);
+          continue;
+        }
+        const ok = earlier.ok && result.ok;
+        const failedOutright = [earlier, result].some((r) => !r.ok && !r.partial);
+        byId.set(result.listingId, {
+          listingId: result.listingId,
+          ok,
+          ...(!ok && !failedOutright ? { partial: true } : {}),
+          ...(ok ? {} : { error: [earlier.error, result.error].filter(Boolean).join("; ") }),
+        });
       }
       setResults([...byId.values()]);
     } catch (err) {
@@ -879,7 +954,13 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
             <p className="text-xs text-zinc-500">
               {listing.state}
               {changed > 0 && ` · ${changed} change${changed === 1 ? "" : "s"} pending`}
-              {result && !result.ok && <span className="text-red-600 dark:text-red-400"> · {result.error}</span>}
+              {result && !result.ok && (
+                <span className="text-red-600 dark:text-red-400">
+                  {" "}
+                  · {result.partial && "Partly saved. "}
+                  {result.error}
+                </span>
+              )}
               {result?.ok && <span className="text-green-700 dark:text-green-400"> · saved</span>}
             </p>
           </div>
@@ -935,6 +1016,8 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
               processingProfiles={options.processingProfiles}
               currencyCode={currencyCode}
               showErrors={showVariationErrors}
+              photoSlots={variationPhotoSlots(listing)}
+              photosLoaded={variationImageOriginals[id] !== undefined}
             />
           ) : (
             <BulkFieldInput
@@ -1038,6 +1121,8 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
             className="mt-4 rounded-xl border border-black/10 bg-white px-4 py-3 text-sm dark:border-white/15 dark:bg-zinc-950"
           >
             Saved {results.filter((r) => r.ok).length} of {results.length} listings.
+            {results.some((r) => r.partial) &&
+              ` ${results.filter((r) => r.partial).length} partly saved — everything but their variation photos.`}
             {results.some((r) => !r.ok) && " Rows that failed keep their changes below."}
             {results.some((r) => !r.ok) && (
               <ul className="mt-1 list-disc pl-5 text-xs text-red-600 dark:text-red-400">
@@ -1046,6 +1131,7 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
                   .map((r) => (
                     <li key={r.listingId}>
                       {(listings ?? []).find((l) => l.listingId === r.listingId)?.title ?? `Listing #${r.listingId}`}:{" "}
+                      {r.partial && "Partly saved. "}
                       {r.error}
                     </li>
                   ))}

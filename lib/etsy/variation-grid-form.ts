@@ -5,10 +5,10 @@
  * into the full replacement grid the bulk save writes.
  */
 
-import type { BulkVariations } from "@/lib/etsy/bulk-edit";
+import type { BulkVariationImage, BulkVariations } from "@/lib/etsy/bulk-edit";
 import type { VariationGrid } from "@/lib/etsy/variation-grid";
 import { CUSTOM_PROPERTY_IDS, type CombinationField, type VariationDimension } from "@/lib/etsy/variation-combinations";
-import { buildInventoryPayload, type OfferingState } from "@/lib/etsy/variation-offerings";
+import { buildInventoryPayload, photoPropertyIndex, type OfferingState } from "@/lib/etsy/variation-offerings";
 
 export interface ListingInventoryDefaults {
   price: number | null;
@@ -19,13 +19,31 @@ export interface ListingInventoryDefaults {
 
 const PRICE_RE = /^\d+(\.\d{1,2})?$/;
 
+/** A variation photo as Etsy reports it. */
+export interface GridVariationImage {
+  propertyId: number;
+  valueId: number;
+  value: string;
+  imageId: number;
+}
+
+/** The photo tile id of a listing image — the same id the shared photo grid gives it. */
+const etsySlotId = (imageId: number) => `etsy:${imageId}`;
+const ETSY_SLOT_RE = /^etsy:(\d+)$/;
+
 /**
  * A grid as the variation form holds it. Options Etsy stores as free text
  * (no value id) get negative ids, which the payload builder sends back as
  * `value_id: null`. A field on `*_on_property` gets one cell per value of
- * those properties; any other field is the listing-wide value.
+ * those properties; any other field is the listing-wide value. The listing's
+ * variation photos mark their property as the photo variation and fill
+ * `variationPhotos` with the photo grid's tile ids.
  */
-export function gridToOfferingState(grid: VariationGrid, defaults: ListingInventoryDefaults): OfferingState {
+export function gridToOfferingState(
+  grid: VariationGrid,
+  defaults: ListingInventoryDefaults,
+  images: readonly GridVariationImage[] = [],
+): OfferingState {
   const optionIds = grid.properties.map((property) => {
     let free = 0;
     return new Map(
@@ -38,9 +56,17 @@ export function gridToOfferingState(grid: VariationGrid, defaults: ListingInvent
     isCustom: (CUSTOM_PROPERTY_IDS as readonly number[]).includes(property.propertyId),
     valueIds: [...optionIds[i].values()],
     values: property.options.map((o) => o.name),
-    linksPhotos: false,
+    linksPhotos: images.length > 0 && property.propertyId === images[0].propertyId,
     scaleId: property.scaleId,
   }));
+
+  const variationPhotos: Record<string, string> = {};
+  const photoIndex = grid.properties.findIndex((p) => images.length > 0 && p.propertyId === images[0].propertyId);
+  for (const image of photoIndex < 0 ? [] : images) {
+    if (image.propertyId !== images[0].propertyId) continue;
+    const formId = optionIds[photoIndex].get(String(image.valueId)) ?? optionIds[photoIndex].get(`t:${image.value}`);
+    if (formId != null) variationPhotos[String(formId)] = etsySlotId(image.imageId);
+  }
 
   const formIdsOf = (valueIds: (number | null)[], values: string[]) =>
     valueIds.map((id, i) => optionIds[i]?.get(id == null ? `t:${values[i]}` : String(id)) ?? 0);
@@ -92,8 +118,25 @@ export function gridToOfferingState(grid: VariationGrid, defaults: ListingInvent
     quantity: String(first && grid.properties.length > 0 ? first.quantity : defaults.quantity),
     sku: (grid.properties.length > 0 ? first?.sku : undefined) ?? defaults.sku,
     readinessStateId: readiness,
-    variationPhotos: {},
+    variationPhotos,
   };
+}
+
+/**
+ * The listing's full set of variation photos as the form holds them, for the
+ * bulk save — an empty list when none are assigned. Only photos already on
+ * the listing (`etsy:` tiles) can be sent; Etsy refuses any other id.
+ */
+export function offeringStateToVariationImages(state: OfferingState): BulkVariationImage[] {
+  const index = photoPropertyIndex(state.variations);
+  if (index == null) return [];
+  const d = state.variations[index];
+  return d.valueIds.flatMap((valueId, i) => {
+    const match = ETSY_SLOT_RE.exec(state.variationPhotos[String(valueId)] ?? "");
+    return match
+      ? [{ propertyId: d.propertyId, valueId: valueId < 0 ? null : valueId, value: d.values[i], imageId: Number(match[1]) }]
+      : [];
+  });
 }
 
 /**

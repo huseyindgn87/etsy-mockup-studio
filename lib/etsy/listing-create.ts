@@ -319,14 +319,14 @@ export interface VariationImageInput {
 /**
  * Associate specific listing images with specific variation property values
  * (e.g. the "Red" value of a Colour variation shows a particular photo) —
- * `POST /shops/{shop}/listings/{listing}/variation-images`.
+ * `POST /shops/{shop}/listings/{listing}/variation-images`. Overwrites the
+ * listing's whole set, so an empty list clears it.
  */
 export async function updateVariationImages(
   shopId: number,
   listingId: number,
   images: VariationImageInput[],
 ): Promise<void> {
-  if (images.length === 0) return;
   const requestBody = {
     variation_images: images.map((i) => ({
       property_id: i.propertyId,

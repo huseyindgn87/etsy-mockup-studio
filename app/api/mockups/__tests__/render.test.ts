@@ -138,6 +138,13 @@ vi.mock("@/lib/etsy/listing-create", () => ({
   updateListingInventory: vi.fn(async (_listing: number, input: unknown) => {
     inventoryCalls.push(input);
     if (inventoryShouldFail) throw new Error("Etsy rejected the inventory grid");
+    // Etsy answers with the saved inventory; variation photos resolve their value ids from it.
+    const { products } = input as { products: { propertyValues: { propertyId: number; valueIds: (number | null)[]; values: string[] }[] }[] };
+    return {
+      products: products.map((p) => ({
+        property_values: p.propertyValues.map((pv) => ({ property_id: pv.propertyId, value_ids: pv.valueIds, values: pv.values })),
+      })),
+    };
   }),
   updateListingSettings: vi.fn(async (_shop: number, _listing: number, input: unknown) => {
     settingsCalls.push(input);
