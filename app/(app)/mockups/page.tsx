@@ -1916,27 +1916,42 @@ function MockupsPageInner() {
             <span className="max-w-xs truncate text-xs text-zinc-500 dark:text-zinc-400">
               {modeCaption}
             </span>
-            <button
-              type="button"
-              onClick={() => setScheduleOpen(true)}
-              disabled={
-                !!busy ||
-                !!scheduleProgress ||
-                publishCount === 0 ||
-                needsReadinessState ||
-                draftStatus === "restoring" ||
-                !!scheduleBlockedReason
-              }
-              title={scheduleBlockedReason ?? undefined}
-              className="h-9 rounded-full border border-black/10 px-4 text-sm font-medium transition-colors hover:bg-black/[.04] disabled:opacity-40 dark:border-white/15 dark:hover:bg-white/[.06]"
-            >
-              {scheduleProgress ??
-                (schedule
-                  ? schedule.status === "failed"
-                    ? "Reschedule (failed)"
-                    : `Scheduled · ${scheduledLabel}`
-                  : "Schedule for later")}
-            </button>
+            {/* The picker hangs off this button (see ScheduleDialog's `anchored`). */}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setScheduleOpen((open) => !open)}
+                aria-expanded={scheduleOpen}
+                disabled={
+                  !!busy ||
+                  !!scheduleProgress ||
+                  publishCount === 0 ||
+                  needsReadinessState ||
+                  draftStatus === "restoring" ||
+                  !!scheduleBlockedReason
+                }
+                title={scheduleBlockedReason ?? undefined}
+                className="h-9 rounded-full border border-black/10 px-4 text-sm font-medium transition-colors hover:bg-black/[.04] disabled:opacity-40 dark:border-white/15 dark:hover:bg-white/[.06]"
+              >
+                {scheduleProgress ??
+                  (schedule
+                    ? schedule.status === "failed"
+                      ? "Reschedule (failed)"
+                      : `Scheduled · ${scheduledLabel}`
+                    : "Schedule for later")}
+              </button>
+              {scheduleOpen && (
+                <ScheduleDialog
+                  anchored
+                  heading={schedule ? "Reschedule listing" : "Schedule for later"}
+                  description="Your images are rendered and saved now, then published to Etsy at the time you choose. Nothing is sent to Etsy until then."
+                  submitLabel={schedule ? "Reschedule" : "Schedule"}
+                  initial={schedule}
+                  onSubmit={submitSchedule}
+                  onClose={() => setScheduleOpen(false)}
+                />
+              )}
+            </div>
             <button
               type="button"
               onClick={publishToEtsy}
@@ -1950,17 +1965,6 @@ function MockupsPageInner() {
             </button>
           </div>
         </div>
-
-        {scheduleOpen && (
-          <ScheduleDialog
-            heading={schedule ? "Reschedule listing" : "Schedule for later"}
-            description="Your images are rendered and saved now, then published to Etsy at the time you choose. Nothing is sent to Etsy until then."
-            submitLabel={schedule ? "Reschedule" : "Schedule"}
-            initial={schedule}
-            onSubmit={submitSchedule}
-            onClose={() => setScheduleOpen(false)}
-          />
-        )}
 
         <div className="mx-auto mt-2 w-full max-w-7xl space-y-1">
           {publishBlockedReason && (
