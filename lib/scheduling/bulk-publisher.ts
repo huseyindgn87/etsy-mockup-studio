@@ -179,7 +179,13 @@ export async function applyScheduledBulkEdit(
             ...(written.error ? { error: written.error } : {}),
           });
           if (written.ok || written.partial) {
-            await applyStoredListingPatch(row.userId, row.shopId, update.listingId, update.patch);
+            // Listing-side fields as Etsy confirmed them, not as they were sent.
+            const confirmed = written.confirmed;
+            await applyStoredListingPatch(row.userId, row.shopId, update.listingId, {
+              ...update.patch,
+              ...(confirmed?.title !== undefined ? { title: confirmed.title } : {}),
+              ...(confirmed?.shopSectionId != null ? { shopSectionId: confirmed.shopSectionId } : {}),
+            });
           }
         } catch (err) {
           steps.push({ ok: false, error: message(err) });

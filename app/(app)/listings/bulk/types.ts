@@ -6,6 +6,7 @@
 
 import type { PersonalizationQuestionInput } from "@/lib/etsy/listing-personalization";
 import type { BulkFieldKey, DimensionUnit, WeightUnit } from "@/lib/etsy/bulk-edit";
+import type { ConfirmedListingFields } from "@/lib/etsy/listing-confirmed";
 
 /** One listing as `GET /api/etsy/listings/bulk` returns it. */
 export interface BulkListingDetail {
@@ -181,6 +182,12 @@ export interface SaveResult {
   /** Everything but the listing's variation photos was saved. */
   partial?: boolean;
   error?: string;
+  /**
+   * The listing's fields as Etsy reported them after the write. Rows are
+   * refreshed from this, so a saved row never shows a value Etsy didn't
+   * confirm storing.
+   */
+  confirmed?: ConfirmedListingFields;
 }
 
 /** Everything the option dropdowns need, loaded once by the editor. */

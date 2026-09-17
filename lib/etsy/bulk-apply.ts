@@ -27,6 +27,8 @@
  */
 
 import { etsyFetch } from "@/lib/etsy/auth";
+import { joinIdList, joinList } from "@/lib/etsy/form-list";
+import { confirmedListingFields, type ConfirmedListingFields } from "@/lib/etsy/listing-confirmed";
 import {
   splitPatch,
   type BulkListingPatch,
@@ -58,6 +60,14 @@ export interface BulkResult {
   ok: boolean;
   partial?: boolean;
   error?: string;
+  /**
+   * The listing fields as Etsy's update response reported them. The caller
+   * shows and caches these instead of the patch it sent, so a value Etsy
+   * stored differently from what was asked can't be displayed as saved.
+   * Absent when the patch touched no listing-side field, or when the response
+   * wasn't a listing.
+   */
+  confirmed?: ConfirmedListingFields;
 }
 
 function errorMessage(err: unknown): string {
@@ -71,21 +81,22 @@ export function listingUpdateForm(patch: BulkListingPatch): URLSearchParams {
   const form = new URLSearchParams();
   if (patch.title !== undefined) form.set("title", patch.title);
   if (patch.description !== undefined) form.set("description", patch.description);
-  if (patch.tags !== undefined) {
-    // Repeated params, the same way createDraftListing sends tags. Never
-    // empty — an empty list is refused in `parseBulkPatch`.
-    for (const tag of patch.tags) form.append("tags", tag);
-  }
-  if (patch.materials !== undefined) {
-    for (const material of patch.materials) form.append("materials", material);
-  }
+  // One comma-joined field per list, never repeated params: Etsy documents
+  // these as "a comma-separated list" and its urlencoded parser keeps only
+  // the LAST occurrence of a repeated key, so `tags=a&tags=b&tags=c` silently
+  // left the listing with just "c". Never empty — `parseBulkPatch` refuses an
+  // empty list, and the values themselves can't contain a comma (Etsy's own
+  // regexes allow only letters, numbers, whitespace and -'™©® in a tag, and
+  // letters, numbers and whitespace in a material).
+  if (patch.tags !== undefined) form.set("tags", joinList(patch.tags));
+  if (patch.materials !== undefined) form.set("materials", joinList(patch.materials));
   // Etsy's schema has who_made/when_made/is_supply each requiring the other
   // two; `parseBulkPatch` guarantees they arrive together.
   if (patch.whoMade !== undefined) form.set("who_made", patch.whoMade);
   if (patch.whenMade !== undefined) form.set("when_made", patch.whenMade);
   if (patch.isSupply !== undefined) form.set("is_supply", String(patch.isSupply));
   if (patch.productionPartnerIds !== undefined) {
-    for (const id of patch.productionPartnerIds) form.append("production_partner_ids", String(id));
+    form.set("production_partner_ids", joinIdList(patch.productionPartnerIds));
   }
   if (patch.taxonomyId !== undefined) form.set("taxonomy_id", String(patch.taxonomyId));
   if (patch.shopSectionId !== undefined) form.set("shop_section_id", String(patch.shopSectionId));
@@ -108,17 +119,19 @@ export function listingUpdateForm(patch: BulkListingPatch): URLSearchParams {
 
 /**
  * `PATCH /shops/{shop}/listings/{listing}` with just the fields this patch
- * changes. A PATCH, so fields left out keep their current values.
+ * changes. A PATCH, so fields left out keep their current values. Etsy
+ * answers with the whole updated listing, which is what the caller reports as
+ * saved — never the patch it sent.
  */
 async function updateListingFields(
   shopId: number,
   listingId: number,
   patch: BulkListingPatch,
-): Promise<void> {
+): Promise<ConfirmedListingFields | null> {
   const form = listingUpdateForm(patch);
-  if ([...form.keys()].length === 0) return;
+  if ([...form.keys()].length === 0) return null;
 
-  await readEtsyResponse(
+  const body = await readEtsyResponse(
     await etsyFetch(`/shops/${shopId}/listings/${listingId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -127,6 +140,7 @@ async function updateListingFields(
     `PATCH /shops/${shopId}/listings/${listingId}`,
     form.toString(),
   );
+  return confirmedListingFields(body);
 }
 
 /**
@@ -177,8 +191,9 @@ async function writeVariationImages(
 export async function applyBulkUpdate(shopId: number, update: BulkUpdate): Promise<BulkResult> {
   const { listing, inventory, attributes, personalization, variations, variationImages } = splitPatch(update.patch);
   let imagesError: string | null = null;
+  let confirmed: ConfirmedListingFields | null = null;
   try {
-    await updateListingFields(shopId, update.listingId, listing);
+    confirmed = await updateListingFields(shopId, update.listingId, listing);
 
     let saved: RawInventory | null = null;
     if (variations) {
@@ -213,15 +228,24 @@ export async function applyBulkUpdate(shopId: number, update: BulkUpdate): Promi
     }
 
     if (imagesError != null) {
-      return { listingId: update.listingId, ok: false, partial: true, error: `Variation photos: ${imagesError}` };
+      return {
+        listingId: update.listingId,
+        ok: false,
+        partial: true,
+        error: `Variation photos: ${imagesError}`,
+        ...(confirmed ? { confirmed } : {}),
+      };
     }
-    return { listingId: update.listingId, ok: true };
+    return { listingId: update.listingId, ok: true, ...(confirmed ? { confirmed } : {}) };
   } catch (err) {
     const error = errorMessage(err);
+    // The listing PATCH may have landed before a later step threw, so what
+    // Etsy confirmed is still reported — the row is wrong either way without it.
     return {
       listingId: update.listingId,
       ok: false,
       error: imagesError == null ? error : `${error}; Variation photos: ${imagesError}`,
+      ...(confirmed ? { confirmed } : {}),
     };
   }
 }

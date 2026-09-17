@@ -321,7 +321,7 @@ describe("saving writes each listing only its own fields", () => {
 
     const [, init102] = calls.find(([p]) => String(p).includes("/102"))!;
     const body102 = new URLSearchParams(init102!.body as string);
-    expect(body102.getAll("tags")).toEqual(["holiday", "gift"]);
+    expect(body102.getAll("tags")).toEqual(["holiday,gift"]);
     expect(body102.has("title")).toBe(false);
   });
 
@@ -409,7 +409,7 @@ describe("the listing fields the wider editor adds", () => {
     expect(body.saved).toBe(1);
 
     const form = writtenForm("PATCH");
-    expect(form.getAll("materials")).toEqual(["Cotton", "Linen"]);
+    expect(form.getAll("materials")).toEqual(["Cotton,Linen"]);
     expect(form.get("who_made")).toBe("i_did");
     expect(form.get("when_made")).toBe("made_to_order");
     expect(form.get("is_supply")).toBe("false");
@@ -440,9 +440,67 @@ describe("the listing fields the wider editor adds", () => {
     expect(form.has("item_height")).toBe(false);
   });
 
-  test("production partners are sent as repeated ids", async () => {
+  test("production partners are sent as one comma-joined id list", async () => {
     await save([{ listingId: 101, patch: { productionPartnerIds: [66, 67] } }]);
-    expect(writtenForm("PATCH").getAll("production_partner_ids")).toEqual(["66", "67"]);
+    expect(writtenForm("PATCH").getAll("production_partner_ids")).toEqual(["66,67"]);
+  });
+});
+
+/**
+ * Etsy's urlencoded parser keeps only the last occurrence of a repeated key,
+ * so a list sent as `tags=a&tags=b&tags=c` left the listing holding just "c" —
+ * every earlier tag, including the listing's original ones, silently gone.
+ */
+describe("lists reach Etsy as one comma-joined field, never repeated params", () => {
+  test("a four-tag save sends one tags field holding all four", async () => {
+    await save([
+      { listingId: 101, patch: { tags: ["original", "testtag", "testtag2", "testtag3"] } },
+    ]);
+    const form = writtenForm("PATCH");
+    expect(form.getAll("tags")).toHaveLength(1);
+    expect(form.get("tags")).toBe("original,testtag,testtag2,testtag3");
+    // The raw body carries the key exactly once.
+    const raw = etsyFetchMock.mock.calls.find(([, init]) => init?.method === "PATCH")![1]!.body as string;
+    expect(raw.match(/(^|&)tags=/g)).toHaveLength(1);
+  });
+
+  test("materials too", async () => {
+    await save([{ listingId: 101, patch: { materials: ["Cotton", "Linen", "Wool"] } }]);
+    const form = writtenForm("PATCH");
+    expect(form.getAll("materials")).toHaveLength(1);
+    expect(form.get("materials")).toBe("Cotton,Linen,Wool");
+  });
+});
+
+describe("a saved row reports what Etsy confirmed, not what was sent", () => {
+  test("the result carries Etsy's own tag list", async () => {
+    etsyFetchMock.mockResolvedValue(
+      jsonResponse({ listing_id: 101, title: "Halloween mug", tags: ["original", "testtag"] }),
+    );
+    const { body } = await save([{ listingId: 101, patch: { tags: ["original", "testtag"] } }]);
+    expect(body.results[0]).toMatchObject({ ok: true, confirmed: { tags: ["original", "testtag"] } });
+  });
+
+  test("a listing Etsy stored differently is reported as Etsy stored it", async () => {
+    etsyFetchMock.mockResolvedValue(jsonResponse({ listing_id: 101, tags: ["testtag3"] }));
+    const { body } = await save([
+      { listingId: 101, patch: { tags: ["original", "testtag", "testtag2", "testtag3"] } },
+    ]);
+    expect(body.results[0].confirmed.tags).toEqual(["testtag3"]);
+  });
+
+  test("the cached row takes its title from the response", async () => {
+    etsyFetchMock.mockResolvedValue(jsonResponse({ listing_id: 101, title: "Etsy's version" }));
+    await save([{ listingId: 101, patch: { title: "Renamed mug" } }]);
+    expect(db.listings.find((l) => l.listingId === "101")!.title).toBe("Etsy's version");
+  });
+
+  test("a response that isn't a listing leaves the sent patch as the best account", async () => {
+    etsyFetchMock.mockResolvedValue(jsonResponse({}));
+    const { body } = await save([{ listingId: 101, patch: { title: "Renamed mug" } }]);
+    expect(body.results[0].ok).toBe(true);
+    expect(body.results[0].confirmed).toBeUndefined();
+    expect(db.listings.find((l) => l.listingId === "101")!.title).toBe("Renamed mug");
   });
 });
 

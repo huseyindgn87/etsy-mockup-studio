@@ -57,6 +57,7 @@ import { checkPickedVideo } from "@/app/components/listing-media/video-file";
 import { useUnsavedChangesGuard } from "@/app/components/unsaved-changes/useUnsavedChangesGuard";
 import ScheduleDialog from "@/app/(app)/schedule/ScheduleDialog";
 import { bulkMediaSlot } from "@/lib/scheduling/render-keys";
+import type { ConfirmedListingFields } from "@/lib/etsy/listing-confirmed";
 import type { ScheduledBulkUpdate, ScheduledImageEntry, ScheduledVideoEntry } from "@/lib/scheduling/bulk-job";
 import type { ScheduleTimeInput } from "@/lib/scheduling/types";
 import VariationRowBlock, { VARIATION_FIELDS } from "./VariationRowBlock";
@@ -855,10 +856,14 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
     // landed so the row stops showing them as pending. Failed rows keep theirs.
     // A partial save landed everything but the variation photos: those
     // selections stay in the form so the next Sync sends them again.
+    // The listing-side fields come from Etsy's own response (`confirmed`), so
+    // the row can never show a list Etsy didn't store; the patch only fills in
+    // what that response doesn't carry (price, quantity, SKU, personalization).
     setListings((prev) =>
       (prev ?? []).map((l) => {
         if (l.listingId !== id) return l;
-        const next = applySaved(l, patchFor(l));
+        const saved = applySaved(l, patchFor(l));
+        const next = result.confirmed ? applyConfirmed(saved, result.confirmed) : saved;
         return form ? { ...next, hasVariations: form.variations.length > 0 } : next;
       }),
     );
@@ -1529,6 +1534,24 @@ function patchEntry(field: BulkFieldKey, value: FieldValue): BulkListingPatch | 
     default:
       return null;
   }
+}
+
+/**
+ * Fold Etsy's own account of the listing back into the row. This runs after
+ * {@link applySaved} and wins over it: what the screen shows for these fields
+ * is then what Etsy answered with, not what the patch asked for. A field the
+ * response left out isn't touched.
+ */
+export function applyConfirmed(
+  listing: BulkListingDetail,
+  confirmed: ConfirmedListingFields,
+): BulkListingDetail {
+  const next = { ...listing };
+  for (const [key, value] of Object.entries(confirmed) as [keyof ConfirmedListingFields, unknown][]) {
+    if (value === undefined) continue;
+    (next as Record<string, unknown>)[key] = value;
+  }
+  return next;
 }
 
 /** Fold a saved patch back into the row, so it stops reading as pending. */

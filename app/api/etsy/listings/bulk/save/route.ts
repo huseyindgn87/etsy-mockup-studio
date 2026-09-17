@@ -49,11 +49,18 @@ export async function POST(request: Request) {
   const written = await applyBulkUpdates(Number(shopId), toWrite);
 
   // Mirror what actually landed into the cached rows the listings table reads.
-  // A partial save landed everything but the variation photos.
+  // A partial save landed everything but the variation photos. Listing-side
+  // fields are taken from what Etsy confirmed rather than from the patch;
+  // price/quantity/SKU aren't in that response, so they still come from it.
   for (const result of written) {
     if (!result.ok && !result.partial) continue;
     const patch = toWrite.find((u) => u.listingId === result.listingId)!.patch;
-    await applyStoredListingPatch(userId, shopId, result.listingId, patch);
+    const confirmed = result.confirmed;
+    await applyStoredListingPatch(userId, shopId, result.listingId, {
+      ...patch,
+      ...(confirmed?.title !== undefined ? { title: confirmed.title } : {}),
+      ...(confirmed?.shopSectionId != null ? { shopSectionId: confirmed.shopSectionId } : {}),
+    });
   }
 
   const results: BulkResult[] = [...written, ...notFound];

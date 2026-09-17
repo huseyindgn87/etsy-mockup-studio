@@ -23,7 +23,7 @@ beforeEach(() => {
 });
 
 describe("createDraftListing", () => {
-  test("sends shop_section_id and every tag as a form field", async () => {
+  test("sends shop_section_id and the tags as one comma-joined field", async () => {
     etsyFetch.mockResolvedValue(json({ listing_id: 555 }));
 
     const id = await createDraftListing(42, {
@@ -46,10 +46,10 @@ describe("createDraftListing", () => {
     const body = new URLSearchParams(init?.body as string);
     expect(body.get("taxonomy_id")).toBe("777");
     expect(body.get("shop_section_id")).toBe("88");
-    expect(body.getAll("tags")).toEqual(["beach", "summer"]);
+    expect(body.getAll("tags")).toEqual(["beach,summer"]);
   });
 
-  test("sends is_supply and every production_partner_id as a form field", async () => {
+  test("sends is_supply and the production partner ids comma-joined", async () => {
     etsyFetch.mockResolvedValue(json({ listing_id: 556 }));
 
     await createDraftListing(42, {
@@ -68,7 +68,7 @@ describe("createDraftListing", () => {
     const body = new URLSearchParams(init?.body as string);
     expect(body.get("who_made")).toBe("someone_else");
     expect(body.get("is_supply")).toBe("true");
-    expect(body.getAll("production_partner_ids")).toEqual(["111", "222"]);
+    expect(body.getAll("production_partner_ids")).toEqual(["111,222"]);
   });
 
   test("omits shop_section_id when not given", async () => {
@@ -205,8 +205,8 @@ describe("setListingProperty", () => {
     expect(path).toBe("/shops/42/listings/555/properties/200");
     expect(init?.method).toBe("PUT");
     const body = new URLSearchParams(init?.body as string);
-    expect(body.getAll("value_ids")).toEqual(["1", "2"]);
-    expect(body.getAll("values")).toEqual(["Black", "Red"]);
+    expect(body.getAll("value_ids")).toEqual(["1,2"]);
+    expect(body.getAll("values")).toEqual(["Black,Red"]);
     expect(body.has("scale_id")).toBe(false);
   });
 

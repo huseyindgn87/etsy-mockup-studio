@@ -1,4 +1,5 @@
 import { etsyFetch } from "@/lib/etsy/auth";
+import { joinIdList, joinList } from "@/lib/etsy/form-list";
 import { EtsyApiError, readEtsyResponse } from "@/lib/etsy/listings";
 import { toPersonalizationWire, type PersonalizationQuestionInput } from "@/lib/etsy/listing-personalization";
 
@@ -112,9 +113,14 @@ export async function createDraftListing(
   if (input.readinessStateId)
     form.set("readiness_state_id", String(input.readinessStateId));
   if (input.shopSectionId) form.set("shop_section_id", String(input.shopSectionId));
-  for (const t of input.tags ?? []) if (t) form.append("tags", t);
-  for (const m of input.materials ?? []) if (m) form.append("materials", m);
-  for (const id of input.productionPartnerIds ?? []) form.append("production_partner_ids", String(id));
+  // Comma-joined, never repeated params — see `joinList`.
+  const tags = joinList(input.tags ?? []);
+  if (tags) form.set("tags", tags);
+  const materials = joinList(input.materials ?? []);
+  if (materials) form.set("materials", materials);
+  if (input.productionPartnerIds?.length) {
+    form.set("production_partner_ids", joinIdList(input.productionPartnerIds));
+  }
 
   const body = (await readEtsyResponse(
     await etsyFetch(`/shops/${shopId}/listings`, {
@@ -183,8 +189,8 @@ export async function setListingProperty(
   input: ListingPropertyInput,
 ): Promise<void> {
   const form = new URLSearchParams();
-  for (const id of input.valueIds) form.append("value_ids", String(id));
-  for (const v of input.values) form.append("values", v);
+  form.set("value_ids", joinIdList(input.valueIds));
+  form.set("values", joinList(input.values));
   if (input.scaleId) form.set("scale_id", String(input.scaleId));
 
   await readEtsyResponse(

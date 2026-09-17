@@ -91,7 +91,13 @@ const INVENTORY = {
 let fetchMock: ReturnType<typeof vi.fn>;
 /** What the save route answers, per request; defaults to every listing saved. */
 let saveResults:
-  | ((updates: { listingId: number }[]) => { listingId: number; ok: boolean; partial?: boolean; error?: string }[])
+  | ((updates: { listingId: number }[]) => {
+      listingId: number;
+      ok: boolean;
+      partial?: boolean;
+      error?: string;
+      confirmed?: Partial<BulkListingDetail>;
+    }[])
   | null = null;
 /** Held before a listing's save answers, so a test can keep a write in flight. */
 let saveDelay: ((listingId: number) => Promise<void>) | null = null;
@@ -771,6 +777,61 @@ describe("tags are added, never replaced", () => {
     await waitFor(() => expect(savedUpdates()).not.toBeNull());
     // 101 already had "gift", so only 102 changed at all.
     expect(savedUpdates()).toEqual([{ listingId: 102, patch: { tags: ["poster", "gift"] } }]);
+  });
+
+  /**
+   * A saved row used to show the patch the screen had just sent, so a tag
+   * list Etsy stored differently — as it did while lists went out as repeated
+   * params and Etsy kept only the last — was displayed as saved anyway.
+   */
+  test("a saved row shows the tags Etsy confirmed, not the ones sent", async () => {
+    saveResults = (updates) =>
+      updates.map((u) => ({ listingId: u.listingId, ok: true, confirmed: { tags: ["handmade"] } }));
+    await renderEditor([detail(101, { tags: ["gift", "mug"] })]);
+    openField("Tags", "Listings");
+    fireEvent.change(applyAllField("Tags"), { target: { value: "handmade" } });
+    fireEvent.click(applyButton());
+    expect(inRow(101).getByRole("button", { name: "Remove gift" })).toBeInTheDocument();
+
+    fireEvent.click(syncButton());
+    await waitFor(() => expect(syncButton()).toHaveTextContent(/^Sync updates$/));
+
+    // Etsy kept only "handmade", so that is what the row reads — the two tags
+    // the save asked to keep are gone from the screen as well.
+    expect(inRow(101).getByRole("button", { name: "Remove handmade" })).toBeInTheDocument();
+    expect(inRow(101).queryByRole("button", { name: "Remove gift" })).not.toBeInTheDocument();
+    expect(inRow(101).queryByRole("button", { name: "Remove mug" })).not.toBeInTheDocument();
+  });
+
+  test("the next edit builds on the confirmed list, not the sent one", async () => {
+    saveResults = (updates) =>
+      updates.map((u) => ({ listingId: u.listingId, ok: true, confirmed: { tags: ["gift"] } }));
+    await renderEditor([detail(101, { tags: ["gift", "mug"] })]);
+    openField("Tags", "Listings");
+    fireEvent.change(applyAllField("Tags"), { target: { value: "handmade" } });
+    fireEvent.click(applyButton());
+    fireEvent.click(syncButton());
+    await waitFor(() => expect(syncButton()).toHaveTextContent(/^Sync updates$/));
+
+    fireEvent.change(applyAllField("Tags"), { target: { value: "cotton" } });
+    fireEvent.click(applyButton());
+    fireEvent.click(syncButton());
+    await waitFor(() => expect(allSaves()).toHaveLength(2));
+    // "mug" is gone for good — the second save builds on Etsy's ["gift"].
+    expect(allSaves()[1]).toEqual([{ listingId: 101, patch: { tags: ["gift", "cotton"] } }]);
+  });
+
+  test("a row keeps its sent values when the response confirms nothing", async () => {
+    saveResults = (updates) => updates.map((u) => ({ listingId: u.listingId, ok: true }));
+    await renderEditor([detail(101, { tags: ["gift"] })]);
+    openField("Tags", "Listings");
+    fireEvent.change(applyAllField("Tags"), { target: { value: "handmade" } });
+    fireEvent.click(applyButton());
+    fireEvent.click(syncButton());
+    await waitFor(() => expect(syncButton()).toHaveTextContent(/^Sync updates$/));
+
+    expect(inRow(101).getByRole("button", { name: "Remove gift" })).toBeInTheDocument();
+    expect(inRow(101).getByRole("button", { name: "Remove handmade" })).toBeInTheDocument();
   });
 
   test("materials are added the same way", async () => {
