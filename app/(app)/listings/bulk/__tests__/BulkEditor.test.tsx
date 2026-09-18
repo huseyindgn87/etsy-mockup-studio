@@ -1433,6 +1433,16 @@ describe("scheduling the pending edits", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Schedule edits" }));
   }
 
+  /** The date and time the picker is holding — what the job must be stored for. */
+  async function pickedTime() {
+    fireEvent.click(screen.getByRole("button", { name: "Schedule" }));
+    const dialog = await screen.findByRole("dialog");
+    const date = (within(dialog).getByLabelText("Date") as HTMLInputElement).value;
+    const time = (within(dialog).getByLabelText("Time") as HTMLInputElement).value;
+    fireEvent.click(within(dialog).getByRole("button", { name: "Schedule edits" }));
+    return { date, time };
+  }
+
   test("Schedule is offered only once something has changed", async () => {
     await renderEditor();
     expect(screen.getByRole("button", { name: "Schedule" })).toBeDisabled();
@@ -1502,6 +1512,39 @@ describe("scheduling the pending edits", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("File storage (R2) isn't set up yet.");
     expect(scheduleCalls()).toHaveLength(0);
+  });
+
+  test("an unticked row is left out — one job entry per ticked listing, at the chosen time", async () => {
+    await renderEditor();
+    openField("Title", "Listings");
+    fireEvent.change(rowField("Title", 101), { target: { value: "First" } });
+    fireEvent.change(rowField("Title", 102), { target: { value: "Second" } });
+    fireEvent.click(screen.getByLabelText("Include Listing 101 in the save"));
+
+    const { date, time } = await pickedTime();
+
+    await waitFor(() => expect(scheduleCalls()).toHaveLength(1));
+    expect(scheduleCalls()[0]).toMatchObject({
+      kind: "bulk_edit",
+      date,
+      time,
+      updates: [{ listingId: 102, title: "Listing 102", patch: { title: "Second" } }],
+    });
+    expect(await screen.findByText(/Scheduled 1 listing for/)).toBeInTheDocument();
+  });
+
+  test("nothing is sent to Etsy at scheduling time", async () => {
+    await renderEditor();
+    openField("Title", "Listings");
+    fireEvent.change(rowField("Title", 101), { target: { value: "First" } });
+    const before = fetchMock.mock.calls.length;
+
+    await scheduleNow();
+    await waitFor(() => expect(scheduleCalls()).toHaveLength(1));
+
+    const during = fetchMock.mock.calls.slice(before).map(([url]) => url as string);
+    expect(during.every((url) => url.startsWith("/api/schedule"))).toBe(true);
+    expect(allSaves()).toHaveLength(0);
   });
 
   test("once scheduled, the screen holds nothing unsaved", async () => {

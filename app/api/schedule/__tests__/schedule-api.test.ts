@@ -540,6 +540,21 @@ describe("scheduling a bulk edit", () => {
     });
   });
 
+  test("one entry per listing, at the chosen instant, without calling Etsy", async () => {
+    const network = vi.spyOn(globalThis, "fetch");
+    const { status, body: created } = await create(bulkBody());
+    expect(status).toBe(201);
+
+    const row = db.scheduled.get(created.scheduledListing.id)!;
+    expect(row.kind).toBe("bulk_edit");
+    expect(row.status).toBe("pending");
+    expect(row.scheduledAt.toISOString()).toBe("2026-09-20T14:30:00.000Z");
+    expect(row.timezone).toBe("UTC");
+    expect((row.bulkEdit as { updates: { listingId: number }[] }).updates.map((u) => u.listingId)).toEqual([101, 102]);
+    expect(network).not.toHaveBeenCalled();
+    network.mockRestore();
+  });
+
   test("it shows on the calendar, and can be cancelled", async () => {
     const { body: created } = await create(bulkBody());
     const items = await listRange(FORTNIGHT.from, FORTNIGHT.to);
