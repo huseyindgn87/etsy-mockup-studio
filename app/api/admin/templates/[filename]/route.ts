@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { isCurrentUserAdmin } from "@/lib/auth/admin";
 import { saveTemplate } from "@/lib/mockup/template-store";
 
 export const runtime = "nodejs";
@@ -19,6 +20,10 @@ interface Body {
  * maintainer's own template library, not per-shop data.
  */
 export async function PUT(request: Request, { params }: { params: Promise<{ filename: string }> }) {
+  if (!(await isCurrentUserAdmin())) {
+    return NextResponse.json({ error: "Not found." }, { status: 404 });
+  }
+
   const { filename } = await params;
 
   let body: Body;

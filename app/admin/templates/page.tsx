@@ -1,3 +1,5 @@
+import { notFound } from "next/navigation";
+import { isCurrentUserAdmin } from "@/lib/auth/admin";
 import { listTemplates } from "@/lib/mockup/template-store";
 import TemplatesAdmin from "./TemplatesAdmin";
 
@@ -13,6 +15,8 @@ export const dynamic = "force-dynamic";
  * instead of an unhandled server exception (this app has no error.tsx).
  */
 export default async function AdminTemplatesPage() {
+  if (!(await isCurrentUserAdmin())) notFound();
+
   let templates: Awaited<ReturnType<typeof listTemplates>> = [];
   let loadError: string | null = null;
   try {
