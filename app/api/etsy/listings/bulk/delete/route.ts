@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { deleteEtsyListings } from "@/lib/etsy/bulk-apply";
 import { MAX_BULK_UPDATES } from "@/lib/etsy/bulk-edit";
+import { etsyBudgetError, withEtsyContext } from "@/lib/etsy/client";
 import { parseListingIds, resolveListingScope } from "@/lib/etsy/listing-scope";
 import { listStoredListingsByIds, markStoredListingsRemoved } from "@/lib/etsy/listing-store";
 
@@ -48,7 +49,9 @@ export async function POST(request: Request) {
     .filter((id) => !ownedIds.includes(id))
     .map((listingId) => ({ listingId, ok: false as const, error: "Listing not found." }));
 
-  const deleted = await deleteEtsyListings(ownedIds);
+  const limited = await etsyBudgetError("background");
+  if (limited) return NextResponse.json({ error: limited.message, retryAt: limited.retryAt.toISOString() }, { status: 429 });
+  const deleted = await withEtsyContext({ userId, priority: "background" }, () => deleteEtsyListings(ownedIds));
   await markStoredListingsRemoved(
     userId,
     shopId,

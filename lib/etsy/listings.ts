@@ -1,6 +1,7 @@
-import { etsyFetch } from "@/lib/etsy/auth";
+import { etsyApiKeyHeader, etsyFetch } from "@/lib/etsy/auth";
+import { EtsyApiError, etsyRequest } from "@/lib/etsy/client";
 import { TtlCache } from "@/lib/etsy/cache";
-import { ETSY_ENDPOINTS, getEtsyConfig } from "@/lib/etsy/config";
+import { ETSY_ENDPOINTS } from "@/lib/etsy/config";
 
 /**
  * Read helpers for the connected user's Etsy shop listings (API v3).
@@ -55,16 +56,7 @@ export interface ShopListingsPage {
   listings: EtsyListing[];
 }
 
-export class EtsyApiError extends Error {
-  constructor(
-    message: string,
-    readonly status: number,
-    readonly body?: unknown,
-  ) {
-    super(message);
-    this.name = "EtsyApiError";
-  }
-}
+export { EtsyApiError, EtsyLimitError } from "@/lib/etsy/client";
 
 /** How much of a non-JSON (or shapeless) error body to keep in the thrown message. */
 const ERROR_BODY_PREVIEW_LENGTH = 500;
@@ -210,22 +202,18 @@ export interface ShopInfo {
  * (confirming which shop a freshly-minted token set belongs to).
  */
 export async function fetchShopInfoForToken(accessToken: string): Promise<ShopInfo> {
-  const { clientId, sharedSecret } = getEtsyConfig();
   const headers = {
     Authorization: `Bearer ${accessToken}`,
-    "x-api-key": sharedSecret ? `${clientId}:${sharedSecret}` : clientId,
+    "x-api-key": etsyApiKeyHeader(),
   };
 
-  const meRes = await fetch(`${ETSY_ENDPOINTS.apiBase}/users/me`, { headers, cache: "no-store" });
+  const meRes = await etsyRequest(`${ETSY_ENDPOINTS.apiBase}/users/me`, { headers });
   const me = (await readEtsyResponse(meRes, "GET /users/me")) as EtsyMeResponse;
   if (!me.shop_id) {
     throw new EtsyApiError("This Etsy account is not linked to a shop yet.", 404);
   }
 
-  const shopRes = await fetch(`${ETSY_ENDPOINTS.apiBase}/shops/${me.shop_id}`, {
-    headers,
-    cache: "no-store",
-  });
+  const shopRes = await etsyRequest(`${ETSY_ENDPOINTS.apiBase}/shops/${me.shop_id}`, { headers });
   const shop = (await readEtsyResponse(shopRes, "GET /shops/:id")) as EtsyShopResponse & {
     icon_url_fullxfull?: string;
   };

@@ -14,6 +14,7 @@
 
 import type { ScheduledListing } from "@prisma/client";
 import { withEtsyAccessToken } from "@/lib/etsy/auth";
+import { withEtsyContext } from "@/lib/etsy/client";
 import { activateListing, createDraftListing, updateVariationImages } from "@/lib/etsy/listing-create";
 import { uploadListingImage } from "@/lib/etsy/listing-images";
 import { refreshSession } from "@/lib/etsy/oauth";
@@ -29,9 +30,9 @@ export async function withShopAccessToken<T>(userId: string, shopId: string, fn:
   if (!refreshToken) {
     throw new Error("This Etsy shop is no longer connected. Reconnect it, then reschedule the listing.");
   }
-  const tokens = await refreshSession(refreshToken);
+  const tokens = await withEtsyContext({ userId }, () => refreshSession(refreshToken));
   await updateConnectionRefreshToken(userId, shopId, tokens.refreshToken);
-  return withEtsyAccessToken(tokens.accessToken, fn);
+  return withEtsyAccessToken(tokens.accessToken, fn, { userId, priority: "background" });
 }
 
 const message = (err: unknown) => (err instanceof Error ? err.message : "failed");

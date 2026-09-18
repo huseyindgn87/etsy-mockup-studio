@@ -9,10 +9,12 @@
  * works without credentials.
  */
 
+import { ETSY_API_ORIGIN } from "./client";
+
 export const ETSY_ENDPOINTS = {
   authorize: "https://www.etsy.com/oauth/connect",
-  token: "https://api.etsy.com/v3/public/oauth/token",
-  apiBase: "https://api.etsy.com/v3/application",
+  token: `${ETSY_API_ORIGIN}/v3/public/oauth/token`,
+  apiBase: `${ETSY_API_ORIGIN}/v3/application`,
 } as const;
 
 /** Default scopes for a mockup / listing workflow. Override with ETSY_SCOPES. */

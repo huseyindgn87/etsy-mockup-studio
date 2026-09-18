@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 import { NextResponse, type NextRequest } from "next/server";
 import { auth } from "@/auth";
 import { getEtsySession, sessionCookieOptions } from "@/lib/etsy/auth";
+import { assertEtsyBudget, withEtsyContext } from "@/lib/etsy/client";
 import { getEtsyConfig } from "@/lib/etsy/config";
 import { syncShopListings, type RefreshProgressEvent } from "@/lib/etsy/listing-sync";
 import { refreshSession } from "@/lib/etsy/oauth";
@@ -87,7 +88,10 @@ export async function POST(request: NextRequest) {
     async start(controller) {
       const emit = (event: RefreshProgressEvent) => controller.enqueue(encodeEvent(event));
       try {
-        const result = await syncShopListings(userId, activeShopId, emit);
+        const result = await withEtsyContext({ userId, priority: "background" }, async () => {
+          await assertEtsyBudget();
+          return syncShopListings(userId, activeShopId, emit);
+        });
         await markShopSynced(userId, activeShopId);
         emit({ type: "done", ...result });
       } catch (err) {

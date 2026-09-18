@@ -111,6 +111,24 @@ model AuthThrottle {
   @@map("auth_throttles")
 }
 
+/// The Etsy API key's rate-limit state, shared by every user and every
+/// server instance (lib/etsy/client.ts). One row, id "global": the limits and
+/// remaining daily quota Etsy last reported, the current one-second window's
+/// request count, and a pause every instance honours after a 429.
+model EtsyRateLimit {
+  id             String    @id
+  perSecondLimit Int?
+  perDayLimit    Int?
+  remainingToday Int?
+  observedAt     DateTime?
+  windowStartMs  BigInt    @default(0)
+  windowCount    Int       @default(0)
+  pausedUntil    DateTime?
+  updatedAt      DateTime  @updatedAt
+
+  @@map("etsy_rate_limit")
+}
+
 /// Auth.js Prisma adapter model — linked-account storage for non-credentials
 /// providers. Unused today (Credentials is the only provider) but required
 /// by the adapter's schema contract, and here for when a social provider is

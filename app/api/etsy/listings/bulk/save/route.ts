@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { applyBulkUpdates, type BulkResult } from "@/lib/etsy/bulk-apply";
 import { parseBulkUpdates } from "@/lib/etsy/bulk-edit";
+import { etsyBudgetError, withEtsyContext } from "@/lib/etsy/client";
 import { resolveListingScope } from "@/lib/etsy/listing-scope";
 import { applyStoredListingPatch, listStoredListingsByIds } from "@/lib/etsy/listing-store";
 
@@ -46,7 +47,11 @@ export async function POST(request: Request) {
     .filter((u) => !ownedIds.has(u.listingId))
     .map((u) => ({ listingId: u.listingId, ok: false as const, error: "Listing not found." }));
 
-  const written = await applyBulkUpdates(Number(shopId), toWrite);
+  const limited = await etsyBudgetError("background");
+  if (limited) return NextResponse.json({ error: limited.message, retryAt: limited.retryAt.toISOString() }, { status: 429 });
+  const written = await withEtsyContext({ userId, priority: "background" }, () =>
+    applyBulkUpdates(Number(shopId), toWrite),
+  );
 
   // Mirror what actually landed into the cached rows the listings table reads.
   // A partial save landed everything but the variation photos. Listing-side

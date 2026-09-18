@@ -1,3 +1,4 @@
+import { etsyRequest } from "./client";
 import { ETSY_ENDPOINTS, getEtsyConfig } from "./config";
 import type { EtsyTokenSet } from "./session";
 
@@ -50,12 +51,15 @@ function toSession(token: EtsyTokenResponse): EtsyTokenSet {
 async function postToken(
   body: Record<string, string>,
 ): Promise<EtsyTokenResponse> {
-  const res = await fetch(ETSY_ENDPOINTS.token, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams(body).toString(),
-    cache: "no-store",
-  });
+  const res = await etsyRequest(
+    ETSY_ENDPOINTS.token,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(body).toString(),
+    },
+    { priority: "critical" },
+  );
 
   const text = await res.text();
   if (!res.ok) {

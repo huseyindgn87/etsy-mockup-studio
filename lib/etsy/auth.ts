@@ -1,5 +1,5 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import { cookies } from "next/headers";
+import { currentEtsyContext, etsyRequest, withEtsyContext, type EtsyCallContext } from "./client";
 import { getEtsyConfig, ETSY_ENDPOINTS } from "./config";
 import { refreshSession } from "./oauth";
 import {
@@ -59,99 +59,51 @@ export function sessionCookieOptions() {
  * (Route Handlers, Server Actions). Returns null when not connected.
  */
 export async function getAccessToken(): Promise<string | null> {
+  return (await getSessionAccessToken())?.accessToken ?? null;
+}
+
+async function getSessionAccessToken(): Promise<{ accessToken: string; ownerUserId: string } | null> {
   const current = await getEtsySession();
   if (!current) return null;
 
-  if (Date.now() < current.expiresAt) return current.accessToken;
+  if (Date.now() < current.expiresAt) return { accessToken: current.accessToken, ownerUserId: current.ownerUserId };
 
   const { sessionSecret } = getEtsyConfig();
   const store = await cookies();
   const refreshed = await refreshSession(current.refreshToken);
   const session: EtsySession = { ...refreshed, ownerUserId: current.ownerUserId };
   store.set(SESSION_COOKIE, sealSession(session, sessionSecret), sessionCookieOptions());
-  return session.accessToken;
+  return { accessToken: session.accessToken, ownerUserId: current.ownerUserId };
 }
-
-/** Retries on 429 before giving up and returning the (still 429) response to the caller. */
-export const MAX_RATE_LIMIT_RETRIES = 3;
-
-/** Etsy's own quota headers (present on every response) — logged so we can see how close we are before it happens again. */
-const RATE_LIMIT_HEADERS = [
-  "x-limit-per-second",
-  "x-remaining-this-second",
-  "x-limit-per-day",
-  "x-remaining-today",
-] as const;
-
-function logRateLimitHeaders(url: string, res: Response): void {
-  const parts: string[] = [];
-  for (const name of RATE_LIMIT_HEADERS) {
-    const value = res.headers.get(name);
-    if (value != null) parts.push(`${name}=${value}`);
-  }
-  if (parts.length) console.log(`[etsy] quota ${url} ${parts.join(" ")}`);
-}
-
-/** Delay before the next retry: Etsy's own `Retry-After` when it sends one, else exponential backoff with jitter. */
-export function rateLimitDelayMs(res: Response, attempt: number): number {
-  const retryAfter = res.headers.get("retry-after");
-  if (retryAfter) {
-    const seconds = Number(retryAfter);
-    if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
-    const at = Date.parse(retryAfter);
-    if (!Number.isNaN(at)) return Math.max(0, at - Date.now());
-  }
-  return 500 * 2 ** attempt + Math.floor(Math.random() * 250);
-}
-
-/**
- * `fetch`, retrying up to {@link MAX_RATE_LIMIT_RETRIES} times on a 429
- * response (honoring `Retry-After` when Etsy sends one) and logging the
- * remaining-quota headers on every attempt. Exported standalone so the
- * retry/backoff logic is unit-testable without the cookie/session plumbing
- * `etsyFetch` needs.
- */
-export async function fetchWithRateLimitRetry(
-  url: string,
-  init: RequestInit,
-  wait: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-): Promise<Response> {
-  for (let attempt = 0; ; attempt++) {
-    const res = await fetch(url, init);
-    logRateLimitHeaders(url, res);
-    if (res.status !== 429 || attempt >= MAX_RATE_LIMIT_RETRIES) return res;
-    const delay = rateLimitDelayMs(res, attempt);
-    console.warn(
-      `[etsy] 429 from ${url} — retrying in ${Math.round(delay)}ms (attempt ${attempt + 1}/${MAX_RATE_LIMIT_RETRIES})`,
-    );
-    await wait(delay);
-  }
-}
-
-/**
- * An access token pinned to the current async call chain by
- * {@link withEtsyAccessToken} — for work with no browser request behind it
- * (the scheduled-listing runner), where there's no session cookie to read.
- */
-const pinnedAccessToken = new AsyncLocalStorage<string>();
 
 /** Runs `fn` with every `etsyFetch` inside it authenticated by `accessToken` instead of the session cookie. */
-export function withEtsyAccessToken<T>(accessToken: string, fn: () => Promise<T>): Promise<T> {
-  return pinnedAccessToken.run(accessToken, fn);
+export function withEtsyAccessToken<T>(
+  accessToken: string,
+  fn: () => Promise<T>,
+  context: Omit<EtsyCallContext, "accessToken"> = {},
+): Promise<T> {
+  return withEtsyContext({ ...context, accessToken }, fn);
 }
 
 /**
  * Call the Etsy API v3 with the stored token (or the one pinned by
- * {@link withEtsyAccessToken}). Adds the required `Authorization` and
- * `x-api-key` headers, retries on rate-limiting, and throws if not connected.
+ * {@link withEtsyAccessToken}), through the shared rate-limited client
+ * (lib/etsy/client.ts). Adds the required `Authorization` and `x-api-key`
+ * headers, and throws if not connected.
  */
 export async function etsyFetch(
   path: string,
   init: RequestInit = {},
 ): Promise<Response> {
-  const accessToken = pinnedAccessToken.getStore() ?? (await getAccessToken());
+  const context = currentEtsyContext();
+  let accessToken = context.accessToken ?? null;
+  let userId = context.userId ?? null;
+  if (!accessToken) {
+    const session = await getSessionAccessToken();
+    accessToken = session?.accessToken ?? null;
+    userId ??= session?.ownerUserId ?? null;
+  }
   if (!accessToken) throw new Error("Not connected to Etsy.");
-  const { clientId, sharedSecret } = getEtsyConfig();
 
   const url = path.startsWith("http")
     ? path
@@ -159,12 +111,16 @@ export async function etsyFetch(
 
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${accessToken}`);
-  // This app's key is rejected as a bare keystring ("Shared secret is required
-  // in x-api-key header"); Etsy wants `keystring:shared_secret` here.
-  headers.set(
-    "x-api-key",
-    sharedSecret ? `${clientId}:${sharedSecret}` : clientId,
-  );
+  headers.set("x-api-key", etsyApiKeyHeader());
 
-  return fetchWithRateLimitRetry(url, { ...init, headers, cache: "no-store" });
+  return etsyRequest(url, { ...init, headers }, { userId });
+}
+
+/**
+ * This app's key is rejected as a bare keystring ("Shared secret is required
+ * in x-api-key header"); Etsy wants `keystring:shared_secret` here.
+ */
+export function etsyApiKeyHeader(): string {
+  const { clientId, sharedSecret } = getEtsyConfig();
+  return sharedSecret ? `${clientId}:${sharedSecret}` : clientId;
 }

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { etsyBudgetError } from "@/lib/etsy/client";
 import { applyScheduledBulkEdit } from "@/lib/scheduling/bulk-publisher";
 import { publishScheduledListing } from "@/lib/scheduling/publisher";
 import { runDueScheduledListings } from "@/lib/scheduling/runner";
@@ -29,6 +30,13 @@ export async function POST(request: Request) {
   }
   if (!isAuthorizedRunnerRequest(request.headers.get("authorization"), secret)) {
     return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
+  }
+
+  // Due jobs stay pending rather than spend their attempts on a spent budget.
+  const limited = await etsyBudgetError("background");
+  if (limited) {
+    console.warn(`[schedule] not running: ${limited.message}`);
+    return NextResponse.json({ error: limited.message, retryAt: limited.retryAt.toISOString() }, { status: 429 });
   }
 
   const result = await runDueScheduledListings({
