@@ -20,7 +20,8 @@ vi.mock("@/lib/etsy/oauth", () => ({
 }));
 vi.mock("@/lib/etsy/shop-connections", () => ({
   getDecryptedRefreshToken: vi.fn(async () => "stored-refresh"),
-  updateConnectionRefreshToken: vi.fn(async () => {}),
+  getCachedAccessToken: vi.fn(async () => null),
+  saveConnectionTokens: vi.fn(async () => {}),
 }));
 vi.mock("@/lib/etsy/listing-create", () => ({
   createDraftListing: vi.fn(async () => {
@@ -74,7 +75,7 @@ import {
 } from "@/lib/etsy/listing-create";
 import { uploadListingImage } from "@/lib/etsy/listing-images";
 import { refreshSession } from "@/lib/etsy/oauth";
-import { getDecryptedRefreshToken, updateConnectionRefreshToken } from "@/lib/etsy/shop-connections";
+import { getCachedAccessToken, getDecryptedRefreshToken, saveConnectionTokens } from "@/lib/etsy/shop-connections";
 import { getObject } from "@/lib/storage/r2";
 import { publishScheduledListing } from "../publisher";
 import { SET_A, storedImages, VALID_SPEC } from "./fixtures";
@@ -179,8 +180,16 @@ describe("publishScheduledListing", () => {
     await publishScheduledListing(makeRow(), hooks());
     expect(getDecryptedRefreshToken).toHaveBeenCalledWith("alice", "111");
     expect(refreshSession).toHaveBeenCalledWith("stored-refresh");
-    expect(updateConnectionRefreshToken).toHaveBeenCalledWith("alice", "111", "rotated-refresh");
+    expect(saveConnectionTokens).toHaveBeenCalledWith("alice", "111", expect.objectContaining({ refreshToken: "rotated-refresh", accessToken: "fresh-access" }));
     expect(vi.mocked(withEtsyAccessToken).mock.calls[0][0]).toBe("fresh-access");
+  });
+
+  test("reuses a cached access token instead of spending a token call", async () => {
+    storeImages(3);
+    vi.mocked(getCachedAccessToken).mockResolvedValueOnce("cached-access");
+    await publishScheduledListing(makeRow(), hooks());
+    expect(refreshSession).not.toHaveBeenCalled();
+    expect(vi.mocked(withEtsyAccessToken).mock.calls[0][0]).toBe("cached-access");
   });
 
   test("a retry reuses the listing a previous attempt created instead of creating another", async () => {

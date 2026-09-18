@@ -71,6 +71,8 @@ import { slotIdFor } from "@/app/components/listing-media/photo-order";
 import type { ScheduledBulkUpdate, ScheduledImageEntry, ScheduledVideoEntry } from "@/lib/scheduling/bulk-job";
 import type { ScheduleTimeInput } from "@/lib/scheduling/types";
 import { syncListingPatch, writeWithTimeout } from "@/lib/etsy/sync-request";
+import { JobStatus } from "@/app/components/jobs/JobStatus";
+import type { JobView } from "@/lib/jobs/types";
 import VariationRowBlock, { VARIATION_FIELDS } from "./VariationRowBlock";
 import VirtualListingRows from "./VirtualListingRows";
 import { INPUT_CLS, attributeChoicesAcross, labelFor, propertyForListing } from "./helpers";
@@ -249,6 +251,8 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
   const [saving, setSaving] = useState(false);
   /** How many of the run's listings have been written, while a Sync is going. */
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  /** The queued save job of the listing being synced, while it hasn't finished. */
+  const [jobStatus, setJobStatus] = useState<JobView | null>(null);
   const [results, setResults] = useState<SaveResult[] | null>(null);
   /** The date/time picker, open while the user is scheduling this edit. */
   const [scheduling, setScheduling] = useState(false);
@@ -902,7 +906,8 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
       return { listingId: id, ok: false, error: `Variations: ${invalid.message}` };
     }
 
-    const result = await syncListingPatch(id, update.patch);
+    const result = await syncListingPatch(id, update.patch, setJobStatus);
+    setJobStatus(null);
     if (!result.ok && !result.partial) return notSynced ? mergeResults(id, [result, notSynced]) : result;
 
     // Saved values are now the listing's own values — clear the edits that
@@ -1339,6 +1344,7 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
             Syncing {progress.done} of {progress.total}…
           </p>
         )}
+        {progress && jobStatus && <JobStatus job={jobStatus} className="mt-1" />}
 
         {scheduling && (
           <ScheduleDialog

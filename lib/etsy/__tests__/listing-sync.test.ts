@@ -212,6 +212,8 @@ interface FakeShop {
   listings: RawListing[];
   inventory: Map<number, unknown>;
   failInventory?: (listingId: number) => Response | null;
+  /** Listings whose page carries their inventory (Etsy's `includes=Inventory`). */
+  includeInventory?: (listingId: number) => boolean;
 }
 
 const inventoryCalls: number[] = [];
@@ -233,12 +235,15 @@ function serve(shop: FakeShop, clock?: { now: () => number }, callTimes?: number
     const m = new RegExp(`^/shops/${shop.shopId}/listings\\?(.+)$`).exec(path);
     if (!m) throw new Error(`unexpected path: ${path}`);
     const params = new URLSearchParams(m[1]);
-    expect(params.get("includes")).toBe("Images,Videos,Personalization");
+    expect(params.get("includes")).toBe("Images,Videos,Personalization,Inventory");
     const state = params.get("state")!;
     const offset = Number(params.get("offset"));
     pageCalls.push({ state, offset });
     const all = shop.listings.filter((l) => l.state === state);
-    return json({ count: all.length, results: all.slice(offset, offset + 100) });
+    const page = all.slice(offset, offset + 100).map((l) =>
+      shop.includeInventory?.(l.listing_id) ? { ...l, inventory: shop.inventory.get(l.listing_id) } : l,
+    );
+    return json({ count: all.length, results: page });
   });
 }
 
@@ -292,6 +297,39 @@ beforeEach(() => {
   for (const key of Object.keys(db) as (keyof typeof db)[]) db[key] = [];
   inventoryCalls.length = 0;
   pageCalls.length = 0;
+});
+
+describe("inventory comes with the listing pages", () => {
+  test("a shop of 250 listings costs its page calls only — no call per listing", async () => {
+    const listings = Array.from({ length: 250 }, (_, i) => RAW_LISTING(i + 1, `L${i + 1}`));
+    serve({
+      shopId: 120,
+      listings,
+      inventory: new Map(listings.map((l) => [l.listing_id, SIMPLE_INVENTORY()])),
+      includeInventory: () => true,
+    });
+    const result = await syncShopListings("u1", "120", () => {}, fakeClock());
+
+    expect(result.total).toBe(250);
+    expect(inventoryCalls).toEqual([]);
+    // active: 3 pages; draft, inactive, sold_out, expired: 1 each.
+    expect(pageCalls).toHaveLength(7);
+    expect(db.listingInventoryProduct.length).toBe(250);
+    expect(db.listing.every((r) => r.syncedAt != null)).toBe(true);
+  });
+
+  test("only a listing whose page lacks its inventory is fetched on its own", async () => {
+    const listings = Array.from({ length: 5 }, (_, i) => RAW_LISTING(i + 1, `L${i + 1}`));
+    serve({
+      shopId: 121,
+      listings,
+      inventory: new Map(listings.map((l) => [l.listing_id, SIMPLE_INVENTORY()])),
+      includeInventory: (id) => id !== 3,
+    });
+    await syncShopListings("u1", "121", () => {}, fakeClock());
+    expect(inventoryCalls).toEqual([3]);
+    expect(db.listingInventoryProduct.length).toBe(5);
+  });
 });
 
 describe("syncShopListings pagination", () => {

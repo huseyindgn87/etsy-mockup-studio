@@ -51,6 +51,7 @@ import { isEmptyPatch } from "@/lib/etsy/bulk-edit";
 import { editorSyncPatch } from "@/lib/etsy/editor-sync";
 import { describeUnsynced, mediaChanges, mediaStateFromEtsy, mediaStateFromGrid } from "@/lib/etsy/listing-changes";
 import { syncListingPatch, writeWithTimeout } from "@/lib/etsy/sync-request";
+import { describeJob } from "@/lib/jobs/describe";
 import ListingForm, {
   EMPTY_LISTING_FORM,
   type ListingFormValue,
@@ -1734,7 +1735,9 @@ function MockupsPageInner() {
       }
 
       if (!isEmptyPatch(diff.patch)) {
-        const result = await syncListingPatch(publishId, diff.patch);
+        const result = await syncListingPatch(publishId, diff.patch, (job) =>
+          toast.show({ id: "editor-sync", kind: job.status === "failed" ? "error" : "info", message: `Sync to Etsy: ${describeJob(job)}` }),
+        );
         if (!result.ok) throw new Error(result.partial ? `Partly saved. ${result.error ?? ""}`.trim() : result.error);
       }
       toast.show({ id: "editor-sync", kind: "success", message: "Synced to Etsy." });

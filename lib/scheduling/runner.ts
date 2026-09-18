@@ -124,7 +124,7 @@ async function recordFailure(
 }
 
 /** Returns rows stuck in "publishing" past {@link STALE_PUBLISHING_MS} to the retry cycle. */
-async function recoverStalePublishing(now: Date): Promise<number> {
+export async function recoverStalePublishing(now: Date): Promise<number> {
   const cutoff = new Date(now.getTime() - STALE_PUBLISHING_MS);
   const stale = await prisma.scheduledListing.findMany({
     where: { status: "publishing", updatedAt: { lt: cutoff } },
@@ -179,32 +179,63 @@ function bulkFileKeys(bulkEdit: unknown): string[] {
   return Array.isArray(updates) ? bulkEditFileKeys({ updates } as never) : [];
 }
 
+/** Listings a scheduled bulk edit writes between two saves of its results. */
+export const BULK_EDIT_CHUNK = 10;
+
+/** How a queued job drives one row (lib/jobs/handlers/scheduled-listing.ts). */
+export interface ProcessOptions {
+  /** Listings this attempt already tried — not tried again in it. */
+  attempted?: number[];
+  /** Called after each chunk with every listing this attempt has tried. */
+  onChunk?: (attempted: number[]) => Promise<void>;
+  /** True when the caller wants the row back: it stays "publishing" and the result is "continue". */
+  shouldYield?: () => boolean;
+}
+
 /**
  * Applies a claimed bulk edit. Every listing gets its own result, recorded on
- * the row whatever happens, so a listing Etsy refuses never stops the others
- * and never hides the ones that landed. A run that didn't finish every
- * listing counts as a failed attempt — the retry writes only the listings
- * still outstanding, the way a second Sync updates retries only the failures.
+ * the row after every chunk of {@link BULK_EDIT_CHUNK}, so a listing Etsy
+ * refuses never stops the others, a run that dies mid-way resumes after the
+ * last saved chunk, and the ones that landed are never written again. A run
+ * that didn't finish every listing counts as a failed attempt — the retry
+ * writes only the listings still outstanding, the way a second Sync updates
+ * retries only the failures.
  */
-async function processBulkEdit(row: ScheduledListing, deps: RunnerDeps, now: Date) {
+async function processBulkEdit(row: ScheduledListing, deps: RunnerDeps, now: Date, options: ProcessOptions = {}) {
   const parsed = parseScheduledBulkEdit(row.bulkEdit, { userId: row.userId, setId: row.renderSetId });
   if (!parsed.ok) {
     return recordFailure(row, `The scheduled edits are invalid: ${parsed.error}`, row.etsyListingId, now);
   }
 
-  const previous = coerceBulkResults(row.results);
-  const pending = pendingBulkUpdates(parsed.job, previous);
-  let applied: ScheduledBulkResult[];
-  try {
-    applied = pending.length === 0 ? [] : await deps.applyBulkEdit(row, pending);
-  } catch (err) {
-    console.error(`[schedule] applying scheduled bulk edit ${row.id} failed`, err);
-    return recordFailure(row, errorMessage(err), row.etsyListingId, now);
-  }
-
   // One entry per listing the job covers, newest outcome winning.
   const byListing = new Map<number, ScheduledBulkResult>();
-  for (const result of [...previous, ...applied]) byListing.set(result.listingId, result);
+  for (const result of coerceBulkResults(row.results)) byListing.set(result.listingId, result);
+  const attempted = new Set(options.attempted ?? []);
+
+  for (;;) {
+    const chunk = pendingBulkUpdates(parsed.job, [...byListing.values()])
+      .filter((u) => !attempted.has(u.listingId))
+      .slice(0, BULK_EDIT_CHUNK);
+    if (chunk.length === 0) break;
+    if (attempted.size > 0 && options.shouldYield?.()) return "continue" as const;
+
+    let applied: ScheduledBulkResult[];
+    try {
+      applied = await deps.applyBulkEdit(row, chunk);
+    } catch (err) {
+      console.error(`[schedule] applying scheduled bulk edit ${row.id} failed`, err);
+      return recordFailure(row, errorMessage(err), row.etsyListingId, now);
+    }
+    for (const result of applied) byListing.set(result.listingId, result);
+    for (const update of chunk) attempted.add(update.listingId);
+    const { count } = await prisma.scheduledListing.updateMany({
+      where: { id: row.id, status: "publishing" },
+      data: { results: [...byListing.values()] as unknown as Prisma.InputJsonValue },
+    });
+    if (count === 0) return "lost" as const;
+    await options.onChunk?.([...attempted]);
+  }
+
   const results = parsed.job.updates.map(
     (update) =>
       byListing.get(update.listingId) ?? {
@@ -237,8 +268,8 @@ async function processBulkEdit(row: ScheduledListing, deps: RunnerDeps, now: Dat
   return "published" as const;
 }
 
-async function processClaimed(row: ScheduledListing, deps: RunnerDeps, now: Date) {
-  if (row.kind === "bulk_edit") return processBulkEdit(row, deps, now);
+async function processClaimed(row: ScheduledListing, deps: RunnerDeps, now: Date, options: ProcessOptions = {}) {
+  if (row.kind === "bulk_edit") return processBulkEdit(row, deps, now, options);
   let etsyListingId = row.etsyListingId;
   try {
     etsyListingId = await deps.publish(row, {
@@ -262,6 +293,36 @@ async function processClaimed(row: ScheduledListing, deps: RunnerDeps, now: Date
   if (count === 0) return "lost" as const;
   await cleanupPublishedImages(row, deps.deleteImages);
   return "published" as const;
+}
+
+/**
+ * One row, for the job queue: claims it (unless the job already holds it —
+ * a resumed job whose worker died after the claim) and processes it.
+ * "skipped" when the row isn't this caller's to process.
+ */
+export async function processScheduledListing(
+  id: string,
+  deps: RunnerDeps,
+  options: ProcessOptions & { alreadyClaimed?: boolean; onClaimed?: () => Promise<void> } = {},
+) {
+  const now = deps.now();
+  if (!options.alreadyClaimed) {
+    if (!(await claimScheduledListing(id, now))) return "skipped" as const;
+    await options.onClaimed?.();
+  }
+  const row = await prisma.scheduledListing.findUnique({ where: { id } });
+  if (!row || row.status !== "publishing") return "skipped" as const;
+  return processClaimed(row, deps, now, options);
+}
+
+/** Due rows, oldest first — what the worker queues. */
+export async function findDueScheduledListings(now: Date, limit = 100) {
+  return prisma.scheduledListing.findMany({
+    where: dueWhere(now),
+    orderBy: { scheduledAt: "asc" },
+    take: limit,
+    select: { id: true, userId: true, shopId: true },
+  });
 }
 
 /** One pass over everything due now. Safe to run concurrently with itself. */

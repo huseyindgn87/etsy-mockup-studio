@@ -4,10 +4,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
-/**
- * `POST /api/schedule/run` — the older name of `POST /api/jobs/run`: due
- * scheduled listings are queued as jobs and published by the job worker.
- */
+/** The Etsy job worker — see lib/jobs/worker-route.ts. */
 export async function POST(request: Request) {
   return handleWorkerRequest(request);
 }

@@ -1,5 +1,7 @@
 import type { BulkListingPatch } from "@/lib/etsy/bulk-edit";
 import type { SaveResult } from "@/app/(app)/listings/bulk/types";
+import { waitForJob } from "@/lib/jobs/client";
+import type { JobView } from "@/lib/jobs/types";
 
 /** How long one listing's write may take before the run gives up on it. */
 export const WRITE_TIMEOUT_MS = 30_000;
@@ -24,8 +26,17 @@ export async function writeWithTimeout(url: string, init: RequestInit): Promise<
   }
 }
 
-/** One listing's field patch through `POST /api/etsy/listings/bulk/save` — what Sync updates sends per listing. */
-export async function syncListingPatch(listingId: number, patch: BulkListingPatch): Promise<SaveResult> {
+/**
+ * One listing's field patch through `POST /api/etsy/listings/bulk/save` — what
+ * Sync updates sends per listing. The save is a queued job: when it isn't
+ * finished by the time the request answers (202), its status is followed —
+ * each one reported to `onStatus` — until it's done or has failed.
+ */
+export async function syncListingPatch(
+  listingId: number,
+  patch: BulkListingPatch,
+  onStatus?: (job: JobView) => void,
+): Promise<SaveResult> {
   try {
     const res = await writeWithTimeout("/api/etsy/listings/bulk/save", {
       method: "POST",
@@ -36,8 +47,15 @@ export async function syncListingPatch(listingId: number, patch: BulkListingPatc
       const body = (await res.json().catch(() => null)) as { error?: string } | null;
       throw new Error(body?.error || `Request failed (${res.status})`);
     }
-    const saved = ((await res.json()) as { results: SaveResult[] }).results;
-    return saved.find((r) => r.listingId === listingId) ?? { listingId, ok: false, error: "Etsy said nothing." };
+    const body = (await res.json()) as { results?: SaveResult[]; jobId?: string; job?: JobView };
+    let saved = body.results;
+    if (res.status === 202 && body.jobId) {
+      if (body.job) onStatus?.(body.job);
+      const job = await waitForJob(body.jobId, { onStatus });
+      if (job.status === "failed") throw new Error(job.error || "Saving failed.");
+      saved = (job.result as { results?: SaveResult[] } | null)?.results;
+    }
+    return saved?.find((r) => r.listingId === listingId) ?? { listingId, ok: false, error: "Etsy said nothing." };
   } catch (err) {
     return { listingId, ok: false, error: err instanceof Error ? err.message : "Save failed." };
   }

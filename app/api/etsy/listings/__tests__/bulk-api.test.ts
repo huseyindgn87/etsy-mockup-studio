@@ -16,6 +16,12 @@ const { authMock, shopMock, etsyFetchMock } = vi.hoisted(() => ({
 
 vi.mock("@/auth", () => ({ auth: authMock }));
 vi.mock("@/lib/etsy/auth", () => ({ etsyFetch: etsyFetchMock }));
+// Saves run as queued jobs authenticated from the stored connection; here the
+// transport is the recording `etsyFetch` either way.
+vi.mock("@/lib/scheduling/publisher", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  withShopAccessToken: (_userId: string, _shopId: string, fn: () => Promise<unknown>) => fn(),
+}));
 // A getter, not `prisma: fakePrisma`: this factory runs while the route
 // imports below are still being resolved, which is before `fakePrisma`'s own
 // initialiser has run. Deferring the read to first use sidesteps that without
@@ -58,6 +64,12 @@ const db = {
 
 /** Only the handful of operations the bulk routes actually use. */
 const fakePrisma = {
+  get etsyJob() {
+    return fakeJobModels.etsyJob;
+  },
+  get etsyJobTurn() {
+    return fakeJobModels.etsyJobTurn;
+  },
   listing: {
     async findMany({ where }: { where: Record<string, unknown> }) {
       const ids = (where.listingId as { in?: string[] } | undefined)?.in;
@@ -105,6 +117,7 @@ import { POST as SAVE } from "@/app/api/etsy/listings/bulk/save/route";
 import { POST as DELETE_LISTINGS } from "@/app/api/etsy/listings/bulk/delete/route";
 import { POST as COPY } from "@/app/api/etsy/listings/bulk/copy/route";
 import { NextRequest } from "next/server";
+import { fakeJobModels, resetJobsDb } from "@/lib/jobs/__tests__/fake-jobs-prisma";
 
 /**
  * Real Etsy shop ids are numeric strings (`fetchShopInfoForToken` stores
@@ -193,6 +206,7 @@ const VARIATION_INVENTORY = {
 };
 
 beforeEach(async () => {
+  resetJobsDb();
   db.listings = [];
   db.drafts = [];
   db.nextDraftId = 1;

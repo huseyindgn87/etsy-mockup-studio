@@ -23,6 +23,11 @@
  *   but only for methods that are safe to repeat — a POST that may have
  *   reached Etsy could create a second listing. Other 4xx are never retried.
  *
+ * - **Read cache.** A successful GET of slow-changing shop data (sections,
+ *   profiles, policies, taxonomy) or of a listings batch is kept for a few
+ *   seconds per access token ({@link READ_CACHE_RULES}); any write with that
+ *   token drops its entries. `withEtsyContext({ readCacheMs: 0 })` bypasses it.
+ *
  * Every throttle, retry and give-up is logged with the endpoint and user id.
  */
 
@@ -64,15 +69,24 @@ function formatRetryAt(at: Date): string {
 
 /**
  * - `critical`: token exchange/refresh — never refused for the daily budget.
- * - `interactive`: a user waiting on one screen (the default).
- * - `background`: listing sync, bulk writes, the scheduled runner — stopped first.
+ * - `interactive`: a user waiting on it — a screen, a save, a sync they clicked (the default).
+ * - `scheduled`: scheduled publishes and scheduled bulk edits.
+ * - `background`: work nobody is waiting on — stopped first.
  */
-export type EtsyPriority = "critical" | "interactive" | "background";
+export type EtsyPriority = "critical" | "interactive" | "scheduled" | "background";
 
 /** Per-second limit assumed until Etsy's first response says otherwise (Etsy's default is 10). */
 export const DEFAULT_PER_SECOND = 5;
-/** Share of the daily limit that must remain for a request of each priority to start. */
-export const DAILY_RESERVE: Record<EtsyPriority, number> = { critical: 0, interactive: 0.02, background: 0.1 };
+/**
+ * Share of the daily limit that must remain for a request of each priority to
+ * start. What background and scheduled work leave is kept for users.
+ */
+export const DAILY_RESERVE: Record<EtsyPriority, number> = {
+  critical: 0,
+  interactive: 0.02,
+  scheduled: 0.1,
+  background: 0.2,
+};
 /**
  * Etsy's daily quota is a rolling window with no reset time in its headers.
  * A low reading is trusted for this long; after it, requests are let through
@@ -278,6 +292,64 @@ export function createPrismaRateLimitStore(): EtsyRateLimitStore {
   };
 }
 
+/** GET paths whose successful responses are reused for a while (ms), per access token. */
+export const READ_CACHE_RULES: { pattern: RegExp; ttlMs: number }[] = [
+  { pattern: /^\/v3\/application\/shops\/\d+$/, ttlMs: 60_000 },
+  { pattern: /^\/v3\/application\/shops\/\d+\/(sections|shipping-profiles|return-policies|readiness-state-definitions|production-partners)$/, ttlMs: 60_000 },
+  { pattern: /^\/v3\/application\/seller-taxonomy\//, ttlMs: 10 * 60_000 },
+  { pattern: /^\/v3\/application\/listings\/batch$/, ttlMs: 15_000 },
+];
+const READ_CACHE_MAX_ENTRIES = 500;
+
+interface CachedRead {
+  expiresAtMs: number;
+  authKey: string;
+  status: number;
+  statusText: string;
+  headers: [string, string][];
+  body: ArrayBuffer;
+}
+
+const readCache = new Map<string, CachedRead>();
+
+function readCacheTtl(url: string, override: number | undefined): number {
+  if (override !== undefined) return override;
+  let path: string;
+  try {
+    path = new URL(url).pathname;
+  } catch {
+    return 0;
+  }
+  return READ_CACHE_RULES.find((r) => r.pattern.test(path))?.ttlMs ?? 0;
+}
+
+function authKeyOf(init: RequestInit): string {
+  return new Headers(init.headers).get("authorization") ?? "";
+}
+
+function forgetReads(authKey: string): void {
+  for (const [key, entry] of readCache) if (entry.authKey === authKey) readCache.delete(key);
+}
+
+function cachedResponse(entry: CachedRead): Response {
+  return new Response(entry.body.slice(0), { status: entry.status, statusText: entry.statusText, headers: entry.headers });
+}
+
+async function rememberRead(key: string, authKey: string, ttlMs: number, res: Response): Promise<Response> {
+  const body = await res.arrayBuffer();
+  const entry: CachedRead = {
+    expiresAtMs: clock.now() + ttlMs,
+    authKey,
+    status: res.status,
+    statusText: res.statusText,
+    headers: [...res.headers.entries()],
+    body,
+  };
+  if (readCache.size >= READ_CACHE_MAX_ENTRIES) readCache.delete(readCache.keys().next().value as string);
+  readCache.set(key, entry);
+  return cachedResponse(entry);
+}
+
 const clock = {
   now: () => Date.now(),
   sleep: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
@@ -293,6 +365,7 @@ export function configureEtsyClient(
 ): void {
   if (overrides === "reset") {
     store = null;
+    readCache.clear();
     clock.now = () => Date.now();
     clock.sleep = (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms));
     clock.random = () => Math.random();
@@ -307,8 +380,10 @@ export function configureEtsyClient(
 export interface EtsyCallContext {
   userId?: string | null;
   priority?: EtsyPriority;
-  /** Authenticates `etsyFetch` without a session cookie (the scheduled runner). */
+  /** Authenticates `etsyFetch` without a session cookie (the job worker). */
   accessToken?: string;
+  /** Overrides {@link READ_CACHE_RULES} for GETs inside this context; 0 always asks Etsy. */
+  readCacheMs?: number;
 }
 
 const callContext = new AsyncLocalStorage<EtsyCallContext>();
@@ -357,6 +432,11 @@ export async function assertEtsyBudget(priority: EtsyPriority = currentEtsyConte
     log("warn", "give-up", "(new work)", currentEtsyContext().userId, `daily budget: ${state.remainingToday}/${state.perDayLimit} left, ${priority} work refused until ${retryAt.toISOString()}`);
     throw new EtsyLimitError(retryAt);
   }
+}
+
+/** When new work of `priority` may start, or `null` if the daily budget allows it now. Quiet — for polling (the job worker). */
+export async function etsyBudgetRetryAt(priority: EtsyPriority): Promise<Date | null> {
+  return dailyBudgetRetryAt(await getStore().read(), priority, clock.now());
 }
 
 /** {@link assertEtsyBudget} as a value: the error to report, or `null` when the work may start. */
@@ -436,6 +516,16 @@ export async function etsyRequest(url: string, init: RequestInit = {}, options: 
   const ep = endpoint(method, url);
   const retrySafe = RETRY_SAFE_METHODS.has(method);
 
+  const authKey = authKeyOf(init);
+  const cacheTtl = method === "GET" ? readCacheTtl(url, ctx.readCacheMs) : 0;
+  const cacheKey = `${authKey}\n${url}`;
+  if (method !== "GET") forgetReads(authKey);
+  else if (cacheTtl > 0) {
+    const hit = readCache.get(cacheKey);
+    if (hit && hit.expiresAtMs > clock.now()) return cachedResponse(hit);
+    readCache.delete(cacheKey);
+  }
+
   let rateLimitRetries = 0;
   let serverRetries = 0;
   for (;;) {
@@ -483,6 +573,7 @@ export async function etsyRequest(url: string, init: RequestInit = {}, options: 
     if (res.status >= 500) {
       log("error", "give-up", ep, userId, retrySafe ? `${res.status} after ${serverRetries} retries` : `${res.status} (a ${method} isn't retried)`);
     }
+    if (cacheTtl > 0 && res.ok) return rememberRead(cacheKey, authKey, cacheTtl, res);
     return res;
   }
 }

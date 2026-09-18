@@ -12,7 +12,8 @@
     "postinstall": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:studio": "prisma studio",
-    "schedule:run": "node scripts/run-scheduled-listings.mjs",
+    "schedule:run": "node scripts/run-jobs.mjs",
+    "jobs:run": "node scripts/run-jobs.mjs",
     "templates:import": "vite-node --config vitest.config.ts scripts/import-templates-to-r2.ts --"
   },
   "dependencies": {

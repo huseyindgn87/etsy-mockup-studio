@@ -1,16 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-vi.mock("@/lib/scheduling/runner", () => ({
-  runDueScheduledListings: vi.fn(async () => ({ published: ["s1"], retrying: [], failed: [], skipped: 0, recovered: 0 })),
+vi.mock("@/lib/jobs/run", () => ({
+  runJobsPass: vi.fn(async () => ({ scheduledQueued: 1, slices: [{ jobId: "j1", userId: "u1", type: "scheduled_listing", outcome: "done" }], heldForBudget: [] })),
 }));
-vi.mock("@/lib/scheduling/publisher", () => ({ publishScheduledListing: vi.fn() }));
-vi.mock("@/lib/scheduling/bulk-publisher", () => ({ applyScheduledBulkEdit: vi.fn() }));
-vi.mock("@/lib/storage/r2", () => ({ deleteObjects: vi.fn() }));
 
+import { POST as JOBS_POST } from "@/app/api/jobs/run/route";
 import { POST } from "@/app/api/schedule/run/route";
 import { decideRouteAccess } from "@/lib/auth/route-guard";
+import { runJobsPass } from "@/lib/jobs/run";
 import { isAuthorizedRunnerRequest } from "@/lib/scheduling/runner-auth";
-import { runDueScheduledListings } from "@/lib/scheduling/runner";
+
 
 const SECRET = "s".repeat(40);
 
@@ -24,7 +23,7 @@ function call(authorization?: string) {
 }
 
 beforeEach(() => {
-  vi.mocked(runDueScheduledListings).mockClear();
+  vi.mocked(runJobsPass).mockClear();
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
@@ -38,7 +37,7 @@ describe("POST /api/schedule/run", () => {
     expect((await call(`Bearer ${SECRET}`)).status).toBe(503);
     vi.stubEnv("SCHEDULE_RUNNER_SECRET", "short");
     expect((await call("Bearer short")).status).toBe(503);
-    expect(runDueScheduledListings).not.toHaveBeenCalled();
+    expect(runJobsPass).not.toHaveBeenCalled();
   });
 
   test("401 without the right shared secret", async () => {
@@ -46,15 +45,27 @@ describe("POST /api/schedule/run", () => {
     expect((await call()).status).toBe(401);
     expect((await call("Bearer wrong")).status).toBe(401);
     expect((await call(SECRET)).status).toBe(401);
-    expect(runDueScheduledListings).not.toHaveBeenCalled();
+    expect(runJobsPass).not.toHaveBeenCalled();
   });
 
-  test("runs the runner and returns its result with the right secret", async () => {
+  test("runs a job-worker pass (which queues due schedules) and returns its result with the right secret", async () => {
     vi.stubEnv("SCHEDULE_RUNNER_SECRET", SECRET);
     const res = await call(`Bearer ${SECRET}`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ published: ["s1"], retrying: [], failed: [], skipped: 0, recovered: 0 });
-    expect(runDueScheduledListings).toHaveBeenCalledTimes(1);
+    expect(await res.json()).toMatchObject({ scheduledQueued: 1, slices: [{ jobId: "j1", outcome: "done" }] });
+    expect(runJobsPass).toHaveBeenCalledTimes(1);
+  });
+
+  test("POST /api/jobs/run is the same worker behind the same secret", async () => {
+    vi.stubEnv("SCHEDULE_RUNNER_SECRET", SECRET);
+    const unauthorized = await JOBS_POST(new Request("http://localhost/api/jobs/run", { method: "POST" }));
+    expect(unauthorized.status).toBe(401);
+    const res = await JOBS_POST(
+      new Request("http://localhost/api/jobs/run", { method: "POST", headers: { Authorization: `Bearer ${SECRET}` } }),
+    );
+    expect(res.status).toBe(200);
+    expect(decideRouteAccess("/api/jobs/run", false)).toEqual({ action: "next" });
+    expect(decideRouteAccess("/api/jobs/abc", false)).toEqual({ action: "unauthorized" });
   });
 
   test("the secret comparison is exact", () => {

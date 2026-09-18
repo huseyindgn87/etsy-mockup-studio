@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { waitForJob } from "@/lib/jobs/client";
+import { describeJob } from "@/lib/jobs/describe";
 
 export interface ShopConnectionSummary {
   shopId: string;
@@ -15,7 +17,11 @@ type RefreshProgressEvent =
   | { type: "status"; stage?: SyncStage; message: string }
   | { type: "progress"; stage: SyncStage; fetched: number; total: number; message: string }
   | { type: "done"; inserted: number; updated: number; removed: number; total: number; resumed: number }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  /** The refresh job is waiting for a worker — `message` says its place in line. */
+  | { type: "queued"; jobId: string; position: number | null; message: string }
+  /** The stream stopped following a job that's still going; poll it by id. */
+  | { type: "pending"; jobId: string; message: string };
 
 const STAGES: { id: SyncStage; label: string }[] = [
   { id: "listings", label: "Fetching listings" },
@@ -28,7 +34,9 @@ type Phase = "refreshing" | "error";
 /**
  * Blocking modal for the listings page's on-demand "Refresh" action. Opens
  * already refreshing the active shop, reads `POST /api/etsy/shops/refresh`'s
- * newline-delimited JSON progress stream to drive the live status line, and
+ * newline-delimited JSON progress stream to drive the live status line (the
+ * refresh is a queued job: while it waits, the line says its place in line;
+ * a stream that ends before the job does is followed by polling), and
  * closes itself (calling `onRefreshed`) the moment a `"done"` event arrives.
  * The bottom "Switch shop" dropdown re-runs the same stream against a
  * different shop without leaving the modal.
@@ -82,9 +90,15 @@ export default function RefreshShopModal({
     setTotal(0);
     setErrorMessage(null);
 
+    let pendingJobId: string | null = null;
     const applyEvent = (event: RefreshProgressEvent) => {
       if (runIdRef.current !== runId) return; // superseded by a newer run (shop switch / retry)
-      if (event.type === "status") {
+      if (event.type === "queued") {
+        setStatusMessage(event.message);
+      } else if (event.type === "pending") {
+        pendingJobId = event.jobId;
+        setStatusMessage(event.message);
+      } else if (event.type === "status") {
         if (event.stage) setStage(event.stage);
         setStatusMessage(event.message);
       } else if (event.type === "progress") {
@@ -124,6 +138,22 @@ export default function RefreshShopModal({
         }
       }
       if (buffer.trim()) applyEvent(JSON.parse(buffer) as RefreshProgressEvent);
+
+      if (pendingJobId) {
+        const job = await waitForJob(pendingJobId, {
+          onStatus: (j) => {
+            if (runIdRef.current !== runId) return;
+            setStatusMessage(describeJob(j));
+            if (j.progress?.done != null && j.progress.total != null) {
+              setFetched(j.progress.done);
+              setTotal(j.progress.total);
+            }
+          },
+        });
+        if (runIdRef.current !== runId) return;
+        if (job.status === "done") applyEvent({ type: "done", inserted: 0, updated: 0, removed: 0, total: 0, resumed: 0 });
+        else applyEvent({ type: "error", message: job.error || "Refresh failed." });
+      }
     } catch (err) {
       if (runIdRef.current !== runId) return;
       setPhase("error");

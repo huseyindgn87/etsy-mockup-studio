@@ -64,6 +64,7 @@ model User {
   shopConnections               EtsyShopConnection[]
   listings                      Listing[]
   scheduledListings             ScheduledListing[]
+  etsyJobs                      EtsyJob[]
   listingImages                 ListingImage[]
   listingVideos                 ListingVideo[]
   listingInventoryProperties    ListingInventoryProperty[]
@@ -295,6 +296,11 @@ model EtsyShopConnection {
   shopName        String
   shopIconUrl     String?
   refreshToken    String
+  /// The last access token minted from `refreshToken` for background work
+  /// (lib/jobs/shop-token.ts), encrypted like it, and when it expires — so
+  /// every job doesn't spend a token call.
+  accessToken          String?
+  accessTokenExpiresAt DateTime?
   /// Set after the first successful listings sync for this shop; null means
   /// the listings page has never been populated from Etsy yet.
   lastSyncedAt    DateTime?
@@ -574,4 +580,54 @@ model ScheduledListing {
   @@index([userId, shopId, scheduledAt])
   @@index([draftId])
   @@map("scheduled_listings")
+}
+
+/// One unit of Etsy work (lib/jobs/). Queued by a route or the worker,
+/// claimed by `POST /api/jobs/run` (or inline by the route that queued it).
+/// Survives restarts: a claimed job holds a lease (`lockedUntil`) that the
+/// worker extends at every checkpoint; a job whose lease ran out is claimed
+/// again and resumes from `progress`.
+model EtsyJob {
+  id          String    @id @default(cuid())
+  userId      String
+  shopId      String?
+  /// "bulk_save" | "listing_refresh" | "scheduled_listing"
+  type        String
+  payload     Json
+  /// 0 = a user is waiting on it, 1 = scheduled, 2 = background.
+  priority    Int
+  /// "queued" | "running" | "done" | "failed" | "retrying"
+  status      String    @default("queued")
+  /// Failed attempts (a crash counts as one).
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(3)
+  /// Checkpointed by the handler — what's already done, so a resume skips it.
+  progress    Json?
+  result      Json?
+  error       String?
+  /// Set while the job is unfinished, cleared when it ends — at most one
+  /// unfinished job per key (e.g. one refresh per shop).
+  activeKey   String?   @unique
+  runAfter    DateTime  @default(now())
+  lockToken   String?
+  lockedUntil DateTime?
+  startedAt   DateTime?
+  finishedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status, priority, runAfter])
+  @@index([userId, createdAt])
+  @@map("etsy_jobs")
+}
+
+/// When the worker last started a slice of this user's work — the
+/// round-robin order between users.
+model EtsyJobTurn {
+  userId       String   @id
+  lastServedAt DateTime
+
+  @@map("etsy_job_turns")
 }

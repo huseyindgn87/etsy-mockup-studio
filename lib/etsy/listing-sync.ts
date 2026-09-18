@@ -8,13 +8,14 @@
  * Strictly read-only against Etsy: every request here is a GET.
  *
  * Three stages, each reported to `onEvent`:
- *  1. `listings`  — every page of every state, with images, videos and
- *     personalization as associations. Nothing is written until all pages
+ *  1. `listings`  — every page of every state (100 listings per call), with
+ *     images, videos, personalization and inventory as associations. Nothing is written until all pages
  *     have arrived, so a failure here leaves the database untouched.
  *  2. `saving`    — listing fields, images and videos upserted in batches;
  *     rows no longer on Etsy are marked removed.
- *  3. `inventory` — one `getListingInventory` call per listing, rate-limited,
- *     written in batches. A listing's `syncedAt` is set in the same
+ *  3. `inventory` — each listing's grid, written in batches: from its page
+ *     when Etsy included it there (no extra call), else one rate-limited
+ *     `getListingInventory` call. A listing's `syncedAt` is set in the same
  *     transaction as its grid, so it marks "fully synced".
  *
  * Resuming: a listing whose `syncedAt` is newer than the shop connection's
@@ -95,7 +96,7 @@ function listingsPagePath(shopId: string, state: EtsyListingState, offset: numbe
     offset: String(offset),
     sort_on: "created",
     sort_order: "desc",
-    includes: "Images,Videos,Personalization",
+    includes: "Images,Videos,Personalization,Inventory",
   });
   return `/shops/${shopId}/listings?${query.toString()}`;
 }
@@ -143,6 +144,7 @@ interface SyncRawListing extends EtsyRawListing {
     }[];
   };
   skus?: string[];
+  inventory?: RawInventory | null;
   last_modified_timestamp?: number;
   updated_timestamp?: number;
 }
@@ -205,6 +207,8 @@ export interface SyncedListingRow {
   videos: SyncedVideo[];
   /** Etsy's last-modified time in ms — used to decide resumes, not stored. */
   lastModifiedMs: number | null;
+  /** The inventory the listings page included, saving a call per listing; absent when it didn't. */
+  inventory?: RawInventory;
 }
 
 const positiveOrNull = (value: unknown): number | null =>
@@ -292,6 +296,7 @@ function mapRawListing(raw: SyncRawListing): SyncedListingRow {
     images: mapImages(raw.images),
     videos: mapVideos(raw.videos),
     lastModifiedMs: typeof modified === "number" ? modified * 1000 : null,
+    ...(raw.inventory && Array.isArray(raw.inventory.products) ? { inventory: raw.inventory } : {}),
   };
 }
 
@@ -721,9 +726,10 @@ export async function syncShopListings(
       .slice(i, i + INVENTORY_BATCH_SIZE)
       .map((row) => ({ row, rowId: rowIdByListingId.get(row.listingId) as string }));
     const inventories = await fetchInventoryBatch(
-      batch.map((b) => b.row.listingId),
+      batch.filter((b) => !b.row.inventory).map((b) => b.row.listingId),
       limit,
     );
+    for (const b of batch) if (b.row.inventory) inventories.set(b.row.listingId, b.row.inventory);
     const syncedAt = new Date(now());
     await prisma.$transaction(
       (tx) => saveInventoryBatch(tx, userId, shopId, batch, inventories, syncedAt),

@@ -1,20 +1,30 @@
 import { NextResponse } from "next/server";
-import { applyBulkUpdates, type BulkResult } from "@/lib/etsy/bulk-apply";
 import { parseBulkUpdates } from "@/lib/etsy/bulk-edit";
-import { etsyBudgetError, withEtsyContext } from "@/lib/etsy/client";
+import { etsyBudgetError } from "@/lib/etsy/client";
 import { resolveListingScope } from "@/lib/etsy/listing-scope";
-import { applyStoredListingPatch, listStoredListingsByIds } from "@/lib/etsy/listing-store";
+import { listStoredListingsByIds } from "@/lib/etsy/listing-store";
+import type { BulkSaveJobResult } from "@/lib/jobs/handlers/bulk-save";
+import { enqueueJob, toJobView } from "@/lib/jobs/queue";
+import { helpUntilFinished } from "@/lib/jobs/run";
+import { JOB_PRIORITY } from "@/lib/jobs/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
+
+/** How long the request works the queue before answering with the job's status instead. */
+export const INLINE_WAIT_MS = 20_000;
 
 /**
  * `POST /api/etsy/listings/bulk/save` — `{ updates: [{ listingId, patch }] }`.
  *
- * The one place bulk editing writes to Etsy. Each listing gets only the
- * fields targeted at it, as a PATCH, so untouched fields keep their values;
- * one listing failing doesn't stop the rest, and the response says per
- * listing what happened — `partial` when only its variation photos failed.
+ * The one place bulk editing writes to Etsy — as a `bulk_save` job
+ * (lib/jobs/handlers/bulk-save.ts) at the priority of a user who's waiting.
+ * The request then works the queue for up to {@link INLINE_WAIT_MS}: if the
+ * job finishes, the answer is its per-listing results (`partial` when only a
+ * listing's variation photos failed); if not — others are ahead, or Etsy's
+ * limit is holding it — the answer is 202 with `{ jobId, job }` to poll at
+ * `GET /api/jobs/[id]?help=1`.
  *
  * Every id is checked against the caller's own cached listings first, so a
  * listing belonging to another user (or to another of this user's shops) is
@@ -47,32 +57,35 @@ export async function POST(request: Request) {
     .filter((u) => !ownedIds.has(u.listingId))
     .map((u) => ({ listingId: u.listingId, ok: false as const, error: "Listing not found." }));
 
-  const limited = await etsyBudgetError("background");
+  const limited = await etsyBudgetError("interactive");
   if (limited) return NextResponse.json({ error: limited.message, retryAt: limited.retryAt.toISOString() }, { status: 429 });
-  const written = await withEtsyContext({ userId, priority: "background" }, () =>
-    applyBulkUpdates(Number(shopId), toWrite),
-  );
 
-  // Mirror what actually landed into the cached rows the listings table reads.
-  // A partial save landed everything but the variation photos. Listing-side
-  // fields are taken from what Etsy confirmed rather than from the patch;
-  // price/quantity/SKU aren't in that response, so they still come from it.
-  for (const result of written) {
-    if (!result.ok && !result.partial) continue;
-    const patch = toWrite.find((u) => u.listingId === result.listingId)!.patch;
-    const confirmed = result.confirmed;
-    await applyStoredListingPatch(userId, shopId, result.listingId, {
-      ...patch,
-      ...(confirmed?.title !== undefined ? { title: confirmed.title } : {}),
-      ...(confirmed?.shopSectionId != null ? { shopSectionId: confirmed.shopSectionId } : {}),
-    });
-  }
+  const summarise = (written: BulkSaveJobResult["results"]) => {
+    const results: BulkSaveJobResult["results"] = [...written, ...notFound];
+    return {
+      results,
+      saved: results.filter((r) => r.ok).length,
+      partial: results.filter((r) => r.partial).length,
+      failed: results.filter((r) => !r.ok && !r.partial).length,
+    };
+  };
+  if (toWrite.length === 0) return NextResponse.json(summarise([]));
 
-  const results: BulkResult[] = [...written, ...notFound];
-  return NextResponse.json({
-    results,
-    saved: results.filter((r) => r.ok).length,
-    partial: results.filter((r) => r.partial).length,
-    failed: results.filter((r) => !r.ok && !r.partial).length,
+  const job = await enqueueJob({
+    userId,
+    shopId,
+    type: "bulk_save",
+    payload: { shopId, updates: toWrite },
+    priority: JOB_PRIORITY.interactive,
   });
+  const now = (await helpUntilFinished(job.id, INLINE_WAIT_MS)) ?? job;
+
+  if (now.status === "done") {
+    const result = now.result as unknown as BulkSaveJobResult;
+    return NextResponse.json({ jobId: now.id, ...summarise(result.results) });
+  }
+  if (now.status === "failed") {
+    return NextResponse.json({ jobId: now.id, error: now.error ?? "Saving failed." }, { status: 502 });
+  }
+  return NextResponse.json({ jobId: now.id, job: await toJobView(now) }, { status: 202 });
 }

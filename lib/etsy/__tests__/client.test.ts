@@ -249,7 +249,7 @@ describe("daily budget", () => {
   const low = (remainingToday: number, observedAtMs = T0) =>
     setup({ perDayLimit: 10_000, remainingToday, observedAtMs, perSecondLimit: 10 });
 
-  test("background work stops at 10% remaining; interactive work carries on", async () => {
+  test("background work stops at 20% remaining; interactive work carries on", async () => {
     low(900);
     fetchMock.mockResolvedValue(res(200));
     const err = await etsyRequest(URL_, {}, { priority: "background", userId: "u9" }).catch((e: unknown) => e);
@@ -258,6 +258,16 @@ describe("daily budget", () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledWith(expect.stringMatching(/give-up GET \/v3\/application\/shops\/1\/listings user=u9 daily budget/));
 
+    expect((await etsyRequest(URL_)).status).toBe(200);
+  });
+
+  test("scheduled work stops at 10%, so user work keeps the rest", async () => {
+    low(1500);
+    fetchMock.mockResolvedValue(res(200));
+    await expect(etsyRequest(URL_, {}, { priority: "background" })).rejects.toBeInstanceOf(EtsyLimitError);
+    expect((await etsyRequest(URL_, {}, { priority: "scheduled" })).status).toBe(200);
+    low(900);
+    await expect(etsyRequest(URL_, {}, { priority: "scheduled" })).rejects.toBeInstanceOf(EtsyLimitError);
     expect((await etsyRequest(URL_)).status).toBe(200);
   });
 
@@ -342,5 +352,42 @@ describe("every Etsy API call goes through lib/etsy/client.ts", () => {
 
   test("the scan saw the files it should", () => {
     expect(sources.map(rel)).toEqual(expect.arrayContaining([path.join("lib", "etsy", "auth.ts"), path.join("lib", "etsy", "oauth.ts")]));
+  });
+});
+
+describe("read cache", () => {
+  const SHOP = "https://api.etsy.com/v3/application/shops/1/shipping-profiles";
+  const auth = (token: string): RequestInit => ({ headers: { Authorization: `Bearer ${token}` } });
+
+  test("a shop's reference data is read once per window, per token", async () => {
+    setup({ perSecondLimit: 10 });
+    fetchMock.mockImplementation(async () => new Response(JSON.stringify({ count: 1 }), { status: 200 }));
+    expect(await (await etsyRequest(SHOP, auth("a"))).json()).toEqual({ count: 1 });
+    expect(await (await etsyRequest(SHOP, auth("a"))).json()).toEqual({ count: 1 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await etsyRequest(SHOP, auth("b"));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  test("a write with the same token drops what was cached; readCacheMs 0 always asks Etsy", async () => {
+    setup({ perSecondLimit: 10 });
+    fetchMock.mockImplementation(async () => new Response("{}", { status: 200 }));
+    await etsyRequest(SHOP, auth("a"));
+    await etsyRequest("https://api.etsy.com/v3/application/shops/1/listings/5", { ...auth("a"), method: "PATCH" });
+    await etsyRequest(SHOP, auth("a"));
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    await withEtsyContext({ readCacheMs: 0 }, () => etsyRequest(SHOP, auth("a")));
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  test("listing pages and failed responses are never cached", async () => {
+    setup({ perSecondLimit: 10 });
+    fetchMock.mockImplementation(async () => new Response("{}", { status: 404 }));
+    await etsyRequest(SHOP, auth("a"));
+    await etsyRequest(SHOP, auth("a"));
+    fetchMock.mockImplementation(async () => new Response("{}", { status: 200 }));
+    await etsyRequest(URL_, auth("a"));
+    await etsyRequest(URL_, auth("a"));
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 });

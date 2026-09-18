@@ -127,6 +127,43 @@ export async function updateConnectionRefreshToken(
   });
 }
 
+/**
+ * The access token last minted for background work on this connection, while
+ * it has more than a minute left; `null` otherwise.
+ */
+export async function getCachedAccessToken(userId: string, shopId: string, nowMs = Date.now()): Promise<string | null> {
+  const row = await prisma.etsyShopConnection.findUnique({
+    where: { userId_shopId: { userId, shopId } },
+    select: { accessToken: true, accessTokenExpiresAt: true },
+  });
+  if (!row?.accessToken || !row.accessTokenExpiresAt) return null;
+  if (row.accessTokenExpiresAt.getTime() - 60_000 <= nowMs) return null;
+  const { sessionSecret } = getEtsyConfig();
+  try {
+    return decryptToken(row.accessToken, sessionSecret);
+  } catch {
+    return null;
+  }
+}
+
+/** Stores a freshly minted token pair: the rotated refresh token and the access token for reuse. */
+export async function saveConnectionTokens(
+  userId: string,
+  shopId: string,
+  tokens: { accessToken: string; refreshToken: string; expiresAt: number },
+): Promise<void> {
+  const { sessionSecret } = getEtsyConfig();
+  await prisma.etsyShopConnection.update({
+    where: { userId_shopId: { userId, shopId } },
+    data: {
+      refreshToken: encryptToken(tokens.refreshToken, sessionSecret),
+      accessToken: encryptToken(tokens.accessToken, sessionSecret),
+      accessTokenExpiresAt: new Date(tokens.expiresAt),
+      lastConnectedAt: new Date(),
+    },
+  });
+}
+
 export async function markShopSynced(userId: string, shopId: string): Promise<void> {
   await prisma.etsyShopConnection.update({
     where: { userId_shopId: { userId, shopId } },

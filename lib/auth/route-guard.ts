@@ -17,6 +17,8 @@ const PUBLIC_EXACT = new Set([
   // `npm run schedule:run` — requires its own shared secret, see
   // app/api/schedule/run/route.ts.
   "/api/schedule/run",
+  // The Etsy job worker (lib/jobs/), same secret — app/api/jobs/run/route.ts.
+  "/api/jobs/run",
 ]);
 
 const AUTH_PAGES = new Set(["/login", "/register"]);

@@ -14,25 +14,34 @@
 
 import type { ScheduledListing } from "@prisma/client";
 import { withEtsyAccessToken } from "@/lib/etsy/auth";
-import { withEtsyContext } from "@/lib/etsy/client";
+import { currentEtsyContext, withEtsyContext } from "@/lib/etsy/client";
 import { activateListing, createDraftListing, updateVariationImages } from "@/lib/etsy/listing-create";
 import { uploadListingImage } from "@/lib/etsy/listing-images";
 import { refreshSession } from "@/lib/etsy/oauth";
 import { applyListingDetails, resolveDraftListingInput } from "@/lib/etsy/publish-listing";
-import { getDecryptedRefreshToken, updateConnectionRefreshToken } from "@/lib/etsy/shop-connections";
+import { getCachedAccessToken, getDecryptedRefreshToken, saveConnectionTokens } from "@/lib/etsy/shop-connections";
 import { getObject } from "@/lib/storage/r2";
 import { coerceScheduledImages, parseScheduledPublishSpec } from "./publish-spec";
 import type { PublishHooks } from "./runner";
 
-/** Runs `fn` authenticated as the user's stored connection to `shopId`, persisting Etsy's rotated refresh token. */
+/**
+ * Runs `fn` authenticated as the user's stored connection to `shopId`: the
+ * cached access token while it's valid, else one minted from the stored
+ * refresh token (persisting Etsy's rotated one). The Etsy priority is the
+ * surrounding context's — the job queue sets it — or background.
+ */
 export async function withShopAccessToken<T>(userId: string, shopId: string, fn: () => Promise<T>): Promise<T> {
+  const priority = currentEtsyContext().priority ?? "background";
+  const cached = await getCachedAccessToken(userId, shopId);
+  if (cached) return withEtsyAccessToken(cached, fn, { userId, priority });
+
   const refreshToken = await getDecryptedRefreshToken(userId, shopId);
   if (!refreshToken) {
-    throw new Error("This Etsy shop is no longer connected. Reconnect it, then reschedule the listing.");
+    throw new Error("This Etsy shop is no longer connected. Reconnect it, then try again.");
   }
   const tokens = await withEtsyContext({ userId }, () => refreshSession(refreshToken));
-  await updateConnectionRefreshToken(userId, shopId, tokens.refreshToken);
-  return withEtsyAccessToken(tokens.accessToken, fn, { userId, priority: "background" });
+  await saveConnectionTokens(userId, shopId, tokens);
+  return withEtsyAccessToken(tokens.accessToken, fn, { userId, priority });
 }
 
 const message = (err: unknown) => (err instanceof Error ? err.message : "failed");
