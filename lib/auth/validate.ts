@@ -19,12 +19,14 @@ export interface RegistrationInput {
   email?: unknown;
   password?: unknown;
   confirmPassword?: unknown;
+  acceptTerms?: unknown;
 }
 
 export type RegistrationError =
   | "invalid_email"
   | "weak_password"
-  | "password_mismatch";
+  | "password_mismatch"
+  | "terms_not_accepted";
 
 /** Field-level validation only. An already-registered email is never reported — see app/api/auth/register/route.ts. */
 export function validateRegistration(
@@ -37,6 +39,7 @@ export function validateRegistration(
   if (!isValidEmail(email)) return { ok: false, error: "invalid_email" };
   if (!isValidPassword(password)) return { ok: false, error: "weak_password" };
   if (password !== confirmPassword) return { ok: false, error: "password_mismatch" };
+  if (input.acceptTerms !== true) return { ok: false, error: "terms_not_accepted" };
   return { ok: true, email, password };
 }
 
@@ -44,4 +47,5 @@ export const REGISTRATION_ERROR_MESSAGES: Record<RegistrationError, string> = {
   invalid_email: "Enter a valid email address.",
   weak_password: `Password must be at least ${MIN_PASSWORD_LENGTH} characters.`,
   password_mismatch: "Passwords don't match.",
+  terms_not_accepted: "You must agree to the Terms and Privacy Policy.",
 };

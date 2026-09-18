@@ -27,6 +27,13 @@ describe("decideRouteAccess", () => {
     expect(decideRouteAccess("/register", false)).toEqual({ action: "next" });
   });
 
+  test("the legal pages are public, signed in or not", () => {
+    for (const path of ["/terms", "/privacy", "/refunds", "/cookies"]) {
+      expect(decideRouteAccess(path, false)).toEqual({ action: "next" });
+      expect(decideRouteAccess(path, true)).toEqual({ action: "next" });
+    }
+  });
+
   test("a signed-in visitor is bounced away from /login and /register", () => {
     expect(decideRouteAccess("/login", true)).toEqual({ action: "redirect", path: "/" });
     expect(decideRouteAccess("/register", true)).toEqual({ action: "redirect", path: "/" });

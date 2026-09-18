@@ -4,6 +4,7 @@ interface StoredUser {
   id: string;
   email: string;
   passwordHash: string;
+  termsAcceptedAt?: Date;
 }
 
 const users = new Map<string, StoredUser>();
@@ -14,8 +15,8 @@ vi.mock("@/lib/db/prisma", () => ({
     user: {
       findUnique: vi.fn(async ({ where }: { where: { email: string } }) => users.get(where.email) ?? null),
       create: vi.fn(
-        async ({ data }: { data: { email: string; passwordHash: string } }) => {
-          const user: StoredUser = { id: `u${nextId++}`, email: data.email, passwordHash: data.passwordHash };
+        async ({ data }: { data: { email: string; passwordHash: string; termsAcceptedAt?: Date } }) => {
+          const user: StoredUser = { id: `u${nextId++}`, ...data };
           users.set(data.email, user);
           return { id: user.id, email: user.email };
         },
@@ -43,13 +44,36 @@ beforeEach(() => {
 });
 
 describe("POST /api/auth/register", () => {
-  const valid = { email: "seller@example.com", password: "goodpassword", confirmPassword: "goodpassword" };
+  const valid = {
+    email: "seller@example.com",
+    password: "goodpassword",
+    confirmPassword: "goodpassword",
+    acceptTerms: true,
+  };
 
   test("creates an account and returns 201", async () => {
     const res = await POST(req(valid));
     expect(res.status).toBe(201);
     expect(await res.json()).toEqual({ ok: true });
     expect(users.get("seller@example.com")).toBeDefined();
+  });
+
+  test("stores when the Terms and Privacy Policy were accepted", async () => {
+    const before = Date.now();
+    await POST(req(valid));
+    const acceptedAt = users.get("seller@example.com")!.termsAcceptedAt;
+    expect(acceptedAt).toBeInstanceOf(Date);
+    expect(acceptedAt!.getTime()).toBeGreaterThanOrEqual(before);
+    expect(acceptedAt!.getTime()).toBeLessThanOrEqual(Date.now());
+  });
+
+  test("refuses a sign-up that hasn't ticked the Terms checkbox, creating nothing", async () => {
+    for (const acceptTerms of [false, undefined, "yes"]) {
+      const res = await POST(req({ ...valid, acceptTerms }));
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe("You must agree to the Terms and Privacy Policy.");
+    }
+    expect(users.size).toBe(0);
   });
 
   test("hashes the password — it is never stored in plain text", async () => {

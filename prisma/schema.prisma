@@ -49,6 +49,9 @@ model User {
   twoFactorSecret        String?
   twoFactorPendingSecret String?
   twoFactorLastUsedStep  Int?
+  /// When the Terms of Service and Privacy Policy were accepted at sign-up.
+  /// Null for accounts created before the checkbox existed.
+  termsAcceptedAt        DateTime?
   createdAt              DateTime  @default(now())
   updatedAt              DateTime  @updatedAt
 

@@ -1,3 +1,5 @@
+import { LEGAL_PATHS } from "@/lib/legal";
+
 /**
  * The route-protection decision proxy.ts acts on, pulled out as a pure
  * function so it's unit-testable without going through NextAuth's request
@@ -7,6 +9,7 @@
 const PUBLIC_EXACT = new Set([
   "/login",
   "/register",
+  ...LEGAL_PATHS,
   // An external cron endpoint guarded by its own bearer secret, not a
   // browser session — see app/api/drafts/sweep/route.ts.
   "/api/drafts/sweep",

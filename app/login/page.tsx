@@ -1,4 +1,5 @@
 import { Suspense } from "react";
+import SiteFooter from "@/app/components/SiteFooter";
 import { turnstileSiteKey } from "@/lib/auth/turnstile";
 import LoginForm from "./LoginForm";
 
@@ -7,10 +8,13 @@ export const dynamic = "force-dynamic";
 
 export default function LoginPage() {
   return (
-    <div className="bg-page-gradient flex min-h-screen flex-col items-center justify-center px-6 font-sans">
-      <Suspense fallback={null}>
-        <LoginForm turnstileSiteKey={turnstileSiteKey()} />
-      </Suspense>
+    <div className="bg-page-gradient flex min-h-screen flex-col font-sans">
+      <div className="flex flex-1 flex-col items-center justify-center px-6 py-10">
+        <Suspense fallback={null}>
+          <LoginForm turnstileSiteKey={turnstileSiteKey()} />
+        </Suspense>
+      </div>
+      <SiteFooter />
     </div>
   );
 }

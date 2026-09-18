@@ -31,7 +31,12 @@ describe("normalizeEmail", () => {
 });
 
 describe("validateRegistration", () => {
-  const base = { email: "seller@example.com", password: "goodpassword", confirmPassword: "goodpassword" };
+  const base = {
+    email: "seller@example.com",
+    password: "goodpassword",
+    confirmPassword: "goodpassword",
+    acceptTerms: true,
+  };
 
   test("accepts a valid registration", () => {
     const result = validateRegistration(base);
@@ -51,6 +56,12 @@ describe("validateRegistration", () => {
   test("rejects mismatched password confirmation", () => {
     const result = validateRegistration({ ...base, confirmPassword: "somethingElse123" });
     expect(result).toEqual({ ok: false, error: "password_mismatch" });
+  });
+
+  test("rejects a registration that hasn't accepted the Terms and Privacy Policy", () => {
+    expect(validateRegistration({ ...base, acceptTerms: false })).toEqual({ ok: false, error: "terms_not_accepted" });
+    expect(validateRegistration({ ...base, acceptTerms: "true" })).toEqual({ ok: false, error: "terms_not_accepted" });
+    expect(validateRegistration({ ...base, acceptTerms: undefined })).toEqual({ ok: false, error: "terms_not_accepted" });
   });
 
   test("rejects a non-string password", () => {
