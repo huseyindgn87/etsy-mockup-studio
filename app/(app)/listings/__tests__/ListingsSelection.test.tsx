@@ -209,16 +209,17 @@ describe("the toolbar", () => {
     expect(screen.queryByRole("button", { name: /^Delete$/ })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByLabelText("Select Listing 100"));
-    for (const name of ["Delete", "Export", "Copy", "Edit"]) {
+    for (const name of ["Delete", "Export", "Copy", "Bulk edit"]) {
       expect(screen.getByRole("button", { name })).toBeInTheDocument();
     }
   });
 
-  test("Edit carries the selection to the bulk screen", async () => {
+  test("Bulk edit carries the selection to the bulk screen", async () => {
     await renderPage();
     fireEvent.click(screen.getByLabelText("Select Listing 100"));
     fireEvent.click(screen.getByLabelText("Select Listing 102"));
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(screen.queryByRole("button", { name: "Edit" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Bulk edit" }));
     expect(pushMock).toHaveBeenCalledWith("/listings/bulk?ids=100,102");
   });
 

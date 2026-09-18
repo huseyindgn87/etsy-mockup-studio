@@ -672,7 +672,7 @@ export default function ListingsPage() {
                   onClick={handleBulkEdit}
                   className="inline-flex h-8 items-center gap-1.5 rounded-full bg-primary px-3 text-xs font-medium text-white transition-colors hover:bg-primary-dark disabled:opacity-40"
                 >
-                  <Pencil size={14} aria-hidden /> Edit
+                  <Pencil size={14} aria-hidden /> Bulk edit
                 </button>
               </div>
             )}

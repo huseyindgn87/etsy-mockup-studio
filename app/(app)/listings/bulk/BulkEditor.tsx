@@ -60,6 +60,7 @@ import { bulkMediaSlot } from "@/lib/scheduling/render-keys";
 import type { ConfirmedListingFields } from "@/lib/etsy/listing-confirmed";
 import type { ScheduledBulkUpdate, ScheduledImageEntry, ScheduledVideoEntry } from "@/lib/scheduling/bulk-job";
 import type { ScheduleTimeInput } from "@/lib/scheduling/types";
+import { syncListingPatch, writeWithTimeout } from "@/lib/etsy/sync-request";
 import VariationRowBlock, { VARIATION_FIELDS } from "./VariationRowBlock";
 import VirtualListingRows from "./VirtualListingRows";
 import { INPUT_CLS, attributeChoicesAcross, labelFor, propertyForListing } from "./helpers";
@@ -82,29 +83,6 @@ import {
 async function errorFrom(res: Response): Promise<string> {
   const body = (await res.json().catch(() => null)) as { error?: string } | null;
   return body?.error || `Request failed (${res.status})`;
-}
-
-/** How long one listing's write may take before the run gives up on it. */
-const WRITE_TIMEOUT_MS = 30_000;
-
-/**
- * One listing's write, abandoned if it hasn't answered in 30 s: the request is
- * aborted and the caller told, so a hanging listing can't hold up the others.
- */
-async function writeWithTimeout(url: string, init: RequestInit): Promise<Response> {
-  const controller = new AbortController();
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      controller.abort();
-      reject(new Error(`Timed out after ${WRITE_TIMEOUT_MS / 1000} seconds.`));
-    }, WRITE_TIMEOUT_MS);
-  });
-  try {
-    return await Promise.race([fetch(url, { ...init, signal: controller.signal }), timeout]);
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 /**
@@ -837,19 +815,7 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
       return { listingId: id, ok: false, error: `Variations: ${invalid.message}` };
     }
 
-    let result: SaveResult;
-    try {
-      const res = await writeWithTimeout("/api/etsy/listings/bulk/save", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ updates: [update] }),
-      });
-      if (!res.ok) throw new Error(await errorFrom(res));
-      const saved = ((await res.json()) as { results: SaveResult[] }).results;
-      result = saved.find((r) => r.listingId === id) ?? { listingId: id, ok: false, error: "Etsy said nothing." };
-    } catch (err) {
-      return { listingId: id, ok: false, error: err instanceof Error ? err.message : "Save failed." };
-    }
+    const result = await syncListingPatch(id, update.patch);
     if (!result.ok && !result.partial) return result;
 
     // Saved values are now the listing's own values — clear the edits that

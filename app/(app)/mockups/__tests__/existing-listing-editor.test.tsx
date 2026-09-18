@@ -98,8 +98,10 @@ const HYDRATED_FORM = listingFormFromSource({
 interface Call {
   method: string;
   url: string;
+  body?: unknown;
 }
 let calls: Call[] = [];
+let saveResponse: () => Response;
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -153,6 +155,7 @@ function route(method: string, url: string): Response {
       ],
     });
   }
+  if (method === "POST" && url === "/api/etsy/listings/bulk/save") return saveResponse();
   if (method === "POST" && url === "/api/drafts") return json({ id: "draft-1" });
   if (method === "PUT" && url === "/api/drafts/draft-1") return json({ id: "draft-1" });
   if (method === "GET" && url === "/api/drafts/draft-1") {
@@ -177,13 +180,14 @@ function route(method: string, url: string): Response {
 
 beforeEach(() => {
   calls = [];
+  saveResponse = () => json({ results: [{ listingId: LISTING_ID, ok: true }] });
   Element.prototype.scrollIntoView = vi.fn();
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
       const method = (init?.method ?? "GET").toUpperCase();
-      calls.push({ method, url });
+      calls.push({ method, url, body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined });
       return route(method, url);
     }),
   );
@@ -304,4 +308,57 @@ describe("editor opened on an existing listing", () => {
     await act(() => new Promise((resolve) => setTimeout(resolve, 4500)));
     expect(draftWrites()).toEqual([]);
   }, 20_000);
+
+  describe("Sync to Etsy", () => {
+    const syncButton = () => within(header()).getByRole("button", { name: "Sync to Etsy" });
+    const saves = () => calls.filter((c) => c.method === "POST" && c.url === "/api/etsy/listings/bulk/save");
+    const warnsOnLeave = () => {
+      const event = new Event("beforeunload", { cancelable: true });
+      window.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    const editTitle = async () => {
+      await waitFor(() => expect(within(header()).queryByText("Loading listing…")).not.toBeInTheDocument());
+      await waitFor(() => expect(screen.getByRole("region", { name: "Title" })).toBeInTheDocument());
+      fireEvent.change(openSection("Title").getByPlaceholderText("e.g. Miami Skyline Wall Art Print"), {
+        target: { value: `${TITLE}!` },
+      });
+      await waitFor(() => expect(warnsOnLeave()).toBe(true));
+    };
+
+    it("sends only the changed fields through the bulk save route and clears the unsaved state", async () => {
+      openExisting();
+      await editTitle();
+
+      fireEvent.click(syncButton());
+      expect(within(header()).getByRole("button", { name: "Syncing…" })).toBeDisabled();
+
+      await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Synced to Etsy."));
+      expect(saves()).toHaveLength(1);
+      expect(saves()[0].body).toEqual({ updates: [{ listingId: LISTING_ID, patch: { title: `${TITLE}!` } }] });
+      expect(syncButton()).toBeEnabled();
+      expect(warnsOnLeave()).toBe(false);
+    });
+
+    it("reports a failure and keeps the unsaved state", async () => {
+      saveResponse = () => json({ results: [{ listingId: LISTING_ID, ok: false, error: "Etsy refused the title." }] });
+      openExisting();
+      await editTitle();
+
+      fireEvent.click(syncButton());
+
+      await waitFor(() => expect(screen.getByText("Sync to Etsy failed: Etsy refused the title.")).toBeInTheDocument());
+      expect(screen.queryByText("Synced to Etsy.")).not.toBeInTheDocument();
+      expect(syncButton()).toBeEnabled();
+      expect(warnsOnLeave()).toBe(true);
+    });
+
+    it("is not offered for a new listing", async () => {
+      nav.params = new URLSearchParams();
+      render(<MockupsPage />);
+      await waitFor(() => expect(within(header()).getByText("Save draft")).toBeInTheDocument());
+      expect(within(header()).queryByRole("button", { name: "Sync to Etsy" })).not.toBeInTheDocument();
+      expect(within(header()).queryByRole("link", { name: "View on Etsy" })).not.toBeInTheDocument();
+    });
+  });
 });

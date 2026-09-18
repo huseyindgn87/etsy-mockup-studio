@@ -47,6 +47,9 @@ import { howItsMadeError } from "@/lib/etsy/listing-classification";
 import { personalizationQuestionsError } from "@/lib/etsy/listing-personalization";
 import { MAX_LISTING_IMAGES, checkImageFileBasics } from "@/lib/etsy/listing-image-limits";
 import { MAX_LISTING_VIDEOS } from "@/lib/etsy/video-limits";
+import { isEmptyPatch } from "@/lib/etsy/bulk-edit";
+import { editorSyncPatch } from "@/lib/etsy/editor-sync";
+import { syncListingPatch, writeWithTimeout } from "@/lib/etsy/sync-request";
 import ListingForm, {
   EMPTY_LISTING_FORM,
   type ListingFormValue,
@@ -314,6 +317,8 @@ function MockupsPageInner() {
   const [activeArea, setActiveArea] = useState(0);
   const [previewDesignId, setPreviewDesignId] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncNotice, setSyncNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // The target listing and mode are chosen once, on the Listings page (its
@@ -1606,6 +1611,38 @@ function MockupsPageInner() {
     return publishTo;
   }, [listingForm, publishMode, publishId, photoSlotIds]);
 
+  /** Sends the form's changed fields to the existing listing now, through bulk edit's Sync updates path. */
+  const syncToEtsy = useCallback(async () => {
+    if (publishId == null) return;
+    setError(null);
+    setSyncNotice(null);
+    setSyncing(true);
+    try {
+      const res = await writeWithTimeout(`/api/etsy/listings/${publishId}/editor`, {});
+      if (!res.ok) throw new Error(await errorFrom(res));
+      const { form } = (await res.json()) as { form: ListingFormValue };
+      const diff = editorSyncPatch({ ...EMPTY_LISTING_FORM, ...form }, listingForm);
+      if ("error" in diff) throw new Error(diff.error);
+      if (isEmptyPatch(diff.patch)) {
+        setSyncNotice("Nothing to sync — the listing on Etsy already matches.");
+        setPublishedRevision(editRevision);
+        return;
+      }
+      if (diff.patch.variations || diff.patch.variationImages) {
+        const invalid = validateOfferings(listingForm, photoSlotIds)[0];
+        if (invalid) throw new Error(`Variations: ${invalid.message}`);
+      }
+      const result = await syncListingPatch(publishId, diff.patch);
+      if (!result.ok) throw new Error(result.partial ? `Partly saved. ${result.error ?? ""}`.trim() : result.error);
+      setSyncNotice("Synced to Etsy.");
+      setPublishedRevision(editRevision);
+    } catch (err) {
+      setError(`Sync to Etsy failed: ${err instanceof Error ? err.message : "request failed"}`);
+    } finally {
+      setSyncing(false);
+    }
+  }, [publishId, listingForm, photoSlotIds, editRevision]);
+
   const publishToEtsy = useCallback(async () => {
     if (photoSlots.length === 0) return;
     const blocker = publishErrors[0];
@@ -1913,6 +1950,22 @@ function MockupsPageInner() {
                 View on Etsy
               </a>
             )}
+            {publishMode === "existing" && publishId != null && (
+              <button
+                type="button"
+                onClick={() => void syncToEtsy()}
+                disabled={syncing || !!busy || !loadSettled}
+                className="inline-flex h-9 items-center gap-2 rounded-full bg-primary px-4 text-sm font-medium text-white transition-colors hover:bg-primary-dark disabled:opacity-40"
+              >
+                {syncing && (
+                  <svg aria-hidden="true" viewBox="0 0 16 16" className="h-4 w-4 animate-spin" fill="none">
+                    <circle cx="8" cy="8" r="6" stroke="currentColor" strokeOpacity="0.3" strokeWidth="2" />
+                    <path d="M14 8a6 6 0 0 0-6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                  </svg>
+                )}
+                {syncing ? "Syncing…" : "Sync to Etsy"}
+              </button>
+            )}
             <span className="max-w-xs truncate text-xs text-zinc-500 dark:text-zinc-400">
               {modeCaption}
             </span>
@@ -2001,6 +2054,15 @@ function MockupsPageInner() {
         {error && (
           <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-300">
             {error}
+          </div>
+        )}
+
+        {syncNotice && (
+          <div
+            role="status"
+            className="mb-4 rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800 dark:border-green-900 dark:bg-green-950/50 dark:text-green-300"
+          >
+            {syncNotice}
           </div>
         )}
 
