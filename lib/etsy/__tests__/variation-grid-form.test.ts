@@ -76,10 +76,10 @@ describe("inventory grid → variation form", () => {
     expect(back.priceOnProperty).toEqual([100]);
     expect(back.skuOnProperty).toEqual([100, 200]);
     expect(back.products).toEqual([
-      { propertyValues: [{ propertyId: 100, name: "Size", valueIds: [11], values: ["S"] }, { propertyId: 200, name: "Color", valueIds: [21], values: ["Black"] }], price: 20, quantity: 4, sku: "S-B", readinessStateId: 7, enabled: true },
-      { propertyValues: [{ propertyId: 100, name: "Size", valueIds: [11], values: ["S"] }, { propertyId: 200, name: "Color", valueIds: [22], values: ["White"] }], price: 20, quantity: 4, sku: "S-W", readinessStateId: 7, enabled: true },
-      { propertyValues: [{ propertyId: 100, name: "Size", valueIds: [null], values: ["XXL"] }, { propertyId: 200, name: "Color", valueIds: [21], values: ["Black"] }], price: 24, quantity: 4, sku: "X-B", readinessStateId: 7, enabled: true },
-      { propertyValues: [{ propertyId: 100, name: "Size", valueIds: [null], values: ["XXL"] }, { propertyId: 200, name: "Color", valueIds: [22], values: ["White"] }], price: 24, quantity: 4, sku: "X-W", readinessStateId: 7, enabled: false },
+      { propertyValues: [{ propertyId: 100, name: "Size", scaleId: 5, valueIds: [11], values: ["S"] }, { propertyId: 200, name: "Color", valueIds: [21], values: ["Black"] }], price: 20, quantity: 4, sku: "S-B", readinessStateId: 7, enabled: true },
+      { propertyValues: [{ propertyId: 100, name: "Size", scaleId: 5, valueIds: [11], values: ["S"] }, { propertyId: 200, name: "Color", valueIds: [22], values: ["White"] }], price: 20, quantity: 4, sku: "S-W", readinessStateId: 7, enabled: true },
+      { propertyValues: [{ propertyId: 100, name: "Size", scaleId: 5, valueIds: [null], values: ["XXL"] }, { propertyId: 200, name: "Color", valueIds: [21], values: ["Black"] }], price: 24, quantity: 4, sku: "X-B", readinessStateId: 7, enabled: true },
+      { propertyValues: [{ propertyId: 100, name: "Size", scaleId: 5, valueIds: [null], values: ["XXL"] }, { propertyId: 200, name: "Color", valueIds: [22], values: ["White"] }], price: 24, quantity: 4, sku: "X-W", readinessStateId: 7, enabled: false },
     ]);
   });
 

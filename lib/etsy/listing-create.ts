@@ -246,7 +246,7 @@ export async function setListingInventorySku(
 export interface InventoryProductInput {
   sku?: string;
   /** One entry per variation property this product is a combination of. A null id is a free-text value on an otherwise-real Etsy property. */
-  propertyValues: { propertyId: number; name: string; valueIds: (number | null)[]; values: string[] }[];
+  propertyValues: { propertyId: number; name: string; valueIds: (number | null)[]; values: string[]; scaleId?: number }[];
   price: number;
   quantity: number;
   /** Etsy auto-assigns one when omitted. */
@@ -289,6 +289,7 @@ export async function updateListingInventory(
         property_name: pv.name,
         value_ids: pv.valueIds,
         values: pv.values,
+        ...(pv.scaleId ? { scale_id: pv.scaleId } : {}),
       })),
       offerings: [
         {

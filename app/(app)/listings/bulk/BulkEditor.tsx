@@ -58,6 +58,15 @@ import { useUnsavedChangesGuard } from "@/app/components/unsaved-changes/useUnsa
 import ScheduleDialog from "@/app/(app)/schedule/ScheduleDialog";
 import { bulkMediaSlot } from "@/lib/scheduling/render-keys";
 import type { ConfirmedListingFields } from "@/lib/etsy/listing-confirmed";
+import {
+  describeUnsynced,
+  mediaChanges as gridChanges,
+  mediaStateFromEtsy,
+  mediaStateFromGrid,
+  sameState,
+  type UnsyncedChange,
+} from "@/lib/etsy/listing-changes";
+import { slotIdFor } from "@/app/components/listing-media/photo-order";
 import type { ScheduledBulkUpdate, ScheduledImageEntry, ScheduledVideoEntry } from "@/lib/scheduling/bulk-job";
 import type { ScheduleTimeInput } from "@/lib/scheduling/types";
 import { syncListingPatch, writeWithTimeout } from "@/lib/etsy/sync-request";
@@ -138,21 +147,44 @@ function flattenTaxonomy(nodes: TaxonomyNode[], prefix = ""): TaxonomyOption[] {
   return out;
 }
 
-/** Deep enough for the shapes a field value can take. */
-function sameValue(a: FieldValue, b: FieldValue): boolean {
-  if (typeof a !== "object" && typeof b !== "object") return a === b;
-  return JSON.stringify(a) === JSON.stringify(b);
-}
+const sameValue = (a: FieldValue, b: FieldValue): boolean => sameState(a, b);
 
 /** Which parts of a row's media grid differ from the listing as Etsy has it. */
 function mediaChanges(listing: BulkListingDetail, state: ExistingMediaState | undefined) {
   if (!state) return { photos: false, videos: false };
-  const now = mediaSavePayload(state).payload;
-  const was = mediaSavePayload(initialExistingMedia(listing)).payload;
-  return {
-    photos: JSON.stringify(now.images) !== JSON.stringify(was.images),
-    videos: JSON.stringify(now.videos) !== JSON.stringify(was.videos),
-  };
+  return gridChanges(
+    mediaStateFromEtsy(listing),
+    mediaStateFromGrid(state.order, state.altTextBySlot, state.videos, slotIdFor),
+  );
+}
+
+const fieldLabel = (key: BulkFieldKey): string =>
+  BULK_GROUPS.flatMap((g) => g.fields).find((f) => f.key === key)?.label ?? key;
+
+/** Why an edited value can't be written to Etsy as it stands. */
+function unwritableReason(field: BulkFieldKey): string {
+  switch (field) {
+    case "title":
+      return "Etsy requires a title";
+    case "tags":
+    case "materials":
+      return "Etsy's API documents no way to empty this list";
+    case "taxonomyId":
+      return "Etsy's API has no way to remove a listing's category";
+    case "shopSectionId":
+      return "Etsy's API documents no way to take a listing out of its section";
+    case "price":
+      return "Etsy needs a price greater than 0";
+    case "quantity":
+      return "Etsy needs a whole number of 0 or more";
+    case "itemWeight":
+    case "itemSize":
+      return "Etsy needs a value greater than 0 with a unit, and documents no way to clear one";
+    case "about":
+      return "Etsy needs who made it, when, and what it is together";
+    default:
+      return "Etsy's API documents no way to clear this field";
+  }
 }
 
 const newPhotoId = () => Math.random().toString(36).slice(2, 10);
@@ -660,12 +692,50 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
     [patchFor, variationPatchFor, variationImagesPatchFor],
   );
 
+  /** Edits on a row that Etsy's API can't write — reported, never dropped. */
+  const unsyncedFor = useCallback(
+    (listing: BulkListingDetail): (UnsyncedChange & { key: string })[] => {
+      const out: (UnsyncedChange & { key: string })[] = [];
+      for (const [key, value] of Object.entries(edited[listing.listingId] ?? {}) as [BulkFieldKey, FieldValue][]) {
+        if (sameValue(value, originalValue(listing, key))) continue;
+        const field = fieldLabel(key);
+        if (!editable(listing, key)) {
+          if (!isReadOnlyField(key)) {
+            out.push({ key, field, reason: "this listing has variations, so it is edited on its Variations block" });
+          }
+          continue;
+        }
+        if (isAttributeField(key)) {
+          const attribute = value as AttributeValue;
+          if (attribute.propertyId > 0 && attribute.valueIds.length > 0) continue;
+          out.push({
+            key,
+            field,
+            reason:
+              attribute.propertyId > 0
+                ? "Etsy's API documents no way to clear a category attribute"
+                : "this listing's category has no such attribute",
+          });
+          continue;
+        }
+        if (!patchEntry(key, value)) out.push({ key, field, reason: unwritableReason(key) });
+      }
+      const edit = variationEdits[listing.listingId];
+      const original = variationOriginals[listing.listingId];
+      if (edit && original && !sameState(edit, original) && !offeringStateToBulkVariations(edit)) {
+        out.push({ key: "variations", field: "Variations", reason: "a listing's last variation can't be removed from here" });
+      }
+      return out;
+    },
+    [edited, editable, originalValue, variationEdits, variationOriginals],
+  );
+
   const updates = useMemo(() => {
     return (listings ?? [])
       .filter((l) => targeted[l.listingId])
-      .map((l) => ({ listingId: l.listingId, patch: fullPatchFor(l) }))
-      .filter((u) => Object.keys(u.patch).length > 0);
-  }, [listings, targeted, fullPatchFor]);
+      .map((l) => ({ listingId: l.listingId, patch: fullPatchFor(l), unsynced: unsyncedFor(l) }))
+      .filter((u) => Object.keys(u.patch).length > 0 || u.unsynced.length > 0);
+  }, [listings, targeted, fullPatchFor, unsyncedFor]);
 
   /** Ticked listings whose photo/video grid would change on save. */
   const mediaUpdates = useMemo(
@@ -684,7 +754,7 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
 
   /** Listings, ticked or not, with an edit that no Sync has written yet. */
   const unsavedCount = (listings ?? []).filter((l) => {
-    if (Object.keys(fullPatchFor(l)).length > 0) return true;
+    if (Object.keys(fullPatchFor(l)).length > 0 || unsyncedFor(l).length > 0) return true;
     const changed = mediaChanges(l, media[l.listingId]);
     return changed.photos || changed.videos;
   }).length;
@@ -802,8 +872,15 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
   }
 
   /** Write one listing's field patch, and fold what landed back into its row. */
-  async function saveListingFields(update: { listingId: number; patch: BulkListingPatch }): Promise<SaveResult> {
+  async function saveListingFields(update: {
+    listingId: number;
+    patch: BulkListingPatch;
+    unsynced: (UnsyncedChange & { key: string })[];
+  }): Promise<SaveResult> {
     const id = update.listingId;
+    const notSynced: SaveResult | null =
+      update.unsynced.length > 0 ? { listingId: id, ok: false, error: describeUnsynced(update.unsynced) } : null;
+    if (Object.keys(update.patch).length === 0) return notSynced!;
     // A variation grid with errors is refused for that listing only — the rest still go out.
     const listing = (listings ?? []).find((l) => l.listingId === id);
     const form = update.patch.variations || update.patch.variationImages ? variationEdits[id] : undefined;
@@ -816,7 +893,7 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
     }
 
     const result = await syncListingPatch(id, update.patch);
-    if (!result.ok && !result.partial) return result;
+    if (!result.ok && !result.partial) return notSynced ? mergeResults(id, [result, notSynced]) : result;
 
     // Saved values are now the listing's own values — clear the edits that
     // landed so the row stops showing them as pending. Failed rows keep theirs.
@@ -833,9 +910,13 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
         return form ? { ...next, hasVariations: form.variations.length > 0 } : next;
       }),
     );
+    // Edits Etsy couldn't take stay on the row, still pending and still reported.
+    const keep = new Set(update.unsynced.map((u) => u.key));
     setEdited((prev) => {
       const next = { ...prev };
-      delete next[id];
+      const kept = Object.fromEntries(Object.entries(prev[id] ?? {}).filter(([key]) => keep.has(key)));
+      if (Object.keys(kept).length > 0) next[id] = kept as (typeof prev)[number];
+      else delete next[id];
       return next;
     });
     if (form) setVariationOriginals((prev) => ({ ...prev, [id]: form }));
@@ -848,7 +929,7 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
         return next;
       });
     }
-    return result;
+    return notSynced ? mergeResults(id, [result, { ...notSynced, partial: true }]) : result;
   }
 
   /**
@@ -907,6 +988,12 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
   async function scheduleEdits(input: ScheduleTimeInput): Promise<string | null> {
     const ids = [...new Set([...updates.map((u) => u.listingId), ...mediaUpdates.map((l) => l.listingId)])];
     if (ids.length === 0) return "There are no changes to schedule.";
+    // A scheduled job can only hold what Etsy's API can write; anything else is named, not dropped.
+    const blocked = updates.find((u) => u.unsynced.length > 0);
+    if (blocked) {
+      const title = (listings ?? []).find((l) => l.listingId === blocked.listingId)?.title ?? `Listing ${blocked.listingId}`;
+      return `${title}: ${describeUnsynced(blocked.unsynced)} Undo that edit to schedule the rest.`;
+    }
 
     const setId = crypto.randomUUID();
     const payload: ScheduledBulkUpdate[] = [];

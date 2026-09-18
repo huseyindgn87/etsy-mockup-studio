@@ -97,7 +97,7 @@ export interface PublishSpec {
       skuOnProperty?: number[];
       readinessStateOnProperty?: number[];
       products: {
-        propertyValues: { propertyId: number; name?: string; valueIds: (number | null)[]; values: string[] }[];
+        propertyValues: { propertyId: number; name?: string; valueIds: (number | null)[]; values: string[]; scaleId?: number }[];
         price?: number;
         quantity?: number;
         sku?: string;
@@ -175,7 +175,7 @@ export function sanitizeProperties(raw: unknown): PropertyEntry[] {
 }
 
 export interface CleanVariationProduct {
-  propertyValues: { propertyId: number; name: string; valueIds: (number | null)[]; values: string[] }[];
+  propertyValues: { propertyId: number; name: string; valueIds: (number | null)[]; values: string[]; scaleId?: number }[];
   price?: number;
   quantity?: number;
   sku?: string;
@@ -250,6 +250,9 @@ export function sanitizeVariations(raw: unknown): CleanVariations | null {
         name: typeof name === "string" && name ? name : `property #${propertyId as number}`,
         valueIds: valueIds as (number | null)[],
         values: values as string[],
+        ...(Number.isInteger((pv as { scaleId?: unknown }).scaleId) && ((pv as { scaleId: number }).scaleId > 0)
+          ? { scaleId: (pv as { scaleId: number }).scaleId }
+          : {}),
       });
     }
     if (!ok) continue;

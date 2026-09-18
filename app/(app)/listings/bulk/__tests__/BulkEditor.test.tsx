@@ -1565,3 +1565,46 @@ describe("scheduling the pending edits", () => {
     expect(syncButton()).toBeDisabled();
   });
 });
+
+describe("edits Etsy's API can't write are reported, never dropped", () => {
+  test("Sync names the field and why, and the edit stays pending", async () => {
+    await renderEditor();
+    openField("Title", "Listings");
+    fireEvent.change(rowField("Title", 101), { target: { value: "" } });
+    expect(syncButton()).toHaveTextContent("Sync updates (1)");
+
+    fireEvent.click(syncButton());
+
+    await waitFor(() => expect(inRow(101).getByText(/Not synced to Etsy: Title \(Etsy requires a title\)/)).toBeInTheDocument());
+    expect(allSaves()).toHaveLength(0);
+    expect(rowField("Title", 101)).toHaveValue("");
+  });
+
+  test("the rest of the listing's edits still go, and the row says what didn't", async () => {
+    await renderEditor();
+    openField("Title", "Listings");
+    fireEvent.change(rowField("Title", 101), { target: { value: "" } });
+    openField("Description", "Listings");
+    fireEvent.change(rowField("Description", 101), { target: { value: "New description" } });
+
+    fireEvent.click(syncButton());
+
+    await waitFor(() => expect(allSaves()).toHaveLength(1));
+    expect(allSaves()[0]).toEqual([{ listingId: 101, patch: { description: "New description" } }]);
+    await waitFor(() => expect(inRow(101).getByText(/Partly saved/)).toBeInTheDocument());
+    expect(inRow(101).getByText(/Not synced to Etsy: Title/)).toBeInTheDocument();
+  });
+
+  test("Schedule refuses to store a job that would silently leave the edit out", async () => {
+    await renderEditor();
+    openField("Title", "Listings");
+    fireEvent.change(rowField("Title", 101), { target: { value: "" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Schedule" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Schedule edits" }));
+
+    expect(await within(dialog).findByText(/Not synced to Etsy: Title/)).toBeInTheDocument();
+    expect(scheduleCalls()).toHaveLength(0);
+  });
+});

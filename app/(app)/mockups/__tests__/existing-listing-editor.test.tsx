@@ -102,6 +102,11 @@ interface Call {
 }
 let calls: Call[] = [];
 let saveResponse: () => Response;
+type Media = { images: { imageId: number; url: string; rank: number; altText: string }[]; videos: never[] };
+/** The listing's photos as Etsy has them — what `GET /api/etsy/listings/bulk?ids=` answers. */
+let etsyMedia: Media;
+/** What the photo save (`POST /api/mockups/render`) leaves on Etsy. */
+let afterPhotoSave: (() => Media) | null;
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -109,7 +114,11 @@ function json(body: unknown, status = 200): Response {
 
 function route(method: string, url: string): Response {
   if (url === `/api/etsy/listings/${LISTING_ID}/editor`) return json({ form: HYDRATED_FORM, source: "cache", warning: null });
-  if (url.startsWith("/api/etsy/listings/bulk?ids=")) return json({ listings: [{ images: [], videos: [] }], missing: [] });
+  if (url.startsWith("/api/etsy/listings/bulk?ids=")) return json({ listings: [etsyMedia], missing: [] });
+  if (method === "POST" && url === "/api/mockups/render") {
+    if (afterPhotoSave) etsyMedia = afterPhotoSave();
+    return json({ mode: "existing", listingId: LISTING_ID, uploaded: [], failed: [], skipped: 0, edited: true });
+  }
   if (url === "/api/etsy/shop") return json({ shopName: "GHCollectiveUS" });
   if (url === "/api/etsy/sections") return json({ sections: [{ shopSectionId: 56595398, title: "Valentine's Day" }] });
   if (url === "/api/etsy/processing-profiles") {
@@ -181,13 +190,21 @@ function route(method: string, url: string): Response {
 beforeEach(() => {
   calls = [];
   saveResponse = () => json({ results: [{ listingId: LISTING_ID, ok: true }] });
+  etsyMedia = { images: [], videos: [] };
+  afterPhotoSave = null;
   Element.prototype.scrollIntoView = vi.fn();
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
       const method = (init?.method ?? "GET").toUpperCase();
-      calls.push({ method, url, body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined });
+      const body =
+        typeof init?.body === "string"
+          ? JSON.parse(init.body)
+          : init?.body instanceof FormData
+            ? JSON.parse(String(init.body.get("payload")))
+            : undefined;
+      calls.push({ method, url, body });
       return route(method, url);
     }),
   );
@@ -351,6 +368,112 @@ describe("editor opened on an existing listing", () => {
       expect(screen.queryByText("Synced to Etsy.")).not.toBeInTheDocument();
       expect(syncButton()).toBeEnabled();
       expect(warnsOnLeave()).toBe(true);
+    });
+
+    const photo = (imageId: number, rank: number, altText: string) => ({
+      imageId,
+      url: `https://img.etsy/${imageId}.jpg`,
+      rank,
+      altText,
+    });
+    const photoSaves = () => calls.filter((c) => c.method === "POST" && c.url === "/api/mockups/render");
+    const openWithPhotos = async () => {
+      etsyMedia = { images: [photo(1, 1, "Front"), photo(2, 2, "Back")], videos: [] };
+      openExisting();
+      await waitFor(() => expect(within(header()).queryByText("Loading listing…")).not.toBeInTheDocument());
+      const photos = within(screen.getByRole("list", { name: "Listing photos" }));
+      await waitFor(() => expect(photos.getAllByRole("listitem").length).toBeGreaterThanOrEqual(2));
+      return photos;
+    };
+
+    it("sends a photo reorder to Etsy instead of saying nothing changed", async () => {
+      const photos = await openWithPhotos();
+      await waitFor(() => expect(photos.getByRole("button", { name: "Move photo 1 right" })).toBeInTheDocument());
+      fireEvent.click(photos.getByRole("button", { name: "Move photo 1 right" }));
+      await waitFor(() => expect(warnsOnLeave()).toBe(true));
+      afterPhotoSave = () => ({ images: [photo(2, 1, "Back"), photo(1, 2, "Front")], videos: [] });
+
+      fireEvent.click(syncButton());
+
+      await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Synced to Etsy."));
+      expect(screen.queryByText(/Nothing to sync/)).not.toBeInTheDocument();
+      expect(photoSaves()).toHaveLength(1);
+      expect(photoSaves()[0].body).toMatchObject({
+        editExisting: true,
+        imageOrder: [
+          { kind: "etsy", imageId: 2, altText: "Back" },
+          { kind: "etsy", imageId: 1, altText: "Front" },
+        ],
+      });
+      expect(saves()).toHaveLength(0);
+      await waitFor(() => expect(warnsOnLeave()).toBe(false));
+
+      // Etsy now holds that order, so a second Sync has nothing left to send.
+      fireEvent.click(syncButton());
+      await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(/Nothing to sync/));
+      expect(photoSaves()).toHaveLength(1);
+    });
+
+    it("sends an alt text edit to Etsy", async () => {
+      const photos = await openWithPhotos();
+      fireEvent.click(photos.getByRole("button", { name: "Alt text for photo 2" }));
+      fireEvent.change(screen.getByPlaceholderText("Describe this image for screen readers and search…"), {
+        target: { value: "Back of the tee" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Close" }));
+      await waitFor(() => expect(warnsOnLeave()).toBe(true));
+
+      fireEvent.click(syncButton());
+
+      await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Synced to Etsy."));
+      expect(photoSaves()[0].body).toMatchObject({
+        imageOrder: [
+          { kind: "etsy", imageId: 1, altText: "Front" },
+          { kind: "etsy", imageId: 2, altText: "Back of the tee" },
+        ],
+      });
+    });
+
+    it("sends a field change and a photo change together, photos first", async () => {
+      const photos = await openWithPhotos();
+      fireEvent.click(photos.getByRole("button", { name: "Remove photo 2" }));
+      afterPhotoSave = () => ({ images: [photo(1, 1, "Front")], videos: [] });
+      fireEvent.change(openSection("Title").getByPlaceholderText("e.g. Miami Skyline Wall Art Print"), {
+        target: { value: `${TITLE}!` },
+      });
+
+      fireEvent.click(syncButton());
+
+      await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Synced to Etsy."));
+      const order = calls.filter((c) => c.method === "POST").map((c) => c.url);
+      expect(order.indexOf("/api/mockups/render")).toBeLessThan(order.indexOf("/api/etsy/listings/bulk/save"));
+      expect(photoSaves()[0].body).toMatchObject({ imageOrder: [{ kind: "etsy", imageId: 1 }] });
+      expect(saves()[0].body).toEqual({ updates: [{ listingId: LISTING_ID, patch: { title: `${TITLE}!` } }] });
+    });
+
+    it("names a change Etsy's API can't write instead of skipping it", async () => {
+      openExisting();
+      await waitFor(() => expect(within(header()).queryByText("Loading listing…")).not.toBeInTheDocument());
+      fireEvent.click(openSection("Settings").getByRole("checkbox", { name: /Etsy Ads/ }));
+      await waitFor(() => expect(warnsOnLeave()).toBe(true));
+
+      fireEvent.click(syncButton());
+
+      await waitFor(() =>
+        expect(screen.getByText(/Not synced to Etsy: Promote with Etsy Ads \(Etsy's Open API has no endpoint/)).toBeInTheDocument(),
+      );
+      expect(saves()).toHaveLength(0);
+      expect(screen.queryByText(/Nothing to sync/)).not.toBeInTheDocument();
+      expect(warnsOnLeave()).toBe(true);
+    });
+
+    it("counts a difference, not an edit: typing and undoing leaves nothing unsaved", async () => {
+      openExisting();
+      await editTitle();
+      fireEvent.change(openSection("Title").getByPlaceholderText("e.g. Miami Skyline Wall Art Print"), {
+        target: { value: TITLE },
+      });
+      await waitFor(() => expect(warnsOnLeave()).toBe(false));
     });
 
     it("is not offered for a new listing", async () => {

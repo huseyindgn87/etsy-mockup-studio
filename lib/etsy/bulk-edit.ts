@@ -163,7 +163,7 @@ export interface BulkAttributeValue {
 
 /** One product in a replacement variation grid. */
 export interface BulkVariationProduct {
-  propertyValues: { propertyId: number; name: string; valueIds: (number | null)[]; values: string[] }[];
+  propertyValues: { propertyId: number; name: string; valueIds: (number | null)[]; values: string[]; scaleId?: number }[];
   price?: number;
   quantity?: number;
   sku?: string;
@@ -210,6 +210,8 @@ export interface BulkListingPatch {
   personalization?: PersonalizationQuestionInput[];
   shouldAutoRenew?: boolean;
   isTaxable?: boolean;
+  /** Etsy's `featured_rank` — a position of 1 or more; the spec documents no un-featuring value. */
+  featuredRank?: number;
   shippingProfileId?: number;
   returnPolicyId?: number;
   itemWeight?: number;
@@ -248,6 +250,7 @@ export const LISTING_FIELDS = [
   "shopSectionId",
   "shouldAutoRenew",
   "isTaxable",
+  "featuredRank",
   "shippingProfileId",
   "returnPolicyId",
   "itemWeight",
@@ -634,6 +637,12 @@ export function parseBulkPatch(raw: unknown): ParsedPatch {
     }
   }
 
+  if ("featuredRank" in r) {
+    const rank = positiveInt(r, "featuredRank");
+    if (rank == null) return invalid("A featured position must be 1 or more.");
+    patch.featuredRank = rank;
+  }
+
   if ("shippingProfileId" in r) {
     const id = positiveInt(r, "shippingProfileId");
     if (id == null) return invalid("Choose a valid shipping profile.");
@@ -890,6 +899,7 @@ function parseVariations(raw: unknown): Parsed<BulkVariations> {
         name: typeof v.name === "string" && v.name ? v.name : `property #${propertyId}`,
         valueIds: valueIds as (number | null)[],
         values: values as string[],
+        ...(positiveInt(v, "scaleId") != null ? { scaleId: positiveInt(v, "scaleId")! } : {}),
       });
     }
 

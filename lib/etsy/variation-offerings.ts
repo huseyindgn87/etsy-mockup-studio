@@ -506,7 +506,7 @@ export function validateOfferings(state: OfferingState, photoSlotIds: readonly s
 }
 
 export interface InventoryPayloadProduct {
-  propertyValues: { propertyId: number; name: string; valueIds: (number | null)[]; values: string[] }[];
+  propertyValues: { propertyId: number; name: string; valueIds: (number | null)[]; values: string[]; scaleId?: number }[];
   price?: number;
   quantity?: number;
   sku?: string;
@@ -561,6 +561,7 @@ export function buildInventoryPayload(
         // A negative id is a free-text value on a real Etsy property — Etsy expects value_id null.
         valueIds: [c.valueIds[i] < 0 ? null : c.valueIds[i]],
         values: [c.values[i]],
+        ...(d.scaleId != null && d.scaleId > 0 ? { scaleId: d.scaleId } : {}),
       })),
       price: PRICE_RE.test(price) && Number(price) > 0 ? Math.round(Number(price) * 100) / 100 : undefined,
       quantity: QUANTITY_RE.test(quantity) ? Number(quantity) : undefined,

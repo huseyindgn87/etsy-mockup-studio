@@ -389,3 +389,20 @@ describe("updateVariationImages", () => {
     expect(JSON.parse(init?.body as string)).toEqual({ variation_images: [] });
   });
 });
+
+describe("updateListingInventory — a property's scale", () => {
+  test("sends scale_id on the property values that have one", async () => {
+    etsyFetch.mockResolvedValue(json({}));
+    await updateListingInventory(555, {
+      products: [
+        {
+          propertyValues: [{ propertyId: 100, name: "Size", valueIds: [9], values: ["S"], scaleId: 5 }],
+          price: 19.99,
+          quantity: 3,
+        },
+      ],
+    });
+    const body = JSON.parse(etsyFetch.mock.calls[0][1]?.body as string);
+    expect(body.products[0].property_values[0]).toMatchObject({ property_id: 100, scale_id: 5 });
+  });
+});

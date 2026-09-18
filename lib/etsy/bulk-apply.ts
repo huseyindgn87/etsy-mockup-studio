@@ -102,6 +102,7 @@ export function listingUpdateForm(patch: BulkListingPatch): URLSearchParams {
   if (patch.shopSectionId !== undefined) form.set("shop_section_id", String(patch.shopSectionId));
   if (patch.shouldAutoRenew !== undefined) form.set("should_auto_renew", String(patch.shouldAutoRenew));
   if (patch.isTaxable !== undefined) form.set("is_taxable", String(patch.isTaxable));
+  if (patch.featuredRank !== undefined) form.set("featured_rank", String(patch.featuredRank));
   if (patch.shippingProfileId !== undefined) {
     form.set("shipping_profile_id", String(patch.shippingProfileId));
   }

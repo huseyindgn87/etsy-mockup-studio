@@ -49,6 +49,7 @@ import { MAX_LISTING_IMAGES, checkImageFileBasics } from "@/lib/etsy/listing-ima
 import { MAX_LISTING_VIDEOS } from "@/lib/etsy/video-limits";
 import { isEmptyPatch } from "@/lib/etsy/bulk-edit";
 import { editorSyncPatch } from "@/lib/etsy/editor-sync";
+import { describeUnsynced, mediaChanges, mediaStateFromEtsy, mediaStateFromGrid } from "@/lib/etsy/listing-changes";
 import { syncListingPatch, writeWithTimeout } from "@/lib/etsy/sync-request";
 import ListingForm, {
   EMPTY_LISTING_FORM,
@@ -421,11 +422,15 @@ function MockupsPageInner() {
   /** Set once a restored draft has supplied the video slots, so the listing's own Etsy videos don't replace them. */
   const videosFromDraft = useRef(false);
 
-  // ---- unsaved changes: `editRevision` counts user edits; a successful draft
-  // save or Save to Etsy records the revision it covered ----
+  // ---- unsaved changes: `editRevision` counts user edits; `committed` is the
+  // whole editor state (the draft snapshot) as last loaded, explicitly saved,
+  // or written to Etsy. Any difference from it after a user edit is unsaved. ----
   const [editRevision, setEditRevision] = useState(0);
-  const [savedRevision, setSavedRevision] = useState(0);
-  const [publishedRevision, setPublishedRevision] = useState<number | null>(null);
+  const [committed, setCommitted] = useState<{
+    revision: number;
+    snapshot: string | null;
+    kind: "load" | "saved" | "published";
+  }>({ revision: 0, snapshot: null, kind: "load" });
   /** Wraps a user-edit handler so calling it counts as an edit. */
   const edit =
     <A extends unknown[], R>(fn: (...args: A) => R) =>
@@ -1329,7 +1334,7 @@ function MockupsPageInner() {
       lastSavedSnapshot.current = draftSnapshot;
       setDraftStatus("saved");
       setDraftError(null);
-      if (explicit) setSavedRevision(editRevision);
+      if (explicit) setCommitted({ revision: editRevision, snapshot: draftSnapshot, kind: "saved" });
       return id;
     } catch (err) {
       setDraftStatus("error");
@@ -1358,11 +1363,20 @@ function MockupsPageInner() {
     designs.some((d) => !uploadedAssetKeys.has(`design:${d.id}`)) ||
     ownImages.some((o) => !uploadedAssetKeys.has(`own:${o.id}`)) ||
     videos.some((v) => v?.kind === "file" && !(v.id && uploadedAssetKeys.has(`video:${v.id}`)));
+  // Until the next user edit, state that settles on its own (seeding, reconciling,
+  // uploads finishing) belongs to what was committed, not to a change.
+  useEffect(() => {
+    if (!loadSettled || editRevision !== committed.revision || draftSnapshot === committed.snapshot) return;
+    // Following derived state until the user edits — an intentional sync.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setCommitted((prev) => ({ ...prev, snapshot: draftSnapshot }));
+  }, [loadSettled, editRevision, committed.revision, committed.snapshot, draftSnapshot]);
+  const publishedNow = committed.kind === "published" && editRevision === committed.revision;
   const hasUnsavedChanges =
     loadSettled &&
     editRevision > 0 &&
-    editRevision !== publishedRevision &&
-    (editRevision !== savedRevision || hasPendingUploads);
+    ((editRevision !== committed.revision && draftSnapshot !== committed.snapshot) ||
+      (hasPendingUploads && !publishedNow));
   const saveFromGuard = useCallback(async () => (await saveDraftRef.current({ explicit: true })) != null, []);
   const { dialog: unsavedDialog } = useUnsavedChangesGuard(hasUnsavedChanges ? 1 : 0, {
     onSave: saveFromGuard,
@@ -1611,37 +1625,114 @@ function MockupsPageInner() {
     return publishTo;
   }, [listingForm, publishMode, publishId, photoSlotIds]);
 
-  /** Sends the form's changed fields to the existing listing now, through bulk edit's Sync updates path. */
+  /** Makes the grid what Etsy now holds: its photos and videos, in its order, nothing left to upload. */
+  const resetGridToEtsy = useCallback(
+    (media: EtsyListingMedia) => {
+      const images = [...media.images].sort((a, b) => a.rank - b.rank);
+      setEtsyMedia(media);
+      setImageOrder(images.map((img) => ({ kind: "etsy", imageId: img.imageId })));
+      setAltTextBySlot(Object.fromEntries(images.map((img) => [`etsy:${img.imageId}`, img.altText])));
+      setRemovedEtsyImageIds([]);
+      setRemovedJobKeys(currentJobRefs.map((r) => r.key));
+      setOwnImages((prev) => {
+        for (const o of prev) URL.revokeObjectURL(o.url);
+        return [];
+      });
+      const next: (ListingVideoItem | null)[] = media.videos
+        .slice(0, MAX_LISTING_VIDEOS)
+        .map((v) => ({ kind: "etsy", videoId: v.videoId, videoUrl: v.videoUrl, thumbnailUrl: v.thumbnailUrl }));
+      while (next.length < MAX_LISTING_VIDEOS) next.push(null);
+      setVideos(next);
+    },
+    [currentJobRefs],
+  );
+
+  /**
+   * Sends every difference between the editor and the listing on Etsy: the
+   * photo/video grid (order, alt text, added and removed files) through the
+   * render route's existing-listing save, then the form's fields through bulk
+   * edit's Sync updates path. Differences Etsy's API can't write are listed.
+   */
   const syncToEtsy = useCallback(async () => {
     if (publishId == null) return;
     setError(null);
     setSyncNotice(null);
     setSyncing(true);
     try {
+      if (!etsyMedia) throw new Error(etsyMediaError ?? "This listing's current photos are still loading.");
       const res = await writeWithTimeout(`/api/etsy/listings/${publishId}/editor`, {});
       if (!res.ok) throw new Error(await errorFrom(res));
       const { form } = (await res.json()) as { form: ListingFormValue };
       const diff = editorSyncPatch({ ...EMPTY_LISTING_FORM, ...form }, listingForm);
       if ("error" in diff) throw new Error(diff.error);
-      if (isEmptyPatch(diff.patch)) {
+      const media = mediaChanges(
+        mediaStateFromEtsy(etsyMedia),
+        mediaStateFromGrid(imageOrder, altTextBySlot, videos, slotIdFor),
+      );
+      const mediaChanged = media.photos || media.videos;
+      const unsyncedNote = diff.unsynced.length > 0 ? describeUnsynced(diff.unsynced) : null;
+      const snapshot = draftSnapshot;
+      const revision = editRevision;
+
+      if (isEmptyPatch(diff.patch) && !mediaChanged) {
+        if (unsyncedNote) throw new Error(unsyncedNote);
         setSyncNotice("Nothing to sync — the listing on Etsy already matches.");
-        setPublishedRevision(editRevision);
+        setCommitted({ revision, snapshot, kind: "published" });
         return;
       }
       if (diff.patch.variations || diff.patch.variationImages) {
         const invalid = validateOfferings(listingForm, photoSlotIds)[0];
         if (invalid) throw new Error(`Variations: ${invalid.message}`);
       }
-      const result = await syncListingPatch(publishId, diff.patch);
-      if (!result.ok) throw new Error(result.partial ? `Partly saved. ${result.error ?? ""}`.trim() : result.error);
+
+      if (mediaChanged) {
+        if (photoSlots.length === 0) throw new Error("Photos: a listing needs at least one photo.");
+        const saved = await writeWithTimeout("/api/mockups/render", {
+          method: "POST",
+          body: buildBatchForm({ mode: "existing", listingId: publishId }),
+        });
+        const body = (await saved.json().catch(() => null)) as
+          | { error?: string; failed?: { name?: string; error?: string }[] }
+          | null;
+        if (!saved.ok || !body) throw new Error(`Photos: ${body?.error || `request failed (${saved.status})`}`);
+        const failed = body.failed ?? [];
+        const reread = await fetch(`/api/etsy/listings/bulk?ids=${publishId}`);
+        const listing = reread.ok
+          ? ((await reread.json()) as { listings: EtsyListingMedia[] }).listings[0]
+          : undefined;
+        if (listing) resetGridToEtsy({ images: listing.images, videos: listing.videos });
+        if (failed.length > 0) {
+          throw new Error(`Photos: ${failed.map((f) => `${f.name ?? "photo"}: ${f.error ?? "failed"}`).join("; ")}`);
+        }
+      }
+
+      if (!isEmptyPatch(diff.patch)) {
+        const result = await syncListingPatch(publishId, diff.patch);
+        if (!result.ok) throw new Error(result.partial ? `Partly saved. ${result.error ?? ""}`.trim() : result.error);
+      }
       setSyncNotice("Synced to Etsy.");
-      setPublishedRevision(editRevision);
+      if (unsyncedNote) setError(unsyncedNote);
+      else setCommitted({ revision, snapshot, kind: "published" });
     } catch (err) {
       setError(`Sync to Etsy failed: ${err instanceof Error ? err.message : "request failed"}`);
     } finally {
       setSyncing(false);
     }
-  }, [publishId, listingForm, photoSlotIds, editRevision]);
+  }, [
+    publishId,
+    listingForm,
+    photoSlotIds,
+    photoSlots.length,
+    editRevision,
+    etsyMedia,
+    etsyMediaError,
+    imageOrder,
+    altTextBySlot,
+    videos,
+    draftSnapshot,
+    buildBatchForm,
+    resetGridToEtsy,
+  ]);
 
   const publishToEtsy = useCallback(async () => {
     if (photoSlots.length === 0) return;
@@ -1689,7 +1780,7 @@ function MockupsPageInner() {
         skipped: body.skipped ?? 0,
         edited: !!body.edited,
       });
-      setPublishedRevision(editRevision);
+      setCommitted({ revision: editRevision, snapshot: draftSnapshot, kind: "published" });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Etsy upload failed.");
     } finally {
@@ -1704,6 +1795,7 @@ function MockupsPageInner() {
     goToSection,
     buildPublishTo,
     editRevision,
+    draftSnapshot,
   ]);
 
   // ---- "Schedule for later" — see app/(app)/schedule and lib/scheduling/* ----

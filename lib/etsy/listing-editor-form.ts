@@ -288,6 +288,7 @@ export function listingFormFromSource(src: EditorListingSource): ListingFormValu
       valueIds: formIds[i],
       values: p.options.map((o) => o.name),
       linksPhotos: false,
+      ...(p.scaleId != null ? { scaleId: p.scaleId } : {}),
     })),
     variationToggles,
     variationRows,
