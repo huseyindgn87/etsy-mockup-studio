@@ -62,6 +62,7 @@ import {
   type PhotoSlot,
 } from "@/app/components/listing-media/ListingMedia";
 import EtsyMark from "@/app/components/EtsyMark";
+import { useToast } from "@/app/components/toast/ToastProvider";
 import ListingPreviewModal, { type PreviewMediaItem } from "./ListingPreviewModal";
 import MockupCanvas from "./MockupCanvas";
 import TemplatePicker from "./TemplatePicker";
@@ -319,8 +320,8 @@ function MockupsPageInner() {
   const [previewDesignId, setPreviewDesignId] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
-  const [syncNotice, setSyncNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const toast = useToast();
 
   // The target listing and mode are chosen once, on the Listings page (its
   // row actions, or "Create listing" for a blank draft) — read from the URL
@@ -339,7 +340,6 @@ function MockupsPageInner() {
   );
   const publishId = targetListing?.listingId ?? null;
   const [listingForm, setListingForm] = useState<ListingFormValue>(EMPTY_LISTING_FORM);
-  const [publishResult, setPublishResult] = useState<PublishResult | null>(null);
   const [cornerMode, setCornerMode] = useState<"free" | "ratio">("free");
   const [showTemplatePicker, setShowTemplatePicker] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
@@ -437,6 +437,21 @@ function MockupsPageInner() {
     (...args: A): R => {
       setEditRevision((n) => n + 1);
       return fn(...args);
+    };
+  const gridNoticeShown = useRef(false);
+  /** `edit` for the photo/video grid; the first grid edit on an existing listing says when it reaches Etsy. */
+  const editGrid =
+    <A extends unknown[], R>(fn: (...args: A) => R) =>
+    (...args: A): R => {
+      if (publishMode === "existing" && !gridNoticeShown.current) {
+        gridNoticeShown.current = true;
+        toast.show({
+          id: "existing-grid-notice",
+          kind: "info",
+          message: `The listing's photos and videos become exactly what the grid shows, in that order, when you press Save to Etsy (anything past the ${MAX_LISTING_IMAGES}-image limit is skipped). Nothing on Etsy changes before that.`,
+        });
+      }
+      return edit(fn)(...args);
     };
 
   const addOwnImages = useCallback((files: File[]): string[] => {
@@ -1490,7 +1505,7 @@ function MockupsPageInner() {
   const runBatch = useCallback(async () => {
     if (!included.length || !designs.length) return;
     setError(null);
-    setPublishResult(null);
+    toast.dismiss("editor-publish");
     try {
       setBusy(`Rendering ${jobCount} images…`);
       const res = await fetch("/api/mockups/render", {
@@ -1510,7 +1525,7 @@ function MockupsPageInner() {
     } finally {
       setBusy(null);
     }
-  }, [included, designs, jobCount, buildBatchForm]);
+  }, [included, designs, jobCount, buildBatchForm, toast]);
 
   /**
    * Every reason this listing can't be published yet, each with the section
@@ -1656,7 +1671,7 @@ function MockupsPageInner() {
   const syncToEtsy = useCallback(async () => {
     if (publishId == null) return;
     setError(null);
-    setSyncNotice(null);
+    toast.dismiss("editor-sync");
     setSyncing(true);
     try {
       if (!etsyMedia) throw new Error(etsyMediaError ?? "This listing's current photos are still loading.");
@@ -1676,7 +1691,7 @@ function MockupsPageInner() {
 
       if (isEmptyPatch(diff.patch) && !mediaChanged) {
         if (unsyncedNote) throw new Error(unsyncedNote);
-        setSyncNotice("Nothing to sync — the listing on Etsy already matches.");
+        toast.show({ id: "editor-sync", kind: "info", message: "Nothing to sync — the listing on Etsy already matches." });
         setCommitted({ revision, snapshot, kind: "published" });
         return;
       }
@@ -1710,7 +1725,7 @@ function MockupsPageInner() {
         const result = await syncListingPatch(publishId, diff.patch);
         if (!result.ok) throw new Error(result.partial ? `Partly saved. ${result.error ?? ""}`.trim() : result.error);
       }
-      setSyncNotice("Synced to Etsy.");
+      toast.show({ id: "editor-sync", kind: "success", message: "Synced to Etsy." });
       if (unsyncedNote) setError(unsyncedNote);
       else setCommitted({ revision, snapshot, kind: "published" });
     } catch (err) {
@@ -1732,6 +1747,7 @@ function MockupsPageInner() {
     draftSnapshot,
     buildBatchForm,
     resetGridToEtsy,
+    toast,
   ]);
 
   const publishToEtsy = useCallback(async () => {
@@ -1746,7 +1762,7 @@ function MockupsPageInner() {
     }
     setShowSectionErrors(false);
     setError(null);
-    setPublishResult(null);
+    toast.dismiss("editor-publish");
     try {
       setBusy(
         publishMode === "existing"
@@ -1771,7 +1787,7 @@ function MockupsPageInner() {
               : `Upload failed (${res.status})`),
         );
       }
-      setPublishResult({
+      const result: PublishResult = {
         mode: body.mode ?? publishMode,
         listingId: body.listingId ?? publishId,
         createdDraft: !!body.createdDraft,
@@ -1779,6 +1795,11 @@ function MockupsPageInner() {
         failed: body.failed ?? [],
         skipped: body.skipped ?? 0,
         edited: !!body.edited,
+      };
+      toast.show({
+        id: "editor-publish",
+        kind: result.failed.length > 0 ? "error" : "success",
+        message: <PublishResultMessage result={result} />,
       });
       setCommitted({ revision: editRevision, snapshot: draftSnapshot, kind: "published" });
     } catch (err) {
@@ -1796,6 +1817,7 @@ function MockupsPageInner() {
     buildPublishTo,
     editRevision,
     draftSnapshot,
+    toast,
   ]);
 
   // ---- "Schedule for later" — see app/(app)/schedule and lib/scheduling/* ----
@@ -1890,6 +1912,19 @@ function MockupsPageInner() {
       const body = (await res.json()) as { scheduledListing: ScheduledListingSummary };
       setSchedule(body.scheduledListing);
       setScheduleOpen(false);
+      toast.show({
+        id: "editor-schedule",
+        kind: "success",
+        message: (
+          <>
+            Scheduled to publish {scheduleTimeLabel(body.scheduledListing)}. It stays a draft here until then — nothing
+            is sent to Etsy yet.{" "}
+            <Link href="/schedule" className="font-medium text-primary underline underline-offset-2">
+              View schedule
+            </Link>
+          </>
+        ),
+      });
       return null;
     } catch (err) {
       return err instanceof Error ? err.message : "Could not schedule this listing.";
@@ -1898,17 +1933,35 @@ function MockupsPageInner() {
     }
   }
 
-  /** The schedule's time as a wall time in the zone it was picked in, e.g. "Sep 20, 2:30 PM GMT+3". */
-  const scheduledLabel = schedule
-    ? new Date(schedule.scheduledAt).toLocaleString(undefined, {
-        month: "short",
-        day: "numeric",
-        hour: "numeric",
-        minute: "2-digit",
-        timeZone: schedule.timezone,
-        timeZoneName: "short",
-      })
-    : null;
+  const scheduledLabel = schedule ? scheduleTimeLabel(schedule) : null;
+
+  const failedScheduleId = schedule?.status === "failed" ? schedule.id : null;
+  const failedScheduleError = schedule?.status === "failed" ? schedule.lastError : null;
+  useEffect(() => {
+    if (!failedScheduleId) return;
+    toast.show({
+      id: `schedule-failed-${failedScheduleId}`,
+      kind: "error",
+      message: (
+        <>
+          The scheduled publish failed{failedScheduleError ? `: ${failedScheduleError}` : ""}. Reschedule to try again.{" "}
+          <Link href="/schedule" className="font-medium text-primary underline underline-offset-2">
+            View schedule
+          </Link>
+        </>
+      ),
+    });
+  }, [failedScheduleId, failedScheduleError, toast]);
+
+  useEffect(() => {
+    if (error) toast.show({ id: "editor-error", kind: "error", message: error });
+    else toast.dismiss("editor-error");
+  }, [error, toast]);
+
+  const mediaLoadError = publishMode === "existing" ? etsyMediaError : null;
+  useEffect(() => {
+    if (mediaLoadError) toast.show({ id: "editor-media-error", kind: "error", message: mediaLoadError });
+  }, [mediaLoadError, toast]);
 
   const areaCount = active ? quadList(active.calibration).length : 0;
   const areaIndex = Math.min(activeArea, Math.max(0, areaCount - 1));
@@ -2065,15 +2118,19 @@ function MockupsPageInner() {
             <div className="relative">
               <button
                 type="button"
-                onClick={() => setScheduleOpen((open) => !open)}
+                onClick={() => {
+                  if (scheduleBlockedReason) {
+                    toast.show({ id: "schedule-blocked", kind: "info", message: scheduleBlockedReason });
+                    return;
+                  }
+                  setScheduleOpen((open) => !open);
+                }}
                 aria-expanded={scheduleOpen}
                 disabled={
                   !!busy ||
                   !!scheduleProgress ||
-                  publishCount === 0 ||
-                  needsReadinessState ||
                   draftStatus === "restoring" ||
-                  !!scheduleBlockedReason
+                  (!scheduleBlockedReason && (publishCount === 0 || needsReadinessState))
                 }
                 title={scheduleBlockedReason ?? undefined}
                 className="h-9 rounded-full border border-black/10 px-4 text-sm font-medium transition-colors hover:bg-black/[.04] disabled:opacity-40 dark:border-white/15 dark:hover:bg-white/[.06]"
@@ -2115,83 +2172,20 @@ function MockupsPageInner() {
           {publishBlockedReason && (
             <p className="text-xs font-medium text-primary">{publishBlockedReason}</p>
           )}
-          {scheduleBlockedReason && <p className="text-xs text-zinc-500">{scheduleBlockedReason}</p>}
-          {schedule && (
-            <p className="text-xs text-zinc-600 dark:text-zinc-400">
-              {schedule.status === "failed"
-                ? `The scheduled publish failed${schedule.lastError ? `: ${schedule.lastError}` : ""}. Reschedule to try again. `
-                : `Scheduled to publish ${scheduledLabel}. It stays a draft here until then — nothing is sent to Etsy yet. `}
-              <Link href="/schedule" className="font-medium text-primary underline underline-offset-2">
-                View schedule
-              </Link>
-            </p>
-          )}
-          {publishMode === "existing" && etsyMediaError && (
-            <p className="text-xs font-medium text-red-600 dark:text-red-400">{etsyMediaError}</p>
-          )}
           {needsReadinessState && (
             <p className="text-xs font-medium text-primary">
               Choose a processing profile in the Shipping section before creating this draft.
             </p>
           )}
-          <p className="text-xs text-zinc-500">
-            {publishMode === "existing"
-              ? `The listing's photos and videos become exactly what the grid shows, in that order, when you press Save to Etsy (anything past the ${MAX_LISTING_IMAGES}-image limit is skipped). Nothing on Etsy changes before that.`
-              : "A new draft listing is created and images are uploaded to it. The live listing is never touched."}
-          </p>
+          {publishMode !== "existing" && (
+            <p className="text-xs text-zinc-500">
+              A new draft listing is created and images are uploaded to it. The live listing is never touched.
+            </p>
+          )}
         </div>
       </header>
 
       <div className="mx-auto w-full max-w-7xl px-6 py-8">
-        {error && (
-          <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-300">
-            {error}
-          </div>
-        )}
-
-        {syncNotice && (
-          <div
-            role="status"
-            className="mb-4 rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800 dark:border-green-900 dark:bg-green-950/50 dark:text-green-300"
-          >
-            {syncNotice}
-          </div>
-        )}
-
-        {publishResult && (
-          <div className="mb-4 rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800 dark:border-green-900 dark:bg-green-950/50 dark:text-green-300">
-            {publishResult.createdDraft
-              ? `Draft listing #${publishResult.listingId} created · `
-              : ""}
-            {publishResult.edited && "Photos and videos saved to Etsy · "}
-            {publishResult.uploaded.length} images uploaded
-            {publishResult.skipped > 0 &&
-              ` · ${publishResult.skipped} skipped (${MAX_LISTING_IMAGES}-image limit)`}
-            {publishResult.createdDraft && (
-              <>
-                {" · "}
-                <a
-                  href={`https://www.etsy.com/your/shops/me/listings/${publishResult.listingId}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="underline"
-                >
-                  Open on Etsy
-                </a>
-              </>
-            )}
-            {publishResult.failed.length > 0 && (
-              <ul className="mt-1 list-disc pl-5 text-red-700 dark:text-red-300">
-                {publishResult.failed.slice(0, 5).map((f, i) => (
-                  <li key={i}>
-                    {f.name}: {f.error}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
-
         <div className="flex flex-col gap-6 lg:flex-row">
           {/* ---- left nav: jumps to a section of the form on the right ---- */}
           <nav
@@ -2509,14 +2503,14 @@ function MockupsPageInner() {
               <ListingMediaEditor
                 slots={photoSlots}
                 altTextBySlot={altTextBySlot}
-                onMovePhoto={edit(moveImageSlot)}
-                onRemovePhoto={edit(removeImageSlot)}
-                onAltTextChange={edit(setAltText)}
-                onAddPhotos={edit(addOwnImages)}
+                onMovePhoto={editGrid(moveImageSlot)}
+                onRemovePhoto={editGrid(removeImageSlot)}
+                onAltTextChange={editGrid(setAltText)}
+                onAddPhotos={editGrid(addOwnImages)}
                 videos={videos}
                 videoErrors={videoErrors}
-                onSelectVideo={edit(selectVideo)}
-                onMoveVideo={edit(moveVideoSlot)}
+                onSelectVideo={editGrid(selectVideo)}
+                onMoveVideo={editGrid(moveVideoSlot)}
               />
             </EditorSectionCard>
 
@@ -2558,6 +2552,51 @@ function MockupsPageInner() {
 
       {unsavedDialog}
     </div>
+  );
+}
+
+/** The schedule's time as a wall time in the zone it was picked in, e.g. "Sep 20, 2:30 PM GMT+3". */
+function scheduleTimeLabel(schedule: Pick<ScheduledListingSummary, "scheduledAt" | "timezone">): string {
+  return new Date(schedule.scheduledAt).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: schedule.timezone,
+    timeZoneName: "short",
+  });
+}
+
+function PublishResultMessage({ result }: { result: PublishResult }) {
+  return (
+    <>
+      {result.createdDraft ? `Draft listing #${result.listingId} created · ` : ""}
+      {result.edited && "Photos and videos saved to Etsy · "}
+      {result.uploaded.length} images uploaded
+      {result.skipped > 0 && ` · ${result.skipped} skipped (${MAX_LISTING_IMAGES}-image limit)`}
+      {result.createdDraft && (
+        <>
+          {" · "}
+          <a
+            href={`https://www.etsy.com/your/shops/me/listings/${result.listingId}`}
+            target="_blank"
+            rel="noreferrer"
+            className="underline"
+          >
+            Open on Etsy
+          </a>
+        </>
+      )}
+      {result.failed.length > 0 && (
+        <ul className="mt-1 list-disc pl-5 text-red-700 dark:text-red-300">
+          {result.failed.slice(0, 5).map((f, i) => (
+            <li key={i}>
+              {f.name}: {f.error}
+            </li>
+          ))}
+        </ul>
+      )}
+    </>
   );
 }
 

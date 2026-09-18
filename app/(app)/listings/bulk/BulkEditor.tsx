@@ -55,6 +55,7 @@ import {
 } from "@/app/components/listing-media/existing-media";
 import { checkPickedVideo } from "@/app/components/listing-media/video-file";
 import { useUnsavedChangesGuard } from "@/app/components/unsaved-changes/useUnsavedChangesGuard";
+import { useToast } from "@/app/components/toast/ToastProvider";
 import ScheduleDialog from "@/app/(app)/schedule/ScheduleDialog";
 import { bulkMediaSlot } from "@/lib/scheduling/render-keys";
 import type { ConfirmedListingFields } from "@/lib/etsy/listing-confirmed";
@@ -204,8 +205,7 @@ interface InventoryResponse {
 
 export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
   const [listings, setListings] = useState<BulkListingDetail[] | null>(null);
-  const [missing, setMissing] = useState<number[]>([]);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const toast = useToast();
   const [options, setOptions] = useState<BulkOptions>(EMPTY_OPTIONS);
   const [attributes, setAttributes] = useState<Record<number, ListingAttribute[]>>({});
   /** Each variation listing's grid as the variation form holds it, as Etsy has it now. */
@@ -250,11 +250,8 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
   /** How many of the run's listings have been written, while a Sync is going. */
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [results, setResults] = useState<SaveResult[] | null>(null);
-  const [saveError, setSaveError] = useState<string | null>(null);
   /** The date/time picker, open while the user is scheduling this edit. */
   const [scheduling, setScheduling] = useState(false);
-  /** What the last successful schedule covered, shown in place of the results line. */
-  const [scheduled, setScheduled] = useState<{ count: number; when: string } | null>(null);
   /**
    * Each row's photo/video grid, once it has been touched. Local only — a
    * listing's media is written by Sync updates and nothing else.
@@ -279,16 +276,29 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
       .then((body) => {
         if (controller.signal.aborted) return;
         setListings(body.listings);
-        setMissing(body.missing ?? []);
+        const missing = body.missing ?? [];
+        if (missing.length > 0) {
+          toast.show({
+            id: "bulk-missing",
+            kind: "error",
+            message: `${missing.length} selected listing${missing.length === 1 ? "" : "s"} could not be loaded and ${
+              missing.length === 1 ? "is" : "are"
+            } not shown. Refresh the shop and try again.`,
+          });
+        }
         setTargeted(Object.fromEntries(body.listings.map((l) => [l.listingId, true])));
       })
       .catch((err: unknown) => {
         if (controller.signal.aborted) return;
         setListings([]);
-        setLoadError(err instanceof Error ? err.message : "Failed to load the selected listings.");
+        toast.show({
+          id: "bulk-load-error",
+          kind: "error",
+          message: err instanceof Error ? err.message : "Failed to load the selected listings.",
+        });
       });
     return () => controller.abort();
-  }, [idsKey, listingIds.length]);
+  }, [idsKey, listingIds.length, toast]);
 
   // The option lists every dropdown draws on. Each is independent — one
   // failing (a shop with no return policies, say) leaves the rest usable.
@@ -943,8 +953,8 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
     const runIds = [...new Set([...mediaIds, ...updates.map((u) => u.listingId)])];
     setSaving(true);
     setProgress({ done: 0, total: runIds.length });
-    setSaveError(null);
     setResults(null);
+    toast.dismiss("bulk-results");
     const done: SaveResult[] = [];
     try {
       for (const id of runIds) {
@@ -960,9 +970,16 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
         setProgress({ done: done.length, total: runIds.length });
       }
     } catch (err) {
-      setSaveError(err instanceof Error ? err.message : "Save failed.");
+      toast.show({ id: "bulk-save-error", kind: "error", message: err instanceof Error ? err.message : "Save failed." });
     } finally {
       setResults(done);
+      if (done.length > 0) {
+        toast.show({
+          id: "bulk-results",
+          kind: done.some((r) => !r.ok) ? "error" : "success",
+          message: <SaveResultsMessage results={done} listings={listings ?? []} />,
+        });
+      }
       // If anything failed, only the failures stay ticked, so a second Sync
       // retries those alone. A run where everything landed leaves the ticks be.
       const written = new Set(done.filter((r) => r.ok).map((r) => r.listingId));
@@ -1052,8 +1069,19 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
     setEdited({});
     setVariationEdits({});
     setResults(null);
-    setSaveError(null);
-    setScheduled({ count: payload.length, when });
+    toast.show({
+      id: "bulk-scheduled",
+      kind: "success",
+      message: (
+        <>
+          Scheduled {payload.length} listing{payload.length === 1 ? "" : "s"} for {when}. Nothing has been sent to Etsy
+          — the changes are applied then.{" "}
+          <Link href="/schedule" className="font-medium text-primary underline underline-offset-2">
+            See scheduled listings
+          </Link>
+        </>
+      ),
+    });
     setScheduling(false);
     return null;
   }
@@ -1312,16 +1340,6 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
           </p>
         )}
 
-        {scheduled && (
-          <div className="mt-4 rounded-xl border border-black/10 bg-white px-4 py-3 text-sm dark:border-white/15 dark:bg-zinc-950">
-            Scheduled {scheduled.count} listing{scheduled.count === 1 ? "" : "s"} for {scheduled.when}. Nothing has
-            been sent to Etsy — the changes are applied then.{" "}
-            <Link href="/schedule" className="font-medium text-primary underline underline-offset-2">
-              See scheduled listings
-            </Link>
-          </div>
-        )}
-
         {scheduling && (
           <ScheduleDialog
             heading="Schedule these edits"
@@ -1335,48 +1353,6 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
             onSubmit={scheduleEdits}
             onClose={() => setScheduling(false)}
           />
-        )}
-
-        {loadError && (
-          <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-300">
-            {loadError}
-          </div>
-        )}
-        {saveError && (
-          <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-300">
-            {saveError}
-          </div>
-        )}
-        {missing.length > 0 && (
-          <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950/50 dark:text-amber-300">
-            {missing.length} selected listing{missing.length === 1 ? "" : "s"} could not be loaded and{" "}
-            {missing.length === 1 ? "is" : "are"} not shown. Refresh the shop and try again.
-          </div>
-        )}
-        {results && (
-          <div
-            role="status"
-            className="mt-4 rounded-xl border border-black/10 bg-white px-4 py-3 text-sm dark:border-white/15 dark:bg-zinc-950"
-          >
-            Updated {results.filter((r) => r.ok).length} of {results.length} listings.
-            {results.some((r) => !r.ok) && ` ${results.filter((r) => !r.ok).length} failed.`}
-            {results.some((r) => r.partial) &&
-              ` ${results.filter((r) => r.partial).length} partly saved — everything but their variation photos.`}
-            {results.some((r) => !r.ok) && " Rows that failed keep their changes below and stay selected."}
-            {results.some((r) => !r.ok) && (
-              <ul className="mt-1 list-disc pl-5 text-xs text-red-600 dark:text-red-400">
-                {results
-                  .filter((r) => !r.ok)
-                  .map((r) => (
-                    <li key={r.listingId}>
-                      {(listings ?? []).find((l) => l.listingId === r.listingId)?.title ?? `Listing #${r.listingId}`}:{" "}
-                      {r.partial && "Partly saved. "}
-                      {r.error}
-                    </li>
-                  ))}
-              </ul>
-            )}
-          </div>
         )}
 
         <div className="mt-6 flex flex-col gap-6 lg:flex-row">
@@ -1641,4 +1617,28 @@ function applySaved(listing: BulkListingDetail, patch: BulkListingPatch): BulkLi
     ...(patch.quantity !== undefined ? { quantity: patch.quantity } : {}),
     ...(patch.sku !== undefined ? { sku: patch.sku } : {}),
   };
+}
+
+function SaveResultsMessage({ results, listings }: { results: SaveResult[]; listings: BulkListingDetail[] }) {
+  const failed = results.filter((r) => !r.ok);
+  const partial = results.filter((r) => r.partial);
+  return (
+    <>
+      Updated {results.length - failed.length} of {results.length} listings.
+      {failed.length > 0 && ` ${failed.length} failed.`}
+      {partial.length > 0 && ` ${partial.length} partly saved — everything but their variation photos.`}
+      {failed.length > 0 && " Rows that failed keep their changes below and stay selected."}
+      {failed.length > 0 && (
+        <ul className="mt-1 list-disc pl-5 text-xs text-red-600 dark:text-red-400">
+          {failed.map((r) => (
+            <li key={r.listingId}>
+              {listings.find((l) => l.listingId === r.listingId)?.title ?? `Listing #${r.listingId}`}:{" "}
+              {r.partial && "Partly saved. "}
+              {r.error}
+            </li>
+          ))}
+        </ul>
+      )}
+    </>
+  );
 }

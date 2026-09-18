@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import BulkEditor from "../BulkEditor";
 import { BULK_GROUPS, MAX_TITLE_LENGTH } from "@/lib/etsy/bulk-edit";
 import type { BulkListingDetail } from "../types";
+import { ToastProvider } from "@/app/components/toast/ToastProvider";
 
 function detail(listingId: number, overrides: Partial<BulkListingDetail> = {}): BulkListingDetail {
   return {
@@ -263,7 +264,11 @@ const openField = (field: string, group: string) =>
 
 async function renderEditor(listings: BulkListingDetail[] = LISTINGS) {
   mockFetch(listings);
-  render(<BulkEditor listingIds={listings.map((l) => l.listingId)} />);
+  render(
+    <ToastProvider>
+      <BulkEditor listingIds={listings.map((l) => l.listingId)} />
+    </ToastProvider>,
+  );
   await screen.findByText(
     `Editing ${listings.length} listing${listings.length === 1 ? "" : "s"}`,
   );

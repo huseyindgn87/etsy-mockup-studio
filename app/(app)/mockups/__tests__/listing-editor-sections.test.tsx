@@ -14,6 +14,7 @@ vi.mock("next/navigation", () => ({
 }));
 
 import MockupsPage from "../page";
+import { ToastProvider } from "@/app/components/toast/ToastProvider";
 
 type ObserverCallback = (entries: Partial<IntersectionObserverEntry>[]) => void;
 let observers: { callback: ObserverCallback; targets: Element[] }[] = [];
@@ -92,7 +93,7 @@ const scrolls = () =>
 
 describe("listing editor as one scrolling form", () => {
   it("renders every section at once, in sidebar order, each with a heading and anchor", () => {
-    render(<MockupsPage />);
+    render(<ToastProvider><MockupsPage /></ToastProvider>);
 
     const sections = [...document.querySelectorAll<HTMLElement>("[data-editor-section]")];
     expect(sections.map((s) => s.dataset.editorSection)).toEqual(EDITOR_SECTIONS.map((s) => s.key));
@@ -106,7 +107,7 @@ describe("listing editor as one scrolling form", () => {
   });
 
   it("scrolls to a section from the sidebar, focuses its heading and keeps every section mounted", () => {
-    render(<MockupsPage />);
+    render(<ToastProvider><MockupsPage /></ToastProvider>);
     const shippingLink = link("Shipping");
     shippingLink.focus();
     expect(shippingLink).toHaveFocus();
@@ -123,7 +124,7 @@ describe("listing editor as one scrolling form", () => {
 
   it("jumps instantly when the user prefers reduced motion", () => {
     reducedMotion = true;
-    render(<MockupsPage />);
+    render(<ToastProvider><MockupsPage /></ToastProvider>);
 
     fireEvent.click(link("How it's made"));
 
@@ -134,7 +135,7 @@ describe("listing editor as one scrolling form", () => {
 
   it("scrolls to the section named by the URL hash on mount", async () => {
     window.history.replaceState(null, "", "/mockups#personalization");
-    render(<MockupsPage />);
+    render(<ToastProvider><MockupsPage /></ToastProvider>);
 
     await waitFor(() => expect(scrolls().map((s) => s.section)).toEqual(["personalization"]));
     expect(heading("Personalization")).toHaveFocus();
@@ -143,14 +144,14 @@ describe("listing editor as one scrolling form", () => {
 
   it("ignores a hash that isn't a section", () => {
     window.history.replaceState(null, "", "/mockups#nope");
-    render(<MockupsPage />);
+    render(<ToastProvider><MockupsPage /></ToastProvider>);
 
     expect(scrollIntoView).not.toHaveBeenCalled();
     expect(link("Photos")).toHaveAttribute("aria-current", "location");
   });
 
   it("highlights the topmost section in view as the page scrolls", () => {
-    render(<MockupsPage />);
+    render(<ToastProvider><MockupsPage /></ToastProvider>);
     const observed = observers.at(-1)!.targets.map((t) => (t as HTMLElement).dataset.editorSection);
     expect(observed).toEqual(EDITOR_SECTIONS.map((s) => s.key));
     const current = () => sidebar().getAllByRole("link").filter((a) => a.getAttribute("aria-current") === "location");
@@ -174,7 +175,7 @@ describe("listing editor as one scrolling form", () => {
   });
 
   it("on a refused save, scrolls to the first section with an error and marks every errored section", async () => {
-    render(<MockupsPage />);
+    render(<ToastProvider><MockupsPage /></ToastProvider>);
     fireEvent.change(screen.getByTestId("photo-file-input"), {
       target: { files: [new File(["x"], "shirt.jpg", { type: "image/jpeg" })] },
     });

@@ -21,6 +21,7 @@ vi.mock("next/navigation", () => ({
 }));
 
 import MockupsPage from "../page";
+import { ToastProvider } from "@/app/components/toast/ToastProvider";
 
 /** A cached `Listing` row, as the listings cache holds HG-000179 (trimmed to 2×2 combinations). */
 const CACHED_ROW: CachedListingRow = {
@@ -218,7 +219,7 @@ afterEach(() => {
 
 const openExisting = () => {
   nav.params = new URLSearchParams({ mode: "existing", listingId: String(LISTING_ID), title: TITLE });
-  return render(<MockupsPage />);
+  return render(<ToastProvider><MockupsPage /></ToastProvider>);
 };
 
 const draftWrites = () => calls.filter((c) => c.url.startsWith("/api/drafts") && c.method !== "GET");
@@ -319,7 +320,7 @@ describe("editor opened on an existing listing", () => {
 
   it("sends no draft PUT when a saved draft of it is reopened", async () => {
     nav.params = new URLSearchParams({ draftId: "draft-1" });
-    render(<MockupsPage />);
+    render(<ToastProvider><MockupsPage /></ToastProvider>);
     await waitFor(() => expect(within(header()).getByText(TITLE)).toBeInTheDocument());
 
     await act(() => new Promise((resolve) => setTimeout(resolve, 4500)));
@@ -350,7 +351,7 @@ describe("editor opened on an existing listing", () => {
       fireEvent.click(syncButton());
       expect(within(header()).getByRole("button", { name: "Syncing…" })).toBeDisabled();
 
-      await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Synced to Etsy."));
+      await waitFor(() => expect(screen.getByText("Synced to Etsy.")).toBeInTheDocument());
       expect(saves()).toHaveLength(1);
       expect(saves()[0].body).toEqual({ updates: [{ listingId: LISTING_ID, patch: { title: `${TITLE}!` } }] });
       expect(syncButton()).toBeEnabled();
@@ -395,7 +396,7 @@ describe("editor opened on an existing listing", () => {
 
       fireEvent.click(syncButton());
 
-      await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Synced to Etsy."));
+      await waitFor(() => expect(screen.getByText("Synced to Etsy.")).toBeInTheDocument());
       expect(screen.queryByText(/Nothing to sync/)).not.toBeInTheDocument();
       expect(photoSaves()).toHaveLength(1);
       expect(photoSaves()[0].body).toMatchObject({
@@ -410,7 +411,7 @@ describe("editor opened on an existing listing", () => {
 
       // Etsy now holds that order, so a second Sync has nothing left to send.
       fireEvent.click(syncButton());
-      await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(/Nothing to sync/));
+      await waitFor(() => expect(screen.getByText(/Nothing to sync/)).toBeInTheDocument());
       expect(photoSaves()).toHaveLength(1);
     });
 
@@ -425,7 +426,7 @@ describe("editor opened on an existing listing", () => {
 
       fireEvent.click(syncButton());
 
-      await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Synced to Etsy."));
+      await waitFor(() => expect(screen.getByText("Synced to Etsy.")).toBeInTheDocument());
       expect(photoSaves()[0].body).toMatchObject({
         imageOrder: [
           { kind: "etsy", imageId: 1, altText: "Front" },
@@ -444,7 +445,7 @@ describe("editor opened on an existing listing", () => {
 
       fireEvent.click(syncButton());
 
-      await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Synced to Etsy."));
+      await waitFor(() => expect(screen.getByText("Synced to Etsy.")).toBeInTheDocument());
       const order = calls.filter((c) => c.method === "POST").map((c) => c.url);
       expect(order.indexOf("/api/mockups/render")).toBeLessThan(order.indexOf("/api/etsy/listings/bulk/save"));
       expect(photoSaves()[0].body).toMatchObject({ imageOrder: [{ kind: "etsy", imageId: 1 }] });
@@ -478,10 +479,35 @@ describe("editor opened on an existing listing", () => {
 
     it("is not offered for a new listing", async () => {
       nav.params = new URLSearchParams();
-      render(<MockupsPage />);
+      render(<ToastProvider><MockupsPage /></ToastProvider>);
       await waitFor(() => expect(within(header()).getByText("Save draft")).toBeInTheDocument());
       expect(within(header()).queryByRole("button", { name: "Sync to Etsy" })).not.toBeInTheDocument();
       expect(within(header()).queryByRole("link", { name: "View on Etsy" })).not.toBeInTheDocument();
+    });
+
+    it("says what Save to Etsy does only once the photo grid is first changed", async () => {
+      const photos = await openWithPhotos();
+      const notice = /photos and videos become exactly what the grid shows/;
+      expect(screen.queryByText(notice)).not.toBeInTheDocument();
+
+      await waitFor(() => expect(photos.getByRole("button", { name: "Move photo 1 right" })).toBeInTheDocument());
+      fireEvent.click(photos.getByRole("button", { name: "Move photo 1 right" }));
+      expect(screen.getByText(notice)).toBeInTheDocument();
+
+      fireEvent.click(within(screen.getByText(notice).closest("[role=status]") as HTMLElement).getByRole("button", { name: "Dismiss notification" }));
+      fireEvent.click(photos.getByRole("button", { name: "Move photo 1 right" }));
+      expect(screen.queryByText(notice)).not.toBeInTheDocument();
+    });
+
+    it("explains why an existing listing can't be scheduled only when Schedule is pressed", async () => {
+      openExisting();
+      await waitFor(() => expect(within(header()).queryByText("Loading listing…")).not.toBeInTheDocument());
+      const notice = /can't be scheduled/;
+      expect(screen.queryByText(notice)).not.toBeInTheDocument();
+
+      fireEvent.click(within(header()).getByRole("button", { name: "Schedule for later" }));
+      expect(screen.getByRole("status")).toHaveTextContent(notice);
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     });
   });
 });

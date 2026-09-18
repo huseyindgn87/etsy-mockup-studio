@@ -35,9 +35,14 @@ export function prefersReducedMotion(): boolean {
 /**
  * Launches the burst from viewport coordinates `(x, y)`. Returns the layer
  * element (removed automatically after the effect), or `null` when skipped.
- * `random` is injectable for tests.
+ * `random` is injectable for tests; `count` fixes the number of particles.
  */
-export function burstDollars(x: number, y: number, random: () => number = Math.random): HTMLElement | null {
+export function burstDollars(
+  x: number,
+  y: number,
+  random: () => number = Math.random,
+  { count: fixedCount }: { count?: number } = {},
+): HTMLElement | null {
   if (typeof document === "undefined" || prefersReducedMotion()) return null;
 
   const layer = document.createElement("div");
@@ -54,7 +59,7 @@ export function burstDollars(x: number, y: number, random: () => number = Math.r
     zIndex: "2147483647",
   });
 
-  const count = MIN_PARTICLES + Math.floor(random() * (MAX_PARTICLES - MIN_PARTICLES + 1));
+  const count = fixedCount ?? MIN_PARTICLES + Math.floor(random() * (MAX_PARTICLES - MIN_PARTICLES + 1));
   for (let i = 0; i < count; i++) {
     const particle = document.createElement("span");
     particle.textContent = "$";
