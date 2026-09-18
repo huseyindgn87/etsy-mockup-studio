@@ -22,7 +22,7 @@
 import type { ScheduledListing } from "@prisma/client";
 import { applyBulkUpdates } from "@/lib/etsy/bulk-apply";
 import { fetchListingDetails } from "@/lib/etsy/listing-details";
-import { uploadListingImage } from "@/lib/etsy/listing-images";
+import { readListingImagesInOrder, uploadListingImage } from "@/lib/etsy/listing-images";
 import {
   applyListingMediaEdit,
   isEmptyMediaPlan,
@@ -104,6 +104,7 @@ async function saveMedia(shopId: number, update: ScheduledBulkUpdate): Promise<s
     },
     imageName: (index) => media.imageFiles[index]?.filename || `Photo ${index + 1}`,
     videoName: (index) => media.videoFiles[index]?.filename || `Video ${index + 1}`,
+    readImages: () => readListingImagesInOrder(update.listingId),
   });
   if (result.failed.length === 0) return null;
   return `Photos: ${result.failed.map((f) => `${f.name}: ${f.error}`).join("; ")}`;

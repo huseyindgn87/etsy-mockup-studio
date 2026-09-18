@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { getEtsySession } from "@/lib/etsy/auth";
 import { createDraftListing, updateVariationImages } from "@/lib/etsy/listing-create";
 import { fetchListingDetails } from "@/lib/etsy/listing-details";
-import { uploadListingImage } from "@/lib/etsy/listing-images";
+import { readListingImagesInOrder, uploadListingImage } from "@/lib/etsy/listing-images";
 import {
   applyListingMediaEdit,
   parseMediaOrder,
@@ -617,6 +617,7 @@ export async function POST(request: Request) {
         },
         imageName: entryName,
         videoName: (index) => videoFiles[index]?.name || `Video ${index + 1}`,
+        readImages: () => readListingImagesInOrder(targetListingId),
       });
 
       return NextResponse.json(

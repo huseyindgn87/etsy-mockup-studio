@@ -86,7 +86,8 @@ export async function assignListingImage(params: {
   const form = new FormData();
   form.append("listing_image_id", String(Math.trunc(params.listingImageId)));
   form.append("rank", String(Math.trunc(params.rank)));
-  if (params.altText) form.append("alt_text", params.altText.slice(0, MAX_ALT_TEXT_LENGTH));
+  // An empty string is sent only to clear a photo's alt text; undefined leaves it as it is.
+  if (params.altText !== undefined) form.append("alt_text", params.altText.slice(0, MAX_ALT_TEXT_LENGTH));
 
   const res = await etsyFetch(
     `/shops/${params.shopId}/listings/${params.listingId}/images`,
@@ -116,4 +117,18 @@ export async function deleteListingImage(params: {
 }): Promise<void> {
   const path = `/shops/${params.shopId}/listings/${params.listingId}/images/${params.listingImageId}`;
   await readEtsyResponse(await etsyFetch(path, { method: "DELETE" }), `DELETE ${path}`);
+}
+
+/** `GET /listings/{listing}/images` — the listing's photos in Etsy's rank order, with their alt text. */
+export async function readListingImagesInOrder(listingId: number): Promise<{ imageId: number; altText: string }[]> {
+  const body = (await readEtsyResponse(
+    await etsyFetch(`/listings/${listingId}/images`),
+    `GET /listings/${listingId}/images`,
+  )) as { results?: { listing_image_id?: unknown; rank?: unknown; alt_text?: unknown }[] } | null;
+  return (body?.results ?? [])
+    .filter((r): r is { listing_image_id: number; rank: number; alt_text?: unknown } =>
+      typeof r.listing_image_id === "number" && typeof r.rank === "number",
+    )
+    .sort((a, b) => a.rank - b.rank)
+    .map((r) => ({ imageId: r.listing_image_id, altText: typeof r.alt_text === "string" ? r.alt_text : "" }));
 }

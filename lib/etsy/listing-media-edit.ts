@@ -11,14 +11,20 @@ import { MAX_LISTING_VIDEOS } from "@/lib/etsy/video-limits";
  * Saving an edited photo/video grid onto a listing that already exists on
  * Etsy — reorder, remove, alt text and new files, all at once.
  *
- * Etsy's Open API has no "reorder" or "edit alt text" call for listing
- * images. What it does document is that a deleted image stays on Etsy's
- * servers and can be re-associated with the listing by `listing_image_id`,
- * at a chosen `rank` and with `alt_text` (`uploadListingImage`), and the same
- * for videos by `video_id` (`uploadListingVideo`). So a save keeps the
- * longest unchanged run of leading images exactly as they are, removes every
- * image after it, and places the rest back in the new order — removed tiles
- * simply aren't placed back.
+ * Photos are never deleted to reorder them. `uploadListingImage` with an
+ * attached photo's `listing_image_id` and a `rank` re-ranks that photo in
+ * place (same id, same file, alt text kept) — verified against a real
+ * listing on 2026-09-18, though Etsy documents the parameter only for
+ * re-attaching deleted photos. It *sets* that rank without moving the others,
+ * so a single call can leave two photos tied; writing every photo's rank, in
+ * the new order, gives exactly that order. So a save:
+ *   1. uploads genuinely new photos, as the 20-photo cap allows;
+ *   2. deletes only photos the user removed, never the listing's last one
+ *      (Etsy refuses that), uploading any remaining new ones as room frees;
+ *   3. writes rank 1…n (with alt text) for every photo, in the grid's order;
+ *   4. re-reads the listing and reports any photo not where the grid put it.
+ * Videos have no rank; they keep their unchanged leading run and the rest
+ * are deleted and re-attached by `video_id` in slot order.
  *
  * Only ever called from an explicit save (the editor's Publish, the bulk
  * screen's Sync updates); nothing here runs while tiles are being edited.
@@ -37,8 +43,14 @@ export interface CurrentListingMedia {
 }
 
 export interface ListingMediaEditPlan<NI, NV> {
+  /** Photos the user removed. */
   deleteImageIds: number[];
-  placeImages: ImagePlacement<NI>[];
+  /** Only the genuinely new photos, in grid order. */
+  placeImages: Extract<ImagePlacement<NI>, { kind: "new" }>[];
+  /** The whole photo grid in its final order — empty when the photos don't change. */
+  imageOrder: ImagePlacement<NI>[];
+  /** Kept photos whose alt text the user cleared. */
+  clearAltImageIds: number[];
   deleteVideoIds: number[];
   placeVideos: VideoPlacement<NV>[];
   /** Asked-for entries that were refused before any call was planned. */
@@ -73,14 +85,12 @@ export function planListingMediaEdit<NI, NV>(
     images.push({ ...entry, altText: cleanAlt(entry.altText) });
   }
 
-  let keep = 0;
-  while (keep < images.length && keep < current.images.length) {
-    const want = images[keep];
-    const have = current.images[keep];
-    if (want.kind !== "existing" || want.imageId !== have.imageId || want.altText !== cleanAlt(have.altText)) break;
-    keep++;
-  }
-  const imagesUnchanged = keep === images.length && keep === current.images.length;
+  const imagesUnchanged =
+    images.length === current.images.length &&
+    images.every((want, i) => {
+      const have = current.images[i];
+      return want.kind === "existing" && want.imageId === have.imageId && want.altText === cleanAlt(have.altText);
+    });
 
   let deleteVideoIds: number[] = [];
   let placeVideos: VideoPlacement<NV>[] = [];
@@ -112,8 +122,18 @@ export function planListingMediaEdit<NI, NV>(
   }
 
   return {
-    deleteImageIds: imagesUnchanged ? [] : current.images.slice(keep).map((i) => i.imageId),
-    placeImages: imagesUnchanged ? [] : images.slice(keep),
+    deleteImageIds: imagesUnchanged ? [] : current.images.filter((i) => !seenImages.has(i.imageId)).map((i) => i.imageId),
+    placeImages: imagesUnchanged
+      ? []
+      : images.filter((i): i is Extract<ImagePlacement<NI>, { kind: "new" }> => i.kind === "new"),
+    imageOrder: imagesUnchanged ? [] : images,
+    clearAltImageIds: imagesUnchanged
+      ? []
+      : images.flatMap((i) =>
+          i.kind === "existing" && i.altText === "" && current.images.some((c) => c.imageId === i.imageId && c.altText)
+            ? [i.imageId]
+            : [],
+        ),
     deleteVideoIds,
     placeVideos,
     refused,
@@ -124,6 +144,7 @@ export function isEmptyMediaPlan(plan: ListingMediaEditPlan<unknown, unknown>): 
   return (
     plan.deleteImageIds.length === 0 &&
     plan.placeImages.length === 0 &&
+    plan.imageOrder.length === 0 &&
     plan.deleteVideoIds.length === 0 &&
     plan.placeVideos.length === 0
   );
@@ -147,10 +168,10 @@ export interface MediaEditResult<NI> {
 const messageOf = (err: unknown, fallback: string) => (err instanceof Error ? err.message : fallback);
 
 /**
- * Runs a plan against Etsy, sequentially. A failed delete leaves that image
- * where it is (and it is not placed again); a failed placement is reported
- * and the next one takes its rank, so ranks never gap. Every failure is
- * collected — one never stops the rest.
+ * Runs a plan against Etsy, sequentially — see the module comment for the
+ * order of calls. Every failure is collected; one never stops the rest. The
+ * listing's photos are re-read at the end (`readImages`) and any photo not at
+ * the position the grid gave it, or not carrying its alt text, is reported.
  */
 export async function applyListingMediaEdit<NI, NV>(params: {
   shopId: number;
@@ -162,53 +183,105 @@ export async function applyListingMediaEdit<NI, NV>(params: {
   uploadVideo: (item: NV) => Promise<void>;
   imageName: (item: NI) => string;
   videoName: (item: NV) => string;
+  /** The listing's photos as Etsy has them now, in rank order. */
+  readImages: () => Promise<{ imageId: number; altText: string }[]>;
 }): Promise<MediaEditResult<NI>> {
   const { shopId, listingId, plan } = params;
   const failed = plan.refused.map((error) => ({ name: "Media", error }));
   const placed: PlacedImage<NI>[] = [];
   let skipped = 0;
 
-  let imageCount = params.currentImageCount;
-  const stillAttached = new Set<number>();
-  for (const listingImageId of plan.deleteImageIds) {
-    try {
-      await deleteListingImage({ shopId, listingId, listingImageId });
-      imageCount--;
-    } catch (err) {
-      stillAttached.add(listingImageId);
-      failed.push({ name: `Image ${listingImageId}`, error: messageOf(err, "could not be removed") });
-    }
-  }
+  if (plan.imageOrder.length > 0) {
+    const uploadedIds = new Map<Extract<ImagePlacement<NI>, { kind: "new" }>, number>();
+    const pendingUploads = [...plan.placeImages];
+    const pendingDeletes = [...plan.deleteImageIds];
+    const stillAttached: number[] = [];
+    let imageCount = params.currentImageCount;
 
-  for (const entry of plan.placeImages) {
-    if (entry.kind === "existing" && stillAttached.has(entry.imageId)) continue;
-    if (imageCount >= MAX_LISTING_IMAGES) {
-      skipped++;
-      continue;
+    // New photos go up before any removal, so the listing never drops to zero.
+    while (pendingUploads.length > 0 || pendingDeletes.length > 0) {
+      if (pendingUploads.length > 0 && imageCount < MAX_LISTING_IMAGES) {
+        const entry = pendingUploads.shift()!;
+        const rank = plan.imageOrder.indexOf(entry) + 1;
+        try {
+          const img = await params.uploadImage(entry.item, rank, entry.altText);
+          uploadedIds.set(entry, img.listingImageId);
+          imageCount++;
+        } catch (err) {
+          failed.push({ name: params.imageName(entry.item), error: messageOf(err, "could not be uploaded") });
+        }
+      } else if (pendingDeletes.length > 0 && imageCount > 1) {
+        const listingImageId = pendingDeletes.shift()!;
+        try {
+          await deleteListingImage({ shopId, listingId, listingImageId });
+          imageCount--;
+        } catch (err) {
+          stillAttached.push(listingImageId);
+          failed.push({ name: `Image ${listingImageId}`, error: messageOf(err, "could not be removed") });
+        }
+      } else {
+        skipped += pendingUploads.length;
+        for (const entry of pendingUploads) {
+          failed.push({
+            name: params.imageName(entry.item),
+            error: `a listing holds at most ${MAX_LISTING_IMAGES} photos`,
+          });
+        }
+        stillAttached.push(...pendingDeletes);
+        break;
+      }
     }
-    const rank = imageCount + 1;
-    const name = entry.kind === "existing" ? `Image ${entry.imageId}` : params.imageName(entry.item);
+
+    // Every photo's exact rank, in the grid's order; a photo that couldn't be removed goes last.
+    const finalOrder: { id: number; altText: string; name: string; item?: NI }[] = [];
+    for (const entry of plan.imageOrder) {
+      if (entry.kind === "existing") {
+        finalOrder.push({ id: entry.imageId, altText: entry.altText, name: `Image ${entry.imageId}` });
+      } else {
+        const id = uploadedIds.get(entry);
+        if (id != null) finalOrder.push({ id, altText: entry.altText, name: params.imageName(entry.item), item: entry.item });
+      }
+    }
+    for (const id of stillAttached) finalOrder.push({ id, altText: "", name: `Image ${id}` });
+
+    for (const [index, photo] of finalOrder.entries()) {
+      try {
+        const img = await assignListingImage({
+          shopId,
+          listingId,
+          listingImageId: photo.id,
+          rank: index + 1,
+          altText: photo.altText || (plan.clearAltImageIds.includes(photo.id) ? "" : undefined),
+        });
+        placed.push({
+          name: photo.name,
+          rank: index + 1,
+          listingImageId: photo.id,
+          url: img.url,
+          ...(photo.item !== undefined ? { item: photo.item } : {}),
+        });
+      } catch (err) {
+        failed.push({ name: photo.name, error: messageOf(err, "could not be moved into place") });
+      }
+    }
+
+    const wanted = finalOrder.slice(0, finalOrder.length - stillAttached.length);
     try {
-      const img =
-        entry.kind === "existing"
-          ? await assignListingImage({
-              shopId,
-              listingId,
-              listingImageId: entry.imageId,
-              rank,
-              altText: entry.altText || undefined,
-            })
-          : await params.uploadImage(entry.item, rank, entry.altText);
-      imageCount++;
-      placed.push({
-        name,
-        rank: img.rank ?? rank,
-        listingImageId: img.listingImageId,
-        url: img.url,
-        ...(entry.kind === "new" ? { item: entry.item } : {}),
-      });
+      const onEtsy = await params.readImages();
+      const wrong = wanted.filter(
+        (photo, i) =>
+          onEtsy[i]?.imageId !== photo.id ||
+          ((photo.altText !== "" || plan.clearAltImageIds.includes(photo.id)) &&
+            cleanAlt(onEtsy[i].altText ?? "") !== photo.altText),
+      );
+      if (wrong.length > 0) {
+        failed.push({
+          name: "Photo order",
+          error: `Etsy doesn't show ${wrong.map((p) => `${p.name} at position ${finalOrder.indexOf(p) + 1}`).join(", ")} as the editor has it.`,
+        });
+      }
     } catch (err) {
-      failed.push({ name, error: messageOf(err, "could not be saved") });
+      failed.push({ name: "Photo order", error: `couldn't be checked on Etsy: ${messageOf(err, "read failed")}` });
     }
   }
 

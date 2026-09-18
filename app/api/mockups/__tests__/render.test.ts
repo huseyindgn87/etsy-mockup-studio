@@ -48,20 +48,32 @@ vi.mock("@/lib/etsy/listing-images", () => ({
         filename: p.filename,
       });
       editCalls.push(`upload ${p.filename}@${p.rank}${p.altText ? ` "${p.altText}"` : ""}`);
+      etsyPhotos.push({ id: 9000 + (p.rank ?? 0), rank: p.rank ?? 1, alt: p.altText ?? "" });
       return { listingImageId: 9000 + (p.rank ?? 0), rank: p.rank ?? 1, url: null };
     },
   ),
   assignListingImage: vi.fn(async (p: { listingId: number; listingImageId: number; rank: number; altText?: string }) => {
     editCalls.push(`assign ${p.listingId}/${p.listingImageId}@${p.rank}${p.altText ? ` "${p.altText}"` : ""}`);
+    const photo = etsyPhotos.find((x) => x.id === p.listingImageId);
+    if (photo) {
+      photo.rank = p.rank;
+      if (p.altText !== undefined) photo.alt = p.altText;
+    }
     return { listingImageId: p.listingImageId, rank: p.rank, url: null };
   }),
   deleteListingImage: vi.fn(async (p: { listingId: number; listingImageId: number }) => {
     editCalls.push(`delete ${p.listingId}/${p.listingImageId}`);
+    etsyPhotos = etsyPhotos.filter((x) => x.id !== p.listingImageId);
   }),
+  readListingImagesInOrder: vi.fn(async () =>
+    [...etsyPhotos].sort((a, b) => a.rank - b.rank).map((x) => ({ imageId: x.id, altText: x.alt })),
+  ),
 }));
 
 /** Every image/video write an existing-listing save made, in order. */
 const editCalls: string[] = [];
+/** The existing listing's photos as the fake Etsy holds them; a rank write moves only that photo. */
+let etsyPhotos: { id: number; rank: number; alt: string }[] = [];
 /** What `fetchListingDetails` reports as the listing's current media. */
 let currentMedia: {
   images: { imageId: number; url: string; rank: number; altText: string }[];
@@ -1622,7 +1634,9 @@ describe("existing-listing editor: Save to Etsy writes the edited grid", () => {
     editCalls.length = 0;
     uploadCalls.length = 0;
     currentMedia = { images, videos };
+    etsyPhotos = images.map((i) => ({ id: i.imageId, rank: i.rank, alt: i.altText }));
   }
+  const photosOnEtsy = () => [...etsyPhotos].sort((a, b) => a.rank - b.rank).map((x) => `${x.id}:${x.alt}`);
 
   test("reorder persists on save: the grid order becomes the listing's rank order", async () => {
     reset();
@@ -1631,14 +1645,15 @@ describe("existing-listing editor: Save to Etsy writes the edited grid", () => {
     const body = (await res.json()) as { edited: boolean; failed: unknown[] };
     expect(body.edited).toBe(true);
     expect(body.failed).toEqual([]);
-    expect(editCalls).toEqual(["delete 555/2", "delete 555/3", "assign 555/3@2", "assign 555/2@3"]);
+    expect(editCalls).toEqual(['assign 555/1@1 "front"', "assign 555/3@2", "assign 555/2@3"]);
+    expect(photosOnEtsy()).toEqual(["1:front", "3:", "2:"]);
   });
 
   test("alt text saves to the right image of the right listing", async () => {
     reset();
     await POST(editForm({ imageOrder: [etsy(1, "front"), etsy(2, "Mug on a desk"), etsy(3)] }));
-    expect(editCalls).toEqual(["delete 555/2", "delete 555/3", 'assign 555/2@2 "Mug on a desk"', "assign 555/3@3"]);
-    expect(editCalls.every((c) => !c.includes("/1@") && !c.includes("555/1"))).toBe(true);
+    expect(editCalls.some((c) => c.startsWith("delete") || c.startsWith("upload"))).toBe(false);
+    expect(photosOnEtsy()).toEqual(["1:front", "2:Mug on a desk", "3:"]);
   });
 
   test("remove clears the right tile, and a removed video is deleted", async () => {
@@ -1649,7 +1664,8 @@ describe("existing-listing editor: Save to Etsy writes the edited grid", () => {
         videoOrder: [{ kind: "existing", videoId: 71 }],
       }),
     );
-    expect(editCalls).toEqual(["delete 555/2", "delete 555/3", "assign 555/3@2", "delete video 72"]);
+    expect(editCalls).toEqual(["delete 555/2", 'assign 555/1@1 "front"', "assign 555/3@2", "delete video 72"]);
+    expect(photosOnEtsy()).toEqual(["1:front", "3:"]);
   });
 
   test("new photos go in at their grid position with their own alt text", async () => {
@@ -1665,14 +1681,13 @@ describe("existing-listing editor: Save to Etsy writes the edited grid", () => {
       ),
     );
     expect(editCalls).toEqual([
-      "delete 555/1",
-      "delete 555/2",
-      "delete 555/3",
       'upload studio.jpg@1 "On a model"',
+      'assign 555/9001@1 "On a model"',
       'assign 555/1@2 "front"',
       "assign 555/2@3",
       "assign 555/3@4",
     ]);
+    expect(photosOnEtsy()).toEqual(["9001:On a model", "1:front", "2:", "3:"]);
   });
 
   test("an unchanged grid writes nothing, and an empty grid is refused", async () => {

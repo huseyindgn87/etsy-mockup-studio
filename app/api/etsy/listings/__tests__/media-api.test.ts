@@ -109,9 +109,16 @@ function fakeEtsy(path: string, init?: RequestInit) {
         })),
     });
   }
+  const imageList = /^\/listings\/(\d+)\/images$/.exec(path);
+  if (method === "GET" && imageList) {
+    return response({ results: [...etsy[Number(imageList[1])].images].sort((a, b) => a.rank - b.rank) });
+  }
   const imageDelete = /^\/shops\/\d+\/listings\/(\d+)\/images\/(\d+)$/.exec(path);
   if (method === "DELETE" && imageDelete) {
     const listing = etsy[Number(imageDelete[1])];
+    if (listing.images.length === 1) {
+      return response({ error: "Listings must have at least 1 image. Please add another ListingImage before trying to delete." }, 400);
+    }
     const gone = listing.images.find((i) => i.listing_image_id === Number(imageDelete[2]))!;
     listing.images = listing.images
       .filter((i) => i !== gone)
@@ -122,6 +129,13 @@ function fakeEtsy(path: string, init?: RequestInit) {
   if (method === "POST" && imagePost) {
     const listing = etsy[Number(imagePost[1])];
     const form = init!.body as FormData;
+    const attached = listing.images.find((i) => i.listing_image_id === Number(form.get("listing_image_id")));
+    if (attached) {
+      // Observed on a real listing: the rank is set on this photo only — nothing else moves.
+      attached.rank = Number(form.get("rank"));
+      if (form.has("alt_text")) attached.alt_text = String(form.get("alt_text"));
+      return response(attached, 201);
+    }
     const id = form.get("listing_image_id") ? Number(form.get("listing_image_id")) : nextUploadId++;
     const placed = image(id, Number(form.get("rank")), String(form.get("alt_text") ?? ""));
     listing.images.push(placed);
@@ -196,21 +210,32 @@ beforeEach(async () => {
 });
 
 describe("reorder persists on save", () => {
-  test("the saved order becomes Etsy's rank order, keeping the untouched leading photos in place", async () => {
+  test("the saved order becomes Etsy's rank order by re-ranking alone — nothing deleted or uploaded", async () => {
     const { status, body } = await saveMedia(101, {
       images: [existing(1, "front"), existing(4), existing(2), existing(3)],
     });
     expect(status).toBe(200);
     expect(body.ok).toBe(true);
     expect(onEtsy(101)).toEqual(["1:front", "4:", "2:", "3:"]);
-    // Photo 1 was already first with the same alt text, so it was never touched.
-    expect(etsyWrites().some((w) => w.endsWith("/images/1"))).toBe(false);
+    expect(etsyWrites().some((w) => w.startsWith("DELETE"))).toBe(false);
+    expect(nextUploadId).toBe(9000);
     expect(body.images.map((i: { imageId: number }) => i.imageId)).toEqual([1, 4, 2, 3]);
   });
 
   test("a new thumbnail moves to rank 1", async () => {
-    await saveMedia(101, { images: [existing(3), existing(1, "front"), existing(2), existing(4)] });
+    const { body } = await saveMedia(101, { images: [existing(3), existing(1, "front"), existing(2), existing(4)] });
+    expect(body.ok).toBe(true);
     expect(onEtsy(101)).toEqual(["3:", "1:front", "2:", "4:"]);
+    expect(etsyWrites().some((w) => w.startsWith("DELETE"))).toBe(false);
+  });
+
+  test("replacing every photo uploads the new one before removing the old, so the listing never has none", async () => {
+    const file = new File(["x"], "only.jpg", { type: "image/jpeg" });
+    const { body } = await saveMedia(102, { images: [{ kind: "new", index: 0, altText: "" }] }, { images: [file] });
+    expect(body.ok).toBe(true);
+    expect(onEtsy(102)).toEqual(["9000:"]);
+    const writes = etsyWrites();
+    expect(writes.findIndex((w) => w.startsWith("POST"))).toBeLessThan(writes.findIndex((w) => w.startsWith("DELETE")));
   });
 
   test("an unchanged grid makes no Etsy write at all", async () => {

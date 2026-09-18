@@ -9,6 +9,15 @@ const { etsy, r2State, storage } = vi.hoisted(() => ({
     deleted: [] as number[],
     uploaded: [] as { filename: string; bytes: number }[],
     cached: [] as { listingId: number; patch: unknown }[],
+    /** Each listing's photos on the fake Etsy once a save touches them; a rank write moves only that photo. */
+    photos: new Map<number, { id: number; rank: number; alt: string }[]>(),
+    photosOf(listingId: number) {
+      if (!this.photos.has(listingId)) {
+        const images = this.listings.get(listingId)?.images ?? [];
+        this.photos.set(listingId, images.map((i, n) => ({ id: i.imageId, rank: n + 1, alt: i.altText })));
+      }
+      return this.photos.get(listingId)!;
+    },
   },
   r2State: { configured: true },
   storage: new Map<string, Uint8Array>(),
@@ -29,17 +38,26 @@ vi.mock("@/lib/etsy/listing-details", () => ({
   fetchListingDetails: async (ids: number[]) => ids.map((id) => etsy.listings.get(id)).filter(Boolean),
 }));
 vi.mock("@/lib/etsy/listing-images", () => ({
-  uploadListingImage: async ({ filename, bytes, rank }: { filename: string; bytes: Uint8Array; rank: number }) => {
-    etsy.uploaded.push({ filename, bytes: bytes.length });
-    return { listingImageId: 500 + rank, rank, url: null };
+  uploadListingImage: async (p: { listingId: number; filename: string; bytes: Uint8Array; rank: number; altText?: string }) => {
+    etsy.uploaded.push({ filename: p.filename, bytes: p.bytes.length });
+    etsy.photosOf(p.listingId).push({ id: 500 + p.rank, rank: p.rank, alt: p.altText ?? "" });
+    return { listingImageId: 500 + p.rank, rank: p.rank, url: null };
   },
-  assignListingImage: async ({ listingImageId, rank }: { listingImageId: number; rank: number }) => {
-    etsy.assigned.push({ listingImageId, rank });
-    return { listingImageId, rank, url: null };
+  assignListingImage: async (p: { listingId: number; listingImageId: number; rank: number; altText?: string }) => {
+    etsy.assigned.push({ listingImageId: p.listingImageId, rank: p.rank });
+    const photo = etsy.photosOf(p.listingId).find((x) => x.id === p.listingImageId);
+    if (photo) {
+      photo.rank = p.rank;
+      if (p.altText !== undefined) photo.alt = p.altText;
+    }
+    return { listingImageId: p.listingImageId, rank: p.rank, url: null };
   },
-  deleteListingImage: async ({ listingImageId }: { listingImageId: number }) => {
-    etsy.deleted.push(listingImageId);
+  deleteListingImage: async (p: { listingId: number; listingImageId: number }) => {
+    etsy.deleted.push(p.listingImageId);
+    etsy.photos.set(p.listingId, etsy.photosOf(p.listingId).filter((x) => x.id !== p.listingImageId));
   },
+  readListingImagesInOrder: async (listingId: number) =>
+    [...etsy.photosOf(listingId)].sort((a, b) => a.rank - b.rank).map((x) => ({ imageId: x.id, altText: x.alt })),
 }));
 vi.mock("@/lib/etsy/listing-video", () => ({
   uploadListingVideo: vi.fn(async () => {}),
@@ -94,6 +112,7 @@ beforeEach(() => {
   ]);
   etsy.owned = new Set([101, 102]);
   etsy.assigned = [];
+  etsy.photos = new Map();
   etsy.deleted = [];
   etsy.uploaded = [];
   etsy.cached = [];
@@ -108,6 +127,11 @@ describe("applying a scheduled bulk edit", () => {
 
     expect(results).toEqual([{ listingId: 101, title: "Listing 101", ok: true }]);
     expect(etsy.uploaded).toEqual([{ filename: "back.jpg", bytes: 3 }]);
+    expect(etsy.deleted).toEqual([]);
+    expect(etsy.photosOf(101).sort((a, b) => a.rank - b.rank).map((x) => [x.id, x.alt])).toEqual([
+      [1, "Front"],
+      [502, "Back"],
+    ]);
     expect(etsy.applyBulkUpdates).toHaveBeenCalledWith(111, [{ listingId: 101, patch: { title: "New title" } }]);
     expect(etsy.cached).toEqual([{ listingId: 101, patch: { title: "New title" } }]);
   });
@@ -193,6 +217,9 @@ describe("without file storage", () => {
       { listingImageId: 2, rank: 1 },
       { listingImageId: 1, rank: 2 },
     ]);
+    expect(etsy.deleted).toEqual([]);
+    expect(etsy.uploaded).toEqual([]);
+    expect(etsy.photosOf(101).sort((a, b) => a.rank - b.rank).map((x) => x.id)).toEqual([2, 1]);
   });
 
   test("a stored photo that has gone missing fails only that listing's photos", async () => {

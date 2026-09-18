@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { fetchListingDetails } from "@/lib/etsy/listing-details";
 import { checkImageFileBasics } from "@/lib/etsy/listing-image-limits";
-import { uploadListingImage } from "@/lib/etsy/listing-images";
+import { readListingImagesInOrder, uploadListingImage } from "@/lib/etsy/listing-images";
 import {
   applyListingMediaEdit,
   isEmptyMediaPlan,
@@ -117,6 +117,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       },
       imageName: (index) => imageFiles[index]?.name || `Photo ${index + 1}`,
       videoName: (index) => videoFiles[index]?.name || `Video ${index + 1}`,
+      readImages: () => readListingImagesInOrder(listingId),
     });
 
     const [after] = await fetchListingDetails([listingId]).catch(() => [undefined]);
