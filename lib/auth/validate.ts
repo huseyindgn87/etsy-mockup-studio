@@ -24,10 +24,9 @@ export interface RegistrationInput {
 export type RegistrationError =
   | "invalid_email"
   | "weak_password"
-  | "password_mismatch"
-  | "email_taken";
+  | "password_mismatch";
 
-/** Field-level validation only — "email already taken" is checked against the DB by the caller. */
+/** Field-level validation only. An already-registered email is never reported — see app/api/auth/register/route.ts. */
 export function validateRegistration(
   input: RegistrationInput,
 ): { ok: true; email: string; password: string } | { ok: false; error: RegistrationError } {
@@ -45,5 +44,4 @@ export const REGISTRATION_ERROR_MESSAGES: Record<RegistrationError, string> = {
   invalid_email: "Enter a valid email address.",
   weak_password: `Password must be at least ${MIN_PASSWORD_LENGTH} characters.`,
   password_mismatch: "Passwords don't match.",
-  email_taken: "An account with that email already exists.",
 };

@@ -3,6 +3,7 @@ import Credentials from "next-auth/providers/credentials";
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import { prisma } from "@/lib/db/prisma";
 import { authorizeCredentials } from "@/lib/auth/authorize";
+import { clientIp } from "@/lib/auth/throttle";
 import { REMEMBER_ME_MAX_AGE_SECONDS } from "@/lib/auth/session-cookie";
 
 /**
@@ -33,12 +34,17 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         // Second step for accounts with two-factor auth on — see lib/auth/authorize.ts.
         code: { label: "Authentication code", type: "text" },
         recoveryCode: { label: "Recovery code", type: "text" },
+        // Cloudflare Turnstile token, required after an account's first lock — see lib/auth/throttle.ts.
+        turnstileToken: { label: "Human check", type: "text" },
       },
-      authorize: (credentials) =>
-        authorizeCredentials(credentials?.email, credentials?.password, credentials?.rememberMe, {
-          code: credentials?.code,
-          recoveryCode: credentials?.recoveryCode,
-        }),
+      authorize: (credentials, request) =>
+        authorizeCredentials(
+          credentials?.email,
+          credentials?.password,
+          credentials?.rememberMe,
+          { code: credentials?.code, recoveryCode: credentials?.recoveryCode },
+          { ip: clientIp(request?.headers), turnstileToken: credentials?.turnstileToken },
+        ),
     }),
   ],
   callbacks: {

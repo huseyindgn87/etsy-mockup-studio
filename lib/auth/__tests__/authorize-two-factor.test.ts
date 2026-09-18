@@ -7,6 +7,8 @@ vi.mock("@/lib/db/prisma", async () => ({
 import { beginTwoFactorSetup, enableTwoFactor } from "@/lib/account/two-factor";
 import { db, resetDb, seedUser } from "@/lib/account/__tests__/two-factor-fake-db";
 import { authorizeCredentials } from "../authorize";
+import { setThrottleStore } from "../throttle";
+import { createMemoryThrottleStore } from "./memory-throttle-store";
 import { hashPassword } from "../password";
 import { totpAt } from "../totp";
 import { InvalidTwoFactorCodeError, TwoFactorRequiredError } from "../two-factor-errors";
@@ -18,6 +20,7 @@ let secret: string;
 let recoveryCodes: string[];
 
 beforeEach(async () => {
+  setThrottleStore(createMemoryThrottleStore());
   vi.stubEnv("TWO_FACTOR_ENCRYPTION_KEY", "test-two-factor-key-0123456789abcdef");
   passwordHash ??= await hashPassword(PASSWORD);
   resetDb();
@@ -83,5 +86,46 @@ describe("authorizeCredentials with two-factor auth on", () => {
   test("accounts without 2FA sign in with just the password", async () => {
     seedUser({ id: "u2", email: "no2fa@example.com", passwordHash });
     expect(await authorizeCredentials("no2fa@example.com", PASSWORD)).toMatchObject({ id: "u2" });
+  });
+});
+
+describe("wrong 2FA codes count toward the account lock", () => {
+  const wrongCode = () => (totpAt(secret) === "000000" ? "111111" : "000000");
+
+  test("3 wrong codes lock the account; the right password and code then wait out the lock", async () => {
+    const now = new Date();
+    const ctx = { now };
+    await expect(authorizeCredentials(EMAIL, PASSWORD, false, { code: wrongCode() }, ctx)).rejects.toMatchObject({
+      code: "invalid_two_factor_code",
+    });
+    await expect(authorizeCredentials(EMAIL, PASSWORD, false, { code: wrongCode() }, ctx)).rejects.toMatchObject({
+      code: "invalid_two_factor_code",
+    });
+    const third = authorizeCredentials(EMAIL, PASSWORD, false, { code: wrongCode() }, ctx);
+    await expect(third).rejects.toMatchObject({ code: expect.stringMatching(/^account_locked:\d+$/) });
+
+    await expect(authorizeCredentials(EMAIL, PASSWORD, false, { code: totpAt(secret) }, ctx)).rejects.toMatchObject({
+      code: expect.stringMatching(/^account_locked:/),
+    });
+  });
+
+  test("wrong passwords and wrong codes share one count", async () => {
+    const ctx = { now: new Date() };
+    expect(await authorizeCredentials(EMAIL, "wrong-password", false, {}, ctx)).toBeNull();
+    expect(await authorizeCredentials(EMAIL, "wrong-password", false, {}, ctx)).toBeNull();
+    await expect(authorizeCredentials(EMAIL, PASSWORD, false, { code: wrongCode() }, ctx)).rejects.toMatchObject({
+      code: expect.stringMatching(/^account_locked:/),
+    });
+  });
+
+  test("after the lock, the 2FA step also needs the human check", async () => {
+    const start = Date.now();
+    for (let i = 0; i < 3; i++) {
+      await authorizeCredentials(EMAIL, PASSWORD, false, { code: wrongCode() }, { now: new Date(start) }).catch(() => {});
+    }
+    const later = { now: new Date(start + 4 * 60_000) };
+    await expect(authorizeCredentials(EMAIL, PASSWORD, false, { code: totpAt(secret) }, later)).rejects.toMatchObject({
+      code: "human_check_required",
+    });
   });
 });

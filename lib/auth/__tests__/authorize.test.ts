@@ -12,8 +12,11 @@ vi.mock("@/lib/db/prisma", () => ({
 }));
 
 import { authorizeCredentials } from "../authorize";
+import { setThrottleStore } from "../throttle";
+import { createMemoryThrottleStore } from "./memory-throttle-store";
 
 beforeEach(() => {
+  setThrottleStore(createMemoryThrottleStore());
   users.clear();
 });
 

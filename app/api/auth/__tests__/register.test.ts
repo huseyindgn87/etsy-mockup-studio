@@ -25,16 +25,19 @@ vi.mock("@/lib/db/prisma", () => ({
 }));
 
 import { POST } from "@/app/api/auth/register/route";
+import { setThrottleStore } from "@/lib/auth/throttle";
+import { createMemoryThrottleStore } from "@/lib/auth/__tests__/memory-throttle-store";
 
-function req(body: unknown) {
+function req(body: unknown, ip = "203.0.113.7") {
   return new Request("http://localhost/api/auth/register", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "x-forwarded-for": ip },
     body: JSON.stringify(body),
   });
 }
 
 beforeEach(() => {
+  setThrottleStore(createMemoryThrottleStore());
   users.clear();
   nextId = 1;
 });
@@ -45,8 +48,8 @@ describe("POST /api/auth/register", () => {
   test("creates an account and returns 201", async () => {
     const res = await POST(req(valid));
     expect(res.status).toBe(201);
-    const body = await res.json();
-    expect(body.user.email).toBe("seller@example.com");
+    expect(await res.json()).toEqual({ ok: true });
+    expect(users.get("seller@example.com")).toBeDefined();
   });
 
   test("hashes the password — it is never stored in plain text", async () => {
@@ -58,11 +61,36 @@ describe("POST /api/auth/register", () => {
     expect(stored!.passwordHash).toMatch(/^\$2[aby]\$12\$/);
   });
 
-  test("rejects a duplicate email with 409, without creating a second row", async () => {
-    await POST(req(valid));
-    const res = await POST(req(valid));
-    expect(res.status).toBe(409);
-    expect((await res.json()).error).toMatch(/already exists/i);
+  test("a duplicate email gets the same answer as a new one, and the existing account is untouched", async () => {
+    const first = await POST(req(valid));
+    const original = users.get("seller@example.com")!.passwordHash;
+    const res = await POST(req({ ...valid, password: "differentpass", confirmPassword: "differentpass" }));
+    expect(res.status).toBe(first.status);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(users.size).toBe(1);
+    expect(users.get("seller@example.com")!.passwordHash).toBe(original);
+  });
+
+  test("allows 5 sign-ups per IP per hour, then answers 429 with when to retry", async () => {
+    vi.useFakeTimers({ now: new Date("2026-09-18T10:00:00Z"), toFake: ["Date"] });
+    try {
+      for (let i = 0; i < 5; i++) {
+        expect((await POST(req({ ...valid, email: `s${i}@example.com` }))).status).toBe(201);
+      }
+      const blocked = await POST(req({ ...valid, email: "s6@example.com" }));
+      expect(blocked.status).toBe(429);
+      const body = await blocked.json();
+      expect(body.error).toMatch(/Too many sign-ups from this network\. Try again in 60 minutes\./);
+      expect(body.retryAt).toBe("2026-09-18T11:00:00.000Z");
+      expect(users.has("s6@example.com")).toBe(false);
+
+      expect((await POST(req({ ...valid, email: "other@example.com" }, "198.51.100.1"))).status).toBe(201);
+
+      vi.setSystemTime(new Date("2026-09-18T11:00:01Z"));
+      expect((await POST(req({ ...valid, email: "s6@example.com" }))).status).toBe(201);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("rejects a weak (short) password with 400", async () => {

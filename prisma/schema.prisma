@@ -89,6 +89,25 @@ model TwoFactorRecoveryCode {
   @@map("two_factor_recovery_codes")
 }
 
+/// Brute-force counters (lib/auth/throttle.ts), keyed by what they limit — a
+/// sign-in email's SHA-256 (`login:<hash>`, whether or not an account has
+/// that email, so a lock never reveals one exists), a client IP's failed
+/// sign-ins (`login-ip:<ip>`) or sign-ups (`register-ip:<ip>`). `failures`
+/// counts since the last lock (or the window start, for IP keys);
+/// `lockLevel` is how many locks the key has had; `emailLocked` is set once
+/// the 1-hour level is reached and is cleared only by an email unlock.
+model AuthThrottle {
+  key         String    @id
+  failures    Int       @default(0)
+  lockLevel   Int       @default(0)
+  lockedUntil DateTime?
+  emailLocked Boolean   @default(false)
+  windowStart DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@map("auth_throttles")
+}
+
 /// Auth.js Prisma adapter model — linked-account storage for non-credentials
 /// providers. Unused today (Credentials is the only provider) but required
 /// by the adapter's schema contract, and here for when a social provider is

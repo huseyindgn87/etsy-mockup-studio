@@ -14,6 +14,14 @@ vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(),
 }));
 
+vi.mock("@/app/components/Turnstile", () => ({
+  default: ({ onToken }: { onToken: (token: string) => void }) => (
+    <button type="button" onClick={() => onToken("turnstile-token")}>
+      Pass human check
+    </button>
+  ),
+}));
+
 import LoginPage from "../page";
 
 beforeEach(() => {
@@ -159,5 +167,75 @@ describe("LoginPage — branding", () => {
     const card = screen.getByRole("main");
     expect(card).toHaveClass("rounded-card", "bg-surface", "backdrop-blur-md");
     expect(card).not.toHaveClass("entry-card");
+  });
+});
+
+describe("LoginPage — brute-force limits", () => {
+  test("a lock says when to try again and then asks for the human check", async () => {
+    const until = new Date(Date.now() + 3 * 60_000);
+    signInMock.mockReset().mockResolvedValueOnce({ error: "CredentialsSignin", code: `account_locked:${until.getTime()}` });
+    render(<LoginPage />);
+    fillAndSubmit();
+
+    const clock = until.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      `Too many failed attempts. Try again at ${clock} (in 3 minutes).`,
+    );
+    expect(screen.getByRole("button", { name: "Pass human check" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign in" })).toBeDisabled();
+  });
+
+  test("the human-check token is sent with the next attempt, once", async () => {
+    signInMock
+      .mockReset()
+      .mockResolvedValueOnce({ error: "CredentialsSignin", code: "human_check_required" })
+      .mockResolvedValueOnce({ error: null });
+    render(<LoginPage />);
+    fillAndSubmit();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Complete the human check below, then try again.");
+    fireEvent.click(screen.getByRole("button", { name: "Pass human check" }));
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "goodpassword" } });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+    await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/"));
+    expect(signInMock).toHaveBeenLastCalledWith(
+      "credentials",
+      expect.objectContaining({ turnstileToken: "turnstile-token" }),
+    );
+  });
+
+  test("3 wrong 2FA codes send the user back to sign in again", async () => {
+    const until = Date.now() + 3 * 60_000;
+    signInMock
+      .mockReset()
+      .mockResolvedValueOnce({ error: "CredentialsSignin", code: "two_factor_required" })
+      .mockResolvedValueOnce({ error: "CredentialsSignin", code: `account_locked:${until}` });
+    render(<LoginPage />);
+    fillAndSubmit();
+    fireEvent.change(await screen.findByLabelText("Authentication code"), { target: { value: "000000" } });
+    fireEvent.click(screen.getByRole("button", { name: "Verify" }));
+
+    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Password")).toHaveValue("");
+    expect(screen.getByRole("alert")).toHaveTextContent(/Too many failed attempts\. Try again at/);
+  });
+
+  test("the IP limit and the email-verification lock each have their own message", async () => {
+    signInMock
+      .mockReset()
+      .mockResolvedValueOnce({ error: "CredentialsSignin", code: `rate_limited:${Date.now() + 10 * 60_000}` })
+      .mockResolvedValueOnce({ error: "CredentialsSignin", code: "email_verification_locked" });
+    render(<LoginPage />);
+    fillAndSubmit();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /Too many failed sign-in attempts from this network\. Try again at .* \(in 10 minutes\)\./,
+    );
+
+    fillAndSubmit();
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(/locked after too many failed sign-in attempts.*verifying by email/),
+    );
+    expect(document.body.textContent).not.toMatch(/seller@example\.com.*(exist|not found)/i);
   });
 });

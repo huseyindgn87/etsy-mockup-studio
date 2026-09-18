@@ -14,7 +14,7 @@ export const CHANGE_EMAIL_ERROR_MESSAGES: Record<ChangeEmailError, string> = {
   password_required: "Enter your current password to change your email.",
   wrong_password: "Current password is incorrect.",
   same_email: "That's already your email address.",
-  email_taken: "An account with that email already exists.",
+  email_taken: "That email address can't be used. Choose a different one.",
 };
 
 export const CHANGE_EMAIL_ERROR_STATUS: Record<ChangeEmailError, number> = {
