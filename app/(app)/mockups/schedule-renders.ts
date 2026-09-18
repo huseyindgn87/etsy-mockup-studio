@@ -14,6 +14,7 @@ import { MAX_IMAGE_SIZE_BYTES, MAX_LISTING_IMAGES } from "@/lib/etsy/listing-ima
 import { blobToRaster, rasterToCanvas } from "@/lib/mockup/client";
 import { compose } from "@/lib/mockup/compose";
 import { searchJpegQuality } from "@/lib/mockup/encode-search";
+import type { TemplateRef } from "@/lib/mockup/template-types";
 import type { Calibration, Overlay, Raster } from "@/lib/mockup/types";
 import { normalizeBlendMode } from "@/lib/mockup/validate";
 import { imageSlot } from "@/lib/scheduling/render-keys";
@@ -31,6 +32,8 @@ export interface RenderableMockup {
   psdH: number;
   calibration: Calibration;
   overlays: { file: File; x: number; y: number; blend: string; alpha: number; clip: boolean; name: string }[];
+  /** A template's raw file stays on the server, so it is rendered there (`file` is only a preview). */
+  template?: TemplateRef;
 }
 
 export interface RenderableDesign {
@@ -85,8 +88,31 @@ async function encodeJpeg(raster: Raster): Promise<Blob> {
   return trials.get(search.quality) ?? canvasToJpeg(canvas, search.quality);
 }
 
+/** A template mockup × design, rendered by the server from the raw template. */
+async function renderTemplateJpeg(mockup: RenderableMockup, design: RenderableDesign): Promise<Blob> {
+  const fd = new FormData();
+  fd.append("design", design.file);
+  fd.set(
+    "payload",
+    JSON.stringify({
+      format: "jpeg",
+      targetMB: [TARGET_MIN_BYTES / 1024 / 1024, TARGET_MAX_BYTES / 1024 / 1024],
+      single: true,
+      mockups: [
+        { name: mockup.name, width: mockup.psdW, height: mockup.psdH, calibration: mockup.calibration, template: mockup.template },
+      ],
+      designs: [{ name: design.name }],
+      jobs: [{ mockup: 0, design: 0 }],
+    }),
+  );
+  const res = await fetch("/api/mockups/render", { method: "POST", body: fd });
+  if (!res.ok) throw new Error(await errorText(res));
+  return res.blob();
+}
+
 /** One mockup × design, composited at full resolution and encoded as JPEG. */
 export async function renderMockupJpeg(mockup: RenderableMockup, design: RenderableDesign): Promise<Blob> {
+  if (mockup.template) return renderTemplateJpeg(mockup, design);
   const [mock, designRaster, overlayRasters] = await Promise.all([
     blobToRaster(mockup.file),
     blobToRaster(design.file),

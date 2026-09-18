@@ -5,6 +5,7 @@ const dirents = (names: string[]) => names.map((name) => ({ name, isFile: () => 
 let templateFiles: string[] = [];
 vi.mock("node:fs/promises", () => ({
   readdir: vi.fn(async () => dirents(templateFiles)),
+  readFile: vi.fn(async () => Buffer.from("raw")),
 }));
 
 interface Row {
@@ -112,6 +113,7 @@ import { solid } from "./helpers";
 import {
   createUserTemplate,
   getUserTemplateImage,
+  getLibraryTemplateImage,
   listTemplateFiles,
   listTemplates,
   listUserTemplates,
@@ -138,7 +140,13 @@ beforeEach(() => {
 });
 
 describe("library templates", () => {
-  test("listTemplateFiles reads only jpg/jpeg/png from public/templates/", async () => {
+  test("getLibraryTemplateImage reads only files in the library", async () => {
+    templateFiles = ["shirt.png"];
+    expect(await getLibraryTemplateImage("../.env.local")).toBeNull();
+    expect(await getLibraryTemplateImage("shirt.png")).toEqual({ body: Buffer.from("raw"), contentType: "image/png" });
+  });
+
+  test("listTemplateFiles reads only jpg/jpeg/png from templates/", async () => {
     templateFiles = ["a.png", "b.JPG", "c.txt", "d.jpeg"];
     const files = await listTemplateFiles();
     expect(files).toEqual(["a.png", "b.JPG", "d.jpeg"]);
@@ -154,7 +162,7 @@ describe("library templates", () => {
     expect(shirt.calibrated).toBe(true);
     expect(shirt.source).toBe("library");
     expect(shirt.ownerId).toBeNull();
-    expect(shirt.imageUrl).toBe("/templates/shirt.png");
+    expect(shirt.imageUrl).toBe("/api/mockups/templates/library/shirt.png/image");
 
     const mug = list.find((t) => t.filename === "mug.png")!;
     expect(mug.calibrated).toBe(false);

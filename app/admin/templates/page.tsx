@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 
 /**
  * Calibration screen for the curated mockup template library. Reads
- * `public/templates/` (server-side) plus any saved `MockupTemplate` rows, then
+ * `templates/` (server-side) plus any saved `MockupTemplate` rows, then
  * hands the merged list to the client component for the drag/save loop.
  *
  * `listTemplates` hits the database — caught here so a DB hiccup (or a stale

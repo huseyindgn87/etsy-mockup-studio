@@ -1,6 +1,7 @@
 /**
  * Mockup template library — both the curated JPEG/PNG set the maintainer
- * calibrates at `/admin/templates` (flat files under `public/templates/`) and
+ * calibrates at `/admin/templates` (flat files under `templates/`, deliberately
+ * outside `public/` so they are never served as-is) and
  * a user's own uploaded JPEG/PNG, calibrated with the same UI and stored in
  * R2 (see AGENTS.md: users upload only flat images, never PSDs).
  *
@@ -11,17 +12,17 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { readdir } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db/prisma";
 import { userTemplateKey, putObject, getObject, isR2Configured } from "@/lib/storage/r2";
 import { DEFAULT_QUAD, type Quad } from "./types";
-import type { TemplateListItem } from "./template-types";
+import type { TemplateListItem, TemplateRef } from "./template-types";
 import { clamp, toQuad } from "./validate";
 import { validateTemplateUpload } from "./template-limits";
 
-const TEMPLATE_DIR = path.join(process.cwd(), "public", "templates");
+const TEMPLATE_DIR = path.join(process.cwd(), "templates");
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png"]);
 
 const cloneQuad = (q: Quad): Quad => q.map((p) => [...p]) as Quad;
@@ -40,10 +41,12 @@ type TemplateRow = {
   calibrated: boolean;
 };
 
+function libraryImageUrl(filename: string): string {
+  return `/api/mockups/templates/library/${encodeURIComponent(filename)}/image`;
+}
+
 function imageUrlFor(row: Pick<TemplateRow, "id" | "source" | "filename">): string {
-  return row.source === "user"
-    ? `/api/mockups/templates/${row.id}/image`
-    : `/templates/${row.filename}`;
+  return row.source === "user" ? `/api/mockups/templates/${row.id}/image` : libraryImageUrl(row.filename);
 }
 
 function toListItem(row: TemplateRow): TemplateListItem {
@@ -62,7 +65,7 @@ function toListItem(row: TemplateRow): TemplateListItem {
   };
 }
 
-/** Filenames of every template image in `public/templates/`, sorted. */
+/** Filenames of every template image in `templates/`, sorted. */
 export async function listTemplateFiles(): Promise<string[]> {
   let entries;
   try {
@@ -96,7 +99,7 @@ export async function listTemplates(): Promise<TemplateListItem[]> {
       dpiHint: row?.dpiHint ?? 300,
       quad: (row ? toQuad(row.quad) : null) ?? cloneQuad(DEFAULT_QUAD),
       calibrated: row?.calibrated ?? false,
-      imageUrl: `/templates/${filename}`,
+      imageUrl: libraryImageUrl(filename),
     };
   });
 }
@@ -133,7 +136,7 @@ function cleanSaveInput(filename: string, input: TemplateSaveInput) {
 
 /**
  * Upserts a curated library template's metadata + print-area quad, keyed by
- * filename. Rejects a filename with no matching file in `public/templates/` —
+ * filename. Rejects a filename with no matching file in `templates/` —
  * this table only ever describes library files that actually exist there.
  */
 export async function saveTemplate(
@@ -142,7 +145,7 @@ export async function saveTemplate(
 ): Promise<TemplateListItem> {
   const files = await listTemplateFiles();
   if (!files.includes(filename)) {
-    throw new Error(`No template file named "${filename}" in public/templates/.`);
+    throw new Error(`No template file named "${filename}" in templates/.`);
   }
 
   const data = cleanSaveInput(filename, input);
@@ -238,4 +241,24 @@ export async function getUserTemplateImage(
     throw new Error("Storage isn't set up yet — this template's image can't be loaded.");
   }
   return getObject(row.filename);
+}
+
+/**
+ * A library template's raw bytes, or `null` for a name that isn't one of the
+ * files in `templates/` (so no path can reach outside it).
+ */
+export async function getLibraryTemplateImage(
+  filename: string,
+): Promise<{ body: Buffer; contentType: string } | null> {
+  if (!(await listTemplateFiles()).includes(filename)) return null;
+  const body = await readFile(path.join(TEMPLATE_DIR, filename));
+  return { body, contentType: path.extname(filename).toLowerCase() === ".png" ? "image/png" : "image/jpeg" };
+}
+
+/** The raw template a render uses — library files for anyone, a user upload only for its owner. */
+export async function readTemplateForRender(
+  ref: TemplateRef,
+  userId: string,
+): Promise<{ body: Buffer; contentType: string } | null> {
+  return ref.source === "library" ? getLibraryTemplateImage(ref.filename) : getUserTemplateImage(userId, ref.id);
 }

@@ -66,7 +66,13 @@ import { useToast } from "@/app/components/toast/ToastProvider";
 import ListingPreviewModal, { type PreviewMediaItem } from "./ListingPreviewModal";
 import MockupCanvas from "./MockupCanvas";
 import TemplatePicker from "./TemplatePicker";
-import type { TemplateListItem } from "@/lib/mockup/template-types";
+import {
+  TEMPLATE_HEIGHT_HEADER,
+  TEMPLATE_WIDTH_HEADER,
+  templateRefOf,
+  type TemplateListItem,
+  type TemplateRef,
+} from "@/lib/mockup/template-types";
 
 /** Longest edge of the browser-side preview rasters (the server renders full-res). */
 const PREVIEW_MAX = 1400;
@@ -105,6 +111,8 @@ interface MockupItem {
    * already stored there; see the draft-upload effect in MockupsPageInner).
    */
   psdFile?: File;
+  /** Set for a template: `file` is only its watermarked preview, and renders name the template instead. */
+  template?: TemplateRef;
 }
 
 /**
@@ -675,16 +683,18 @@ function MockupsPageInner() {
       setShowTemplatePicker(false);
       setBusy("Loading template…");
       try {
+        const ref = templateRefOf(template);
+        if (!ref) throw new Error("This template can't be used yet.");
         const res = await fetch(template.imageUrl);
         if (!res.ok) throw new Error("Could not load the template image.");
         const blob = await res.blob();
-        const ext = blob.type === "image/png" ? "png" : "jpg";
-        const file = new File([blob], `${template.name || "template"}.${ext}`, {
-          type: blob.type || "image/jpeg",
-        });
-        const fullRaster = await blobToRaster(blob);
-        const scale = Math.min(1, PREVIEW_MAX / Math.max(fullRaster.width, fullRaster.height));
-        const mockRaster = scale === 1 ? fullRaster : await blobToRaster(blob, { scale });
+        const file = new File([blob], `${template.name || "template"}.jpg`, { type: blob.type || "image/jpeg" });
+        const previewRaster = await blobToRaster(blob);
+        const previewScale = Math.min(1, PREVIEW_MAX / Math.max(previewRaster.width, previewRaster.height));
+        const mockRaster = previewScale === 1 ? previewRaster : await blobToRaster(blob, { scale: previewScale });
+        const nativeW = Number(res.headers.get(TEMPLATE_WIDTH_HEADER)) || previewRaster.width;
+        const nativeH = Number(res.headers.get(TEMPLATE_HEIGHT_HEADER)) || previewRaster.height;
+        const scale = mockRaster.width / nativeW;
         const calibration: Calibration = {
           qs: [template.quad],
           q: template.quad,
@@ -703,8 +713,8 @@ function MockupsPageInner() {
           id: uid(),
           name: template.name || stripExt(file.name),
           file,
-          psdW: fullRaster.width,
-          psdH: fullRaster.height,
+          psdW: nativeW,
+          psdH: nativeH,
           contentHash: `template:${template.filename}`,
           previewScale: scale,
           mockRaster,
@@ -714,6 +724,7 @@ function MockupsPageInner() {
           hasSavedCalibration: template.calibrated,
           include: true,
           tone: null,
+          template: ref,
         };
         setMockups((prev) => [...prev, item]);
         setActiveId(item.id);
@@ -1424,7 +1435,7 @@ function MockupsPageInner() {
           flat++;
         }
       }
-      for (const m of included) fd.append("mockup", m.file);
+      for (const m of included) if (!m.template) fd.append("mockup", m.file);
       for (const d of designs) fd.append("design", d.file);
 
       const jobs = included.flatMap((m, i) =>
@@ -1444,6 +1455,7 @@ function MockupsPageInner() {
           width: m.psdW,
           height: m.psdH,
           calibration: m.calibration,
+          ...(m.template ? { template: m.template } : {}),
           overlays: m.overlays.map((o, j) => ({
             file: overlayBase[i] + j,
             x: o.x,

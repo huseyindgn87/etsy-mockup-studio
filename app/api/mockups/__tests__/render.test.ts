@@ -171,8 +171,16 @@ vi.mock("@/lib/etsy/listing-create", () => ({
   }),
 }));
 
+const { appAuth, readTemplateForRender } = vi.hoisted(() => ({
+  appAuth: vi.fn(async (): Promise<{ user: { id: string } } | null> => ({ user: { id: "u1" } })),
+  readTemplateForRender: vi.fn(async (): Promise<{ body: Buffer; contentType: string } | null> => null),
+}));
+vi.mock("@/auth", () => ({ auth: appAuth }));
+vi.mock("@/lib/mockup/template-store", () => ({ readTemplateForRender }));
+
 import { getEtsySession } from "@/lib/etsy/auth";
 import { POST } from "@/app/api/mockups/render/route";
+import { templatePreview } from "@/lib/mockup/template-preview";
 import { getRenderPool } from "@/lib/mockup/render-pool";
 
 afterAll(async () => {
@@ -1711,5 +1719,79 @@ describe("existing-listing editor: Save to Etsy writes the edited grid", () => {
     const body = (await res.json()) as { failed: { error: string }[] };
     expect(body.failed).toHaveLength(1);
     expect(editCalls).toEqual([]);
+  });
+});
+
+describe("rendering from a template reference", () => {
+  const GREY: [number, number, number] = [120, 120, 120];
+  const cornerQuad = [
+    [0.05, 0.05],
+    [0.3, 0.05],
+    [0.3, 0.3],
+    [0.05, 0.3],
+  ];
+  const payload = (template: unknown, extra: Record<string, unknown> = {}) => ({
+    format: "png",
+    single: true,
+    mockups: [{ name: "shirt", width: 200, height: 160, calibration: { qs: [cornerQuad], shade: 0 }, ...(template ? { template } : {}) }],
+    designs: [{ name: "logo" }],
+    jobs: [{ mockup: 0, design: 0 }],
+    ...extra,
+  });
+
+  test("the server reads the raw template; the output has no watermark or placeholder", async () => {
+    const raw = await png(200, 160, GREY);
+    readTemplateForRender.mockResolvedValueOnce({ body: raw, contentType: "image/png" });
+    const design = await png(40, 40, [200, 20, 20]);
+
+    const res = await POST(
+      form(payload({ source: "library", filename: "shirt.png" }), [{ field: "design", buf: design, name: "d.png" }]),
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/png");
+    expect(readTemplateForRender).toHaveBeenCalledWith({ source: "library", filename: "shirt.png" }, "u1");
+
+    const { data, info } = await sharp(Buffer.from(await res.arrayBuffer())).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    expect([info.width, info.height]).toEqual([200, 160]);
+    // Outside the print area — including the centre, where the preview's placeholder sits — every pixel is the raw template.
+    let off = 0;
+    for (let y = 60; y < 160; y++) {
+      for (let x = 0; x < 200; x++) {
+        const i = (y * 200 + x) * 3;
+        if (data[i] !== GREY[0] || data[i + 1] !== GREY[1] || data[i + 2] !== GREY[2]) off++;
+      }
+    }
+    expect(off).toBe(0);
+    // The design did land in its corner.
+    const corner = (30 * 200 + 30) * 3;
+    expect(data[corner]).toBeGreaterThan(data[corner + 1] + 50);
+  }, 30_000);
+
+  test("matches rendering the raw file directly, and differs from rendering its watermarked preview", async () => {
+    const raw = await png(200, 160, GREY);
+    const design = await png(40, 40, [20, 20, 200]);
+    const preview = (await templatePreview(raw)).body;
+    const render = async (template: unknown, mockup?: Buffer) => {
+      if (template) readTemplateForRender.mockResolvedValueOnce({ body: raw, contentType: "image/png" });
+      const files: { field: string; buf: Buffer; name: string }[] = [{ field: "design", buf: design, name: "d.png" }];
+      if (mockup) files.push({ field: "mockup", buf: mockup, name: "m.png" });
+      const res = await POST(form(payload(template), files));
+      expect(res.status).toBe(200);
+      return Buffer.from(await res.arrayBuffer());
+    };
+    const viaRef = await render({ source: "user", id: "t1" });
+    expect(viaRef.equals(await render(null, raw))).toBe(true);
+    expect(viaRef.equals(await render(null, preview))).toBe(false);
+  }, 30_000);
+
+  test("a template the caller can't read is a 404, and signed-out callers get a 401", async () => {
+    const design = await png(10, 10, [0, 0, 0]);
+    readTemplateForRender.mockResolvedValueOnce(null);
+    const missing = await POST(form(payload({ source: "user", id: "not-mine" }), [{ field: "design", buf: design, name: "d.png" }]));
+    expect(missing.status).toBe(404);
+
+    appAuth.mockResolvedValueOnce(null);
+    const signedOut = await POST(form(payload({ source: "library", filename: "shirt.png" }), [{ field: "design", buf: design, name: "d.png" }]));
+    expect(signedOut.status).toBe(401);
   });
 });

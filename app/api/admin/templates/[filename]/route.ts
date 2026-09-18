@@ -16,7 +16,7 @@ interface Body {
 /**
  * `PUT /api/admin/templates/[filename]` — upsert a curated template's name,
  * product type, colour, DPI hint, and print-area quad, keyed by its filename
- * under `public/templates/`. No Etsy session required: this is the
+ * under `templates/`. No Etsy session required: this is the
  * maintainer's own template library, not per-shop data.
  */
 export async function PUT(request: Request, { params }: { params: Promise<{ filename: string }> }) {

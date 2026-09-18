@@ -38,7 +38,7 @@ export default function TemplatesAdmin({ initialTemplates, loadError }: Props) {
           </Link>
           <p className="mt-1 text-sm font-semibold text-black dark:text-zinc-50">Mockup templates</p>
           <p className="text-xs text-zinc-500 dark:text-zinc-400">
-            Calibrate the print area for each template in public/templates/.
+            Calibrate the print area for each template in templates/.
           </p>
         </div>
       </header>
@@ -64,7 +64,7 @@ export default function TemplatesAdmin({ initialTemplates, loadError }: Props) {
           {templates.length === 0 ? (
             !loadError && (
               <p className="rounded-lg border border-dashed border-black/20 p-4 text-sm text-zinc-500 dark:border-white/25 dark:text-zinc-400">
-                No templates found. Add JPEG or PNG files to public/templates/ and reload this page.
+                No templates found. Add JPEG or PNG files to templates/ and reload this page.
               </p>
             )
           ) : (
@@ -112,7 +112,7 @@ export default function TemplatesAdmin({ initialTemplates, loadError }: Props) {
           <div className="min-w-0 flex-1">
             <TemplateCalibrator
               key={selected.filename}
-              imageUrl={selected.imageUrl}
+              imageUrl={`${selected.imageUrl}?raw=1`}
               initial={{
                 name: selected.name,
                 productType: selected.productType,

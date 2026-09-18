@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { auth } from "@/auth";
 import { getEtsySession } from "@/lib/etsy/auth";
 import { createDraftListing, updateVariationImages } from "@/lib/etsy/listing-create";
 import { fetchListingDetails } from "@/lib/etsy/listing-details";
@@ -32,6 +33,8 @@ import {
   normalizeBlendMode,
   num,
 } from "@/lib/mockup/validate";
+import { readTemplateForRender } from "@/lib/mockup/template-store";
+import { parseTemplateRef } from "@/lib/mockup/template-types";
 import { StoreZip } from "@/lib/mockup/zip-store";
 
 export const runtime = "nodejs";
@@ -59,6 +62,12 @@ interface MockupSpec {
   height?: number;
   calibration?: unknown;
   overlays?: OverlaySpec[];
+  /**
+   * A library or user template (`TemplateRef`) the server reads itself — the
+   * browser only ever holds its watermarked preview. Such a mockup has no
+   * `mockup` file part; the others take theirs in order.
+   */
+  template?: unknown;
 }
 interface JobSpec {
   mockup: number;
@@ -104,6 +113,8 @@ interface RenderPayload {
   videoOrder?: unknown;
   /** When set, upload the renders to this Etsy listing instead of zipping. */
   publishTo?: PublishSpec;
+  /** One job, answered with the image itself instead of a ZIP (the editor's scheduled renders). */
+  single?: boolean;
 }
 
 const FORBIDDEN_NAME_CHARS = '/\\:*?"<>|';
@@ -274,21 +285,23 @@ export async function POST(request: Request) {
     typeof payload.publishTo === "object" &&
     payload.publishTo.mode !== "copy" &&
     payload.publishTo.mode !== "new";
-  if (mockupFiles.length === 0 && ownImageFiles.length === 0 && !editExisting) {
+  const mockups = Array.isArray(payload.mockups) ? payload.mockups : [];
+  const templateRefs = mockups.map((m) => parseTemplateRef(m?.template));
+  const templateCount = templateRefs.filter((r) => r).length;
+  if (mockupFiles.length === 0 && templateCount === 0 && ownImageFiles.length === 0 && !editExisting) {
     return NextResponse.json(
       { error: "At least one `mockup` or `ownImage` file is required." },
       { status: 400 },
     );
   }
 
-  const mockups = Array.isArray(payload.mockups) ? payload.mockups : [];
   const designs = Array.isArray(payload.designs) ? payload.designs : [];
   const jobs = Array.isArray(payload.jobs) ? payload.jobs : [];
   const ownImages = Array.isArray(payload.ownImages) ? payload.ownImages : [];
 
-  if (mockups.length !== mockupFiles.length) {
+  if (mockups.length - templateCount !== mockupFiles.length) {
     return NextResponse.json(
-      { error: "`payload.mockups` length must match the number of `mockup` files." },
+      { error: "`payload.mockups` without a `template` must match the number of `mockup` files." },
       { status: 400 },
     );
   }
@@ -315,7 +328,7 @@ export async function POST(request: Request) {
 
   for (let i = 0; i < jobs.length; i++) {
     const j = jobs[i];
-    if (!isIndex(j.mockup, mockupFiles.length)) {
+    if (!isIndex(j.mockup, mockups.length)) {
       return NextResponse.json({ error: `jobs[${i}].mockup out of range.` }, { status: 400 });
     }
     if (j.design != null && !isIndex(j.design, designFiles.length)) {
@@ -353,7 +366,25 @@ export async function POST(request: Request) {
         : "mockups",
     ) + ".zip";
 
-  const mockBufs = await Promise.all(mockupFiles.map((f) => f.arrayBuffer()));
+  let userId: string | null = null;
+  if (templateCount > 0) {
+    userId = (await auth())?.user?.id ?? null;
+    if (!userId) return NextResponse.json({ error: "Sign in to use templates." }, { status: 401 });
+  }
+  const mockBufs: ArrayBuffer[] = [];
+  let nextFile = 0;
+  for (let i = 0; i < mockups.length; i++) {
+    const ref = templateRefs[i];
+    if (!ref) {
+      mockBufs.push(await mockupFiles[nextFile++].arrayBuffer());
+      continue;
+    }
+    const obj = await readTemplateForRender(ref, userId!).catch(() => null);
+    if (!obj) {
+      return NextResponse.json({ error: `mockups[${i}]: template not found.` }, { status: 404 });
+    }
+    mockBufs.push(obj.body.buffer.slice(obj.body.byteOffset, obj.body.byteOffset + obj.body.byteLength) as ArrayBuffer);
+  }
   const designBufs = await Promise.all(designFiles.map((f) => f.arrayBuffer()));
   const overlayBufs = await Promise.all(overlayFiles.map((f) => f.arrayBuffer()));
   // Each job transfers (detaches) its buffers to a worker, so hand out copies.
@@ -789,6 +820,20 @@ export async function POST(request: Request) {
       },
       { status: uploaded.length > 0 || createdDraft ? 200 : 502 },
     );
+  }
+
+  if (payload.single === true) {
+    if (jobs.length !== 1) {
+      return NextResponse.json({ error: "`single` renders exactly one job." }, { status: 400 });
+    }
+    const res = await pool.run(buildInput(jobs[0]));
+    if (!res.ok) return NextResponse.json({ error: res.error }, { status: 500 });
+    return new Response(new Uint8Array(res.bytes), {
+      headers: {
+        "Content-Type": res.ext === "png" ? "image/png" : "image/jpeg",
+        "Cache-Control": "no-store",
+      },
+    });
   }
 
   const tagged = jobs.map((j, k) =>

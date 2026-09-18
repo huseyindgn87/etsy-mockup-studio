@@ -1,20 +1,26 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
+import { isAdminUserId } from "@/lib/auth/admin";
 import { getUserTemplateImage } from "@/lib/mockup/template-store";
+import { templateImageResponse, wantsRaw } from "../../image-response";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * `GET /api/mockups/templates/[id]/image` — streams a user's own uploaded
- * template image back from R2. Library templates never hit this route; they're
- * served statically from `/templates/...`. 404s for someone else's upload, a
- * missing id, or a library template id — no cross-user leakage of designs.
+ * `GET /api/mockups/templates/[id]/image` — a user's own uploaded template,
+ * read from R2, as a watermarked preview like every template (the raw file,
+ * `?raw=1`, only for an admin). 404s for someone else's upload, a missing id,
+ * or a library template id — no cross-user leakage of designs.
  */
-export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const session = await auth();
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
+  }
+  const raw = wantsRaw(request);
+  if (raw && !isAdminUserId(session.user.id)) {
+    return NextResponse.json({ error: "Template not found." }, { status: 404 });
   }
   const { id } = await params;
 
@@ -28,5 +34,5 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
   if (!obj) {
     return NextResponse.json({ error: "Template not found." }, { status: 404 });
   }
-  return new NextResponse(new Uint8Array(obj.body), { headers: { "Content-Type": obj.contentType } });
+  return templateImageResponse(obj, { raw });
 }

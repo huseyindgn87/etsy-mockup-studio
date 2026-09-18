@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { APP_NAME } from "@/lib/brand";
 import { rasterToCanvas } from "@/lib/mockup/client";
 import { compose } from "@/lib/mockup/compose";
 import {
@@ -220,6 +221,20 @@ export default function MockupCanvas({
       }
     >
       <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
+
+      {!design && (
+        <div
+          data-testid="mockup-placeholder"
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 flex items-center justify-center"
+        >
+          <span
+            className="select-none text-xl font-semibold tracking-[0.35em] text-black/15 sm:text-3xl dark:text-white/20"
+          >
+            {APP_NAME.toUpperCase()}
+          </span>
+        </div>
+      )}
 
       <svg
         className="pointer-events-none absolute inset-0 h-full w-full overflow-visible"

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
+import sharp from "sharp";
 
 // A plain `vi.fn()` (not typed against the real, overloaded `auth` export)
 // sidesteps TS picking the wrong overload (the Proxy-wrapping one) when this
@@ -59,6 +60,12 @@ function withSession() {
   });
 }
 
+const RAW_PNG = await sharp({
+  create: { width: 40, height: 30, channels: 3, background: { r: 90, g: 90, b: 90 } },
+})
+  .png()
+  .toBuffer();
+
 beforeEach(() => {
   authMock.mockClear();
   withSession();
@@ -66,7 +73,7 @@ beforeEach(() => {
   listUserTemplates.mockClear().mockResolvedValue([]);
   createUserTemplate.mockClear().mockResolvedValue(TEMPLATE);
   saveUserTemplateCalibration.mockClear().mockResolvedValue({ ...TEMPLATE, calibrated: true });
-  getUserTemplateImage.mockClear().mockResolvedValue({ body: Buffer.from("bytes"), contentType: "image/png" });
+  getUserTemplateImage.mockClear().mockResolvedValue({ body: RAW_PNG, contentType: "image/png" });
 });
 
 describe("GET /api/mockups/templates", () => {
@@ -190,11 +197,12 @@ describe("GET /api/mockups/templates/[id]/image", () => {
     expect(res.status).toBe(401);
   });
 
-  test("streams the image with its content type", async () => {
+  test("answers with a watermarked JPEG preview, never the stored file", async () => {
     const res = await imageGET(new Request("http://localhost/x"), idParams("t1"));
     expect(res.status).toBe(200);
-    expect(res.headers.get("Content-Type")).toBe("image/png");
-    expect(Buffer.from(await res.arrayBuffer()).toString()).toBe("bytes");
+    expect(res.headers.get("Content-Type")).toBe("image/jpeg");
+    expect(res.headers.get("X-Template-Width")).toBe("40");
+    expect(Buffer.from(await res.arrayBuffer()).equals(RAW_PNG)).toBe(false);
   });
 
   test("404 when the store returns null", async () => {
