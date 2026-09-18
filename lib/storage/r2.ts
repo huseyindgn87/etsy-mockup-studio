@@ -11,6 +11,7 @@ import {
   DeleteObjectCommand,
   DeleteObjectsCommand,
   GetObjectCommand,
+  HeadObjectCommand,
   ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
@@ -70,6 +71,11 @@ export function userTemplateKey(ownerId: string, storageName: string): string {
   return `templates/user/${ownerId}/${storageName}`;
 }
 
+/** Object key for one curated library template, by its library filename. */
+export function libraryTemplateKey(filename: string): string {
+  return `templates/library/${filename}`;
+}
+
 export async function putObject(key: string, body: Buffer, contentType: string): Promise<void> {
   await client().send(
     new PutObjectCommand({ Bucket: bucket(), Key: key, Body: body, ContentType: contentType }),
@@ -84,6 +90,17 @@ export async function getObject(key: string): Promise<{ body: Buffer; contentTyp
     return { body, contentType: res.ContentType ?? "application/octet-stream" };
   } catch (err) {
     if (err instanceof Error && err.name === "NoSuchKey") return null;
+    throw err;
+  }
+}
+
+/** The object's size in bytes, or `null` when it doesn't exist. */
+export async function headObject(key: string): Promise<{ size: number } | null> {
+  try {
+    const res = await client().send(new HeadObjectCommand({ Bucket: bucket(), Key: key }));
+    return { size: res.ContentLength ?? 0 };
+  } catch (err) {
+    if (err instanceof Error && (err.name === "NotFound" || err.name === "NoSuchKey")) return null;
     throw err;
   }
 }

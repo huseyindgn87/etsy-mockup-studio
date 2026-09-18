@@ -7,8 +7,8 @@ export const dynamic = "force-dynamic";
 
 /**
  * Calibration screen for the curated mockup template library. Reads
- * `templates/` (server-side) plus any saved `MockupTemplate` rows, then
- * hands the merged list to the client component for the drag/save loop.
+ * the library's `MockupTemplate` rows (files in R2), then
+ * hands the list to the client component for the drag/save loop.
  *
  * `listTemplates` hits the database — caught here so a DB hiccup (or a stale
  * Prisma client after a schema change) renders a readable in-page message

@@ -10,12 +10,15 @@ const storeMocks = vi.hoisted(() => ({
   getLibraryTemplateImage: vi.fn(),
   getUserTemplateImage: vi.fn(),
   saveTemplate: vi.fn(),
+  saveUserTemplateCalibration: vi.fn(),
+  deleteUserTemplate: vi.fn(),
 }));
 vi.mock("@/lib/mockup/template-store", () => storeMocks);
 
 import { GET as libraryImageGET } from "@/app/api/mockups/templates/library/[filename]/image/route";
 import { GET as userImageGET } from "@/app/api/mockups/templates/[id]/image/route";
 import { PUT as adminPUT } from "@/app/api/admin/templates/[filename]/route";
+import { DELETE as userTemplateDELETE } from "@/app/api/mockups/templates/[id]/route";
 
 const RAW = await sharp({
   create: { width: 2000, height: 1600, channels: 3, background: { r: 128, g: 128, b: 128 } },
@@ -37,6 +40,7 @@ beforeEach(() => {
   storeMocks.getLibraryTemplateImage.mockReset().mockResolvedValue({ body: RAW, contentType: "image/jpeg" });
   storeMocks.getUserTemplateImage.mockReset().mockResolvedValue({ body: RAW, contentType: "image/jpeg" });
   storeMocks.saveTemplate.mockReset();
+  storeMocks.deleteUserTemplate.mockReset().mockResolvedValue(true);
   signIn(REGULAR);
 });
 afterEach(() => {
@@ -105,5 +109,24 @@ describe("raw template files are never served to a regular user", () => {
     storeMocks.getLibraryTemplateImage.mockResolvedValue(null);
     const res = await libraryImageGET(req(), { params: Promise.resolve({ filename: "..%2F.env.local" }) });
     expect(res.status).toBe(404);
+  });
+});
+
+describe("DELETE /api/mockups/templates/[id]", () => {
+  test("deletes the caller's own template", async () => {
+    const res = await userTemplateDELETE(req(), userParams);
+    expect(res.status).toBe(200);
+    expect(storeMocks.deleteUserTemplate).toHaveBeenCalledWith(REGULAR, "t1");
+  });
+
+  test("answers 404 for a template the caller doesn't own", async () => {
+    storeMocks.deleteUserTemplate.mockResolvedValue(false);
+    expect((await userTemplateDELETE(req(), userParams)).status).toBe(404);
+  });
+
+  test("answers 401 when signed out", async () => {
+    authMock.mockResolvedValue(null);
+    expect((await userTemplateDELETE(req(), userParams)).status).toBe(401);
+    expect(storeMocks.deleteUserTemplate).not.toHaveBeenCalled();
   });
 });

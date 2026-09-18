@@ -11,7 +11,7 @@ export type TemplateSource = "library" | "user";
 export interface TemplateListItem {
   /** The `MockupTemplate` row id. Absent for an uncalibrated library file with no row yet. */
   id: string | null;
-  /** "library" (curated, templates/ — outside public/, never served as-is) or "user" (uploaded, R2). */
+  /** "library" (curated, R2 `templates/library/` — never served as-is) or "user" (uploaded, R2). */
   source: TemplateSource;
   /** Etsy user id of the uploader, or null for a curated library template. */
   ownerId: string | null;

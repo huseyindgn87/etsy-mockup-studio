@@ -200,11 +200,11 @@ model ListingDraft {
 }
 
 /// A mockup template — either a curated library entry (`source: "library"`,
-/// `ownerId: null`) backed by a flat JPEG/PNG under `public/templates/`, or a
+/// `ownerId: null`) backed by a flat JPEG/PNG in R2 under `templates/library/`, or a
 /// user's own uploaded JPEG/PNG (`source: "user"`, `ownerId` the signed-in
 /// `User` who uploaded it — not their Etsy account, see `MockupCalibration`)
 /// stored in R2 (see lib/storage/r2.ts). Library rows are keyed by their
-/// on-disk filename; user rows get a generated, globally-unique `filename`
+/// library filename; user rows get a generated, globally-unique `filename`
 /// used as their R2 object key (lib/mockup/template-store.ts) — it never
 /// collides with a library filename or another user's upload.
 ///
@@ -218,7 +218,7 @@ model MockupTemplate {
   /// The signed-in User who uploaded this template, or null for a curated
   /// library template.
   ownerId     String?
-  /// "library" (curated, public/templates/) or "user" (uploaded, R2).
+  /// "library" (curated, R2 templates/library/) or "user" (uploaded, R2 templates/user/).
   source      String   @default("library")
   filename    String   @unique
   name        String
