@@ -13,7 +13,6 @@ Single source of open work. Checked against the code on 2026-09-19.
 
 ### New (19 Sept)
 - [ ] Scheduling listings that have a video (blocked in `lib/scheduling/publish-guard.ts`).
-- [ ] My drafts: published scheduled listings remove their drafts; pending scheduled drafts show a clock badge.
 - [ ] Real-shop test of copy → edit → schedule after b88cd79 / 37aefb0.
 
 ### Backlog
@@ -40,6 +39,7 @@ Single source of open work. Checked against the code on 2026-09-19.
 
 ## Done
 
+- [x] My drafts: scheduled publish deletes its draft, published ones hidden, pending ones show a clock badge — 87534bf. Not run against the real DB.
 - [x] Personalization on/off switch (off = no questions sent) — 793055d.
 - [x] Alt text window: all photos with a field under each, one Save; bigger tile button + "Edit alt text" button — ec128d5.
 - [x] Pasting comma-separated text into Tags splits it into tags (editor + bulk rows) — a130659.
