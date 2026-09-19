@@ -55,3 +55,13 @@ export interface JobView {
 }
 
 export const isFinished = (status: JobStatus) => status === "done" || status === "failed";
+
+/**
+ * How long a job a user is waiting on may show no change at all — status,
+ * attempts, place in line, progress — before the UI stops waiting and reports
+ * it as stalled. Longer than a worker lease (2 min), so a dead worker's job
+ * gets its chance to be resumed first.
+ */
+export const JOB_STALL_MS = 3 * 60 * 1000;
+
+export const JOB_STALLED_MESSAGE = "This job stopped making progress. Try again in a few minutes.";

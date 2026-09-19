@@ -91,8 +91,10 @@ export default function RefreshShopModal({
     setErrorMessage(null);
 
     let pendingJobId: string | null = null;
+    let ended = false;
     const applyEvent = (event: RefreshProgressEvent) => {
       if (runIdRef.current !== runId) return; // superseded by a newer run (shop switch / retry)
+      if (event.type !== "queued" && event.type !== "status" && event.type !== "progress") ended = true;
       if (event.type === "queued") {
         setStatusMessage(event.message);
       } else if (event.type === "pending") {
@@ -111,7 +113,7 @@ export default function RefreshShopModal({
         onClose();
       } else {
         setPhase("error");
-        setErrorMessage(event.message);
+        setErrorMessage(event.message || (event as { error?: string }).error || "Refresh failed.");
       }
     };
 
@@ -121,7 +123,8 @@ export default function RefreshShopModal({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(shopId ? { shopId } : {}),
       });
-      if (!res.body) throw new Error("No response from server.");
+      const startFailed = `The refresh couldn't start (server error ${res.status}). Try again.`;
+      if (!res.body) throw new Error(res.ok ? "No response from server." : startFailed);
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -138,6 +141,9 @@ export default function RefreshShopModal({
         }
       }
       if (buffer.trim()) applyEvent(JSON.parse(buffer) as RefreshProgressEvent);
+      if (!ended) {
+        throw new Error(res.ok ? "The refresh stopped without finishing. Try again." : startFailed);
+      }
 
       if (pendingJobId) {
         const job = await waitForJob(pendingJobId, {

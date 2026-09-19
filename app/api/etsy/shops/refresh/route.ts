@@ -12,7 +12,7 @@ import { sealSession, SESSION_COOKIE, type EtsySession } from "@/lib/etsy/sessio
 import { describeJob } from "@/lib/jobs/describe";
 import { enqueueJob, toJobView } from "@/lib/jobs/queue";
 import { helpUntilFinished } from "@/lib/jobs/run";
-import { JOB_PRIORITY, type JobStatus } from "@/lib/jobs/types";
+import { JOB_PRIORITY, JOB_STALL_MS, JOB_STALLED_MESSAGE, type JobStatus } from "@/lib/jobs/types";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -67,6 +67,15 @@ function errorResponse(message: string, status: number): Response {
  * Strictly read-only against Etsy: the sync only ever issues GET requests.
  */
 export async function POST(request: NextRequest) {
+  try {
+    return await startRefresh(request);
+  } catch (err) {
+    console.error("[jobs] refresh couldn't start", err);
+    return errorResponse(err instanceof Error ? err.message : "Refresh failed.", 500);
+  }
+}
+
+async function startRefresh(request: NextRequest): Promise<Response> {
   const appSession = await auth();
   if (!appSession?.user?.id) return errorResponse("Not signed in.", 401);
   const userId = appSession.user.id;
@@ -132,6 +141,8 @@ export async function POST(request: NextRequest) {
           });
       };
       let last = "";
+      let lastState = "";
+      let changedAt = Date.now();
       try {
         for (;;) {
           const row = await prisma.etsyJob.findUnique({ where: { id: job.id } });
@@ -149,6 +160,16 @@ export async function POST(request: NextRequest) {
           const key = JSON.stringify(event);
           if (key !== last) emit(event);
           last = key;
+          const state = JSON.stringify([row.status, row.attempts, row.progress, row.error, row.runAfter]) + key;
+          if (state !== lastState) {
+            lastState = state;
+            changedAt = Date.now();
+          }
+          const waitingUntil = status === "retrying" ? row.runAfter.getTime() : 0;
+          if (Date.now() - Math.max(changedAt, waitingUntil) >= JOB_STALL_MS) {
+            emit({ type: "error", message: JOB_STALLED_MESSAGE });
+            break;
+          }
           if (Date.now() >= deadline) {
             emit({ type: "pending", jobId: job.id, message: "Still refreshing — this continues in the background." });
             break;

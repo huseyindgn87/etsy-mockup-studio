@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { syncListingPatch } from "@/lib/etsy/sync-request";
-import type { JobView } from "../types";
+import { waitForJob } from "../client";
+import { JOB_STALL_MS, JOB_STALLED_MESSAGE, type JobView } from "../types";
 
 const job = (over: Partial<JobView>): JobView => ({
   id: "job1",
@@ -66,5 +67,31 @@ describe("a save that's still queued when the request answers", () => {
     vi.stubGlobal("fetch", fetchMock);
     expect(await syncListingPatch(7, { title: "New" })).toEqual({ listingId: 7, ok: true });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("a job that stops making progress", () => {
+  test("ends the wait with an error instead of polling forever", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) =>
+        url.startsWith("/api/jobs/")
+          ? json({ job: job({ status: "running", position: null, progress: { done: 1, total: 5, message: null } }) })
+          : json({ jobId: "job1", job: job({}) }, 202),
+      ),
+    );
+    vi.useFakeTimers({ toFake: ["setTimeout", "Date"] });
+    const pending = syncListingPatch(7, { title: "New" });
+    await vi.advanceTimersByTimeAsync(JOB_STALL_MS + 5000);
+    expect(await pending).toEqual({ listingId: 7, ok: false, error: JOB_STALLED_MESSAGE });
+  });
+
+  test("a job waiting for its retry time isn't called stalled before then", async () => {
+    let t = Date.parse("2026-09-18T14:00:00Z");
+    const retrying = job({ status: "retrying", runAfter: new Date(t + JOB_STALL_MS * 2).toISOString() });
+    const polls = [retrying, retrying, retrying, job({ status: "done", position: null })];
+    vi.stubGlobal("fetch", vi.fn(async () => json({ job: polls.shift() })));
+    const done = await waitForJob("job1", { now: () => t, sleep: async () => void (t += JOB_STALL_MS) });
+    expect(done.status).toBe("done");
   });
 });
