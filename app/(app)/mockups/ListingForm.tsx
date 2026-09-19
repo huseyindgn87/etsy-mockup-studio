@@ -27,6 +27,7 @@ import {
   type PersonalizationFieldType,
   type PersonalizationQuestionInput,
 } from "@/lib/etsy/listing-personalization";
+import { addCommaSeparated } from "@/lib/etsy/form-list";
 
 /** The shape this form edits — read by the page when publishing `mode: "new"`. */
 export interface ListingFormProperty {
@@ -606,6 +607,13 @@ export default function ListingForm({
                 value={tagDraft}
                 maxLength={MAX_TAG_LENGTH}
                 onChange={(e) => setTagDraft(e.target.value)}
+                onPaste={(e) => {
+                  const text = e.clipboardData.getData("text");
+                  if (!text.includes(",")) return;
+                  e.preventDefault();
+                  patch({ tags: addCommaSeparated(value.tags, tagDraft + text, MAX_TAGS, MAX_TAG_LENGTH) });
+                  setTagDraft("");
+                }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === ",") {
                     e.preventDefault();

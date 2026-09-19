@@ -37,6 +37,7 @@ import type {
   TaxonomyProperty,
   WeightValue,
 } from "./types";
+import { addCommaSeparated } from "@/lib/etsy/form-list";
 
 /** Inventory fields a variation listing can't take from a single row. */
 export const INVENTORY_LOCKED = new Set<BulkFieldKey>(["price", "quantity", "sku"]);
@@ -97,6 +98,7 @@ export default function BulkFieldInput({
         maxLength={isTags ? MAX_TAG_LENGTH : MAX_MATERIAL_LENGTH}
         entries={Array.isArray(value) ? (value as string[]) : []}
         clearable={isTags}
+        splitOnPaste={isTags}
         onChange={(entries) => onChange(entries)}
       />
     );
@@ -412,6 +414,7 @@ function ChipsInput({
   max,
   maxLength,
   clearable = false,
+  splitOnPaste = false,
   onChange,
 }: {
   id: string;
@@ -421,6 +424,7 @@ function ChipsInput({
   max: number;
   maxLength: number;
   clearable?: boolean;
+  splitOnPaste?: boolean;
   onChange: (entries: string[]) => void;
 }) {
   const [draft, setDraft] = useState("");
@@ -473,6 +477,13 @@ function ChipsInput({
             value={draft}
             maxLength={maxLength}
             onChange={(e) => setDraft(e.target.value)}
+            onPaste={(e) => {
+              const text = e.clipboardData.getData("text");
+              if (!splitOnPaste || !text.includes(",")) return;
+              e.preventDefault();
+              onChange(addCommaSeparated(entries, draft + text, max, maxLength));
+              setDraft("");
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter" || e.key === ",") {
                 e.preventDefault();

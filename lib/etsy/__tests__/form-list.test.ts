@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { joinIdList, joinList } from "@/lib/etsy/form-list";
+import { addCommaSeparated, joinIdList, joinList } from "@/lib/etsy/form-list";
 
 describe("joinList", () => {
   test("joins with commas into a single field value", () => {
@@ -24,5 +24,20 @@ describe("joinIdList", () => {
   test("joins ids with commas", () => {
     expect(joinIdList([66, 67])).toBe("66,67");
     expect(joinIdList([])).toBe("");
+  });
+});
+
+describe("addCommaSeparated", () => {
+  test("splits pasted text into separate trimmed entries", () => {
+    expect(addCommaSeparated(["gift"], " funny shirt, retro tee ,,Gift, cat", 13, 20)).toEqual([
+      "gift",
+      "funny shirt",
+      "retro tee",
+      "cat",
+    ]);
+  });
+
+  test("cuts each entry to the length cap and stops at the count cap", () => {
+    expect(addCommaSeparated([], "abcdefghijklmnopqrstuvwxyz, b, c", 2, 20)).toEqual(["abcdefghijklmnopqrst", "b"]);
   });
 });

@@ -37,3 +37,12 @@ describe("tags Delete all", () => {
     expect(screen.queryByRole("button", { name: "Delete all" })).toBeNull();
   });
 });
+
+describe("tags paste", () => {
+  test("pasting comma-separated text adds each piece as a tag", () => {
+    render(<Harness initial={{ ...EMPTY_LISTING_FORM, tags: ["gift"] }} />);
+    const input = document.querySelector<HTMLInputElement>("input[maxlength='20']")!;
+    fireEvent.paste(input, { clipboardData: { getData: () => "funny shirt, retro tee, gift" } });
+    expect(current.tags).toEqual(["gift", "funny shirt", "retro tee"]);
+  });
+});

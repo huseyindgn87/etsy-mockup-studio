@@ -25,3 +25,24 @@ export function joinList(values: readonly string[]): string {
 export function joinIdList(ids: readonly number[]): string {
   return ids.map(String).join(",");
 }
+
+/**
+ * Adds comma-separated `text` to `entries` as separate entries: each trimmed
+ * and cut to `maxLength`, blanks and case-insensitive duplicates skipped,
+ * stopping at `max`.
+ */
+export function addCommaSeparated(
+  entries: readonly string[],
+  text: string,
+  max: number,
+  maxLength: number,
+): string[] {
+  const next = [...entries];
+  for (const piece of text.split(",")) {
+    if (next.length >= max) break;
+    const entry = piece.trim().slice(0, maxLength).trim();
+    if (!entry || next.some((e) => e.toLowerCase() === entry.toLowerCase())) continue;
+    next.push(entry);
+  }
+  return next;
+}
