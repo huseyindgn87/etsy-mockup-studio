@@ -96,6 +96,7 @@ export default function BulkFieldInput({
         max={isTags ? MAX_TAGS : MAX_MATERIALS}
         maxLength={isTags ? MAX_TAG_LENGTH : MAX_MATERIAL_LENGTH}
         entries={Array.isArray(value) ? (value as string[]) : []}
+        clearable={isTags}
         onChange={(entries) => onChange(entries)}
       />
     );
@@ -410,6 +411,7 @@ function ChipsInput({
   entries,
   max,
   maxLength,
+  clearable = false,
   onChange,
 }: {
   id: string;
@@ -418,6 +420,7 @@ function ChipsInput({
   entries: string[];
   max: number;
   maxLength: number;
+  clearable?: boolean;
   onChange: (entries: string[]) => void;
 }) {
   const [draft, setDraft] = useState("");
@@ -434,8 +437,15 @@ function ChipsInput({
     <div className="text-sm">
       <span className="flex justify-between text-xs text-zinc-500">
         <span>{label}</span>
-        <span className="font-mono">
-          {entries.length}/{max}
+        <span className="flex items-center gap-2">
+          {clearable && entries.length > 0 && (
+            <button type="button" onClick={() => onChange([])} className="text-zinc-500 hover:text-red-600">
+              Delete all
+            </button>
+          )}
+          <span className="font-mono">
+            {entries.length}/{max}
+          </span>
         </span>
       </span>
       <div className="mt-1 flex flex-wrap items-center gap-1.5 rounded-lg border border-black/10 p-1.5 dark:border-white/15">

@@ -568,8 +568,19 @@ export default function ListingForm({
         <div className="text-sm">
           <span className="flex justify-between text-xs text-zinc-500">
             <span>Tags</span>
-            <span className="font-mono">
-              {value.tags.length}/{MAX_TAGS}
+            <span className="flex items-center gap-2">
+              {value.tags.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => patch({ tags: [] })}
+                  className="text-zinc-500 hover:text-red-600"
+                >
+                  Delete all
+                </button>
+              )}
+              <span className="font-mono">
+                {value.tags.length}/{MAX_TAGS}
+              </span>
             </span>
           </span>
           <div className="mt-1 flex flex-wrap items-center gap-1.5 rounded-lg border border-black/10 p-1.5 dark:border-white/15">

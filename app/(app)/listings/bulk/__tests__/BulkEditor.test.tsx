@@ -666,6 +666,21 @@ describe("per-row targeting", () => {
     ]);
   });
 
+  test("Delete all clears one row's tags so new ones replace them", async () => {
+    await renderEditor([detail(101), detail(102, { tags: ["handmade", "gift"] }), detail(103)]);
+    openField("Tags", "Listings");
+    expect(inRow(101).queryByRole("button", { name: "Delete all" })).toBeNull();
+    fireEvent.click(inRow(102).getByRole("button", { name: "Delete all" }));
+    expect(inRow(102).queryByRole("button", { name: "Remove handmade" })).toBeNull();
+    const tagInput = rowField("Tags", 102);
+    fireEvent.change(tagInput, { target: { value: "vintage" } });
+    fireEvent.keyDown(tagInput, { key: "Enter" });
+
+    fireEvent.click(syncButton());
+    await waitFor(() => expect(savedUpdates()).not.toBeNull());
+    expect(savedUpdates()).toEqual([{ listingId: 102, patch: { tags: ["vintage"] } }]);
+  });
+
   test("unticking a row keeps its change out of the save", async () => {
     await renderEditor();
     openField("Title", "Listings");
