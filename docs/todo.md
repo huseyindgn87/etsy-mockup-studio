@@ -12,7 +12,6 @@ Single source of open work. Checked against the code on 2026-09-19.
 ## Open
 
 ### New (19 Sept)
-- [ ] Variations: pencil icon on hover over an option to rename it in place (like Vela); only the name changes — prices, quantities, SKUs, photos and every other setting of that option stay.
 - [ ] While a scheduled publish runs: blur the site, block edits, show "sending to Etsy" status.
 - [ ] Scheduling listings that have a video (blocked in `lib/scheduling/publish-guard.ts`).
 - [ ] Real-shop test of copy → edit → schedule after b88cd79 / 37aefb0.
@@ -41,6 +40,7 @@ Single source of open work. Checked against the code on 2026-09-19.
 
 ## Done
 
+- [x] Variations: pencil rename in place, keeping prices/quantities/SKUs/profiles/photos — caa7512. Not checked in a real browser.
 - [x] Variations: deleting an option is one click, no confirmation — 48b0b40.
 - [x] My drafts: scheduled publish deletes its draft, published ones hidden, pending ones show a clock badge — 87534bf. Not run against the real DB.
 - [x] Personalization on/off switch (off = no questions sent) — 793055d.
