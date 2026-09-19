@@ -91,7 +91,7 @@ export default function TemplatesAdmin({ initialTemplates, loadError }: Props) {
                         {t.filename}
                       </span>
                       <span
-                        className={`mt-0.5 inline-block rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+                        className={`mt-0.5 inline-block rounded-full px-1.5 py-0.5 text-[13px] font-medium ${
                           t.calibrated
                             ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
                             : "bg-zinc-200 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"

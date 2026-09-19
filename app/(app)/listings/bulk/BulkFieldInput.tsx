@@ -47,7 +47,7 @@ function CharacterCounter({ field, value }: { field: BulkFieldKey; value: string
   if (remaining == null) return null;
   return (
     <span
-      className={`mt-0.5 block text-right font-mono text-[11px] ${
+      className={`mt-0.5 block text-right font-mono text-[14px] ${
         remaining < 0 ? "text-red-600 dark:text-red-400" : "text-zinc-500"
       }`}
     >
@@ -485,7 +485,7 @@ function ChipsInput({
           />
         )}
       </div>
-      <span className="mt-0.5 block text-right font-mono text-[11px] text-zinc-500">
+      <span className="mt-0.5 block text-right font-mono text-[14px] text-zinc-500">
         {maxLength - draft.length} left in this entry
       </span>
     </div>

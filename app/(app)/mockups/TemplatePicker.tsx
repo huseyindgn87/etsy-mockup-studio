@@ -39,7 +39,7 @@ function TemplateTile({
         />
         <span className="w-full truncate text-xs text-zinc-700 dark:text-zinc-300">{template.name}</span>
         {!template.calibrated && (
-          <span className="rounded-full bg-zinc-200 px-1.5 py-0.5 text-[10px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+          <span className="rounded-full bg-zinc-200 px-1.5 py-0.5 text-[13px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
             Not calibrated
           </span>
         )}

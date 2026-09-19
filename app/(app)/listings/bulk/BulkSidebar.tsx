@@ -47,7 +47,7 @@ export default function BulkSidebar({
                 className="flex w-full items-center justify-between px-3 py-1.5 text-left text-xs font-semibold uppercase tracking-wide text-zinc-500 transition-colors hover:text-zinc-800 dark:hover:text-zinc-200"
               >
                 {group.label}
-                <span aria-hidden className="text-[10px]">
+                <span aria-hidden className="text-[13px]">
                   {isCollapsed ? "▸" : "▾"}
                 </span>
               </button>
@@ -85,7 +85,7 @@ export default function BulkSidebar({
                         <span>{field.label}</span>
                         {pending > 0 && (
                           <span
-                            className={`ml-2 rounded-full px-1.5 text-[10px] font-medium ${
+                            className={`ml-2 rounded-full px-1.5 text-[13px] font-medium ${
                               active ? "bg-white/20" : "bg-primary/15 text-primary"
                             }`}
                           >

@@ -210,12 +210,12 @@ export function PhotoGrid({
                     draggable={false}
                   />
                 ) : (
-                  <span className="flex h-full w-full items-center justify-center text-[10px] text-zinc-400">
+                  <span className="flex h-full w-full items-center justify-center text-[13px] text-zinc-400">
                     Rendering…
                   </span>
                 )}
               </div>
-              <span className="pointer-events-none absolute left-1 top-1 rounded bg-black/60 px-1 text-[10px] font-medium text-white">
+              <span className="pointer-events-none absolute left-1 top-1 rounded bg-black/60 px-1 text-[13px] font-medium text-white">
                 {i === 0 ? "Thumbnail" : i + 1}
               </span>
               <button
@@ -231,7 +231,7 @@ export function PhotoGrid({
                 aria-label={`Alt text for photo ${i + 1}`}
                 data-state={hasAltText ? "filled" : "empty"}
                 onClick={() => onEditAltText(slot.slotId)}
-                className={`absolute bottom-1 left-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+                className={`absolute bottom-1 left-1 rounded-full px-1.5 py-0.5 text-[13px] font-medium ${
                   hasAltText
                     ? "bg-primary text-white"
                     : "bg-black/70 text-white opacity-0 hover:bg-black/90 focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
@@ -255,7 +255,7 @@ export function PhotoGrid({
                 className="flex aspect-square w-full flex-col items-center justify-center gap-0.5 rounded-lg border-2 border-dashed border-black/10 text-zinc-400 hover:border-black/30 hover:text-zinc-600 dark:border-white/15 dark:hover:border-white/40 dark:hover:text-zinc-300"
               >
                 <PlusIcon className="h-5 w-5" />
-                <span className="text-[10px]">{n}</span>
+                <span className="text-[13px]">{n}</span>
               </button>
             </li>
           );
@@ -459,7 +459,7 @@ function VideoSlot({
               controls
               className="h-full w-full object-contain"
             />
-            <span className="pointer-events-none absolute left-1 top-1 rounded bg-black/60 px-1 text-[10px] font-medium text-white">
+            <span className="pointer-events-none absolute left-1 top-1 rounded bg-black/60 px-1 text-[13px] font-medium text-white">
               {slot + 1}
             </span>
             <button

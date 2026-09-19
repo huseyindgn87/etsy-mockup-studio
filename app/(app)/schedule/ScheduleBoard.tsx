@@ -205,7 +205,7 @@ export default function ScheduleBoard() {
                     i < FORTNIGHT_DAYS - 1 ? "border-r" : ""
                   } ${isToday ? "bg-primary/[.06]" : ""}`}
                 >
-                  <div className="text-[11px] uppercase tracking-wide text-zinc-500">
+                  <div className="text-[14px] uppercase tracking-wide text-zinc-500">
                     {day.toLocaleDateString(undefined, { weekday: "short" })}
                   </div>
                   <div
@@ -216,7 +216,7 @@ export default function ScheduleBoard() {
                     {day.getDate()}
                   </div>
                   <div
-                    className={`h-4 text-[10px] font-semibold tracking-wider ${isToday ? "text-primary" : ""}`}
+                    className={`h-4 text-[13px] font-semibold tracking-wider ${isToday ? "text-primary" : ""}`}
                   >
                     {isToday ? "TODAY" : ""}
                   </div>
@@ -332,7 +332,7 @@ function ScheduleEntry({
         <Thumb url={item.thumbnailUrl} />
         <span
           title={zoneHint}
-          className="text-[11px] font-medium tabular-nums text-zinc-600 dark:text-zinc-300"
+          className="text-[14px] font-medium tabular-nums text-zinc-600 dark:text-zinc-300"
         >
           {time}
         </span>
@@ -357,13 +357,13 @@ function ScheduleEntry({
       {badge && (
         <span
           title={item.lastError ?? undefined}
-          className={`mt-1 inline-block rounded px-1 py-px text-[10px] font-medium ${badge.className}`}
+          className={`mt-1 inline-block rounded px-1 py-px text-[13px] font-medium ${badge.className}`}
         >
           {badge.label}
         </span>
       )}
       {item.kind === "bulk_edit" && item.results.length > 0 && (
-        <ul className="mt-1 space-y-px text-[10px] leading-tight text-zinc-600 dark:text-zinc-400">
+        <ul className="mt-1 space-y-px text-[13px] leading-tight text-zinc-600 dark:text-zinc-400">
           {item.results.map((result) => (
             <li
               key={result.listingId}
@@ -481,7 +481,7 @@ function Thumb({ url }: { url: string | null }) {
         // eslint-disable-next-line @next/next/no-img-element
         <img src={url} alt="" className="h-full w-full object-cover" />
       ) : (
-        <span className="text-[10px] text-zinc-400">—</span>
+        <span className="text-[13px] text-zinc-400">—</span>
       )}
     </span>
   );

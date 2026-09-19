@@ -1183,7 +1183,7 @@ export default function BulkEditor({ listingIds }: { listingIds: number[] }) {
               // eslint-disable-next-line @next/next/no-img-element
               <img src={listing.thumbnailUrl} alt="" className="h-full w-full object-cover" />
             ) : (
-              <span className="text-[10px] text-zinc-400">—</span>
+              <span className="text-[13px] text-zinc-400">—</span>
             )}
           </span>
           <div className="min-w-0 flex-1">

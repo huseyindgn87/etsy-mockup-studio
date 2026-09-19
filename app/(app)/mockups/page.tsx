@@ -2257,7 +2257,7 @@ function MockupsPageInner() {
                         <span
                           role="img"
                           aria-label={`${item.label} has errors`}
-                          className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-red-600 text-[10px] font-bold text-white"
+                          className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-red-600 text-[13px] font-bold text-white"
                         >
                           !
                         </span>
@@ -2690,7 +2690,7 @@ function ToneBadge({ tone }: { tone: string }) {
   const dark = tone === "dark";
   return (
     <span
-      className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+      className={`rounded px-1.5 py-0.5 text-[13px] font-medium ${
         dark ? "bg-zinc-800 text-zinc-100" : "bg-zinc-200 text-zinc-700"
       }`}
     >
@@ -2710,7 +2710,7 @@ function ListingThumb({ url, size }: { url: string | null; size: number }) {
         // eslint-disable-next-line @next/next/no-img-element
         <img src={url} alt="" className="h-full w-full object-cover" />
       ) : (
-        <span className="text-[10px] text-zinc-400">—</span>
+        <span className="text-[13px] text-zinc-400">—</span>
       )}
     </span>
   );

@@ -892,7 +892,7 @@ export function PhotosPanel({
                     aria-pressed={chosen == null}
                     aria-label={`No photo for ${name}`}
                     onClick={() => assign(valueId, null)}
-                    className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-md border text-[10px] text-zinc-500 ${
+                    className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-md border text-[13px] text-zinc-500 ${
                       chosen == null ? "border-primary ring-2 ring-primary/40" : "border-black/10 dark:border-white/15"
                     }`}
                   >

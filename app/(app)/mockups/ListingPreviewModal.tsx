@@ -117,7 +117,7 @@ export default function ListingPreviewModal({
                   // eslint-disable-next-line @next/next/no-img-element
                   <img src={m.url} alt="" className="h-full w-full object-cover" />
                 ) : (
-                  <span className="flex h-full w-full items-center justify-center bg-zinc-100 text-[10px] text-zinc-400 dark:bg-zinc-900">
+                  <span className="flex h-full w-full items-center justify-center bg-zinc-100 text-[13px] text-zinc-400 dark:bg-zinc-900">
                     —
                   </span>
                 )}
