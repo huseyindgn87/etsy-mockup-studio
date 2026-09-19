@@ -578,7 +578,7 @@ export async function applyListingDetails(
     try {
       const saved = await updateListingInventory(listingId, {
         products: variations.products.map((p) => ({
-          sku: p.sku,
+          sku: p.sku ?? (typeof nl.sku === "string" && nl.sku.trim() ? nl.sku.trim() : undefined),
           propertyValues: p.propertyValues,
           price: p.price ?? price,
           quantity: p.quantity ?? quantity,

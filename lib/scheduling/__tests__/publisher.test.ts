@@ -226,6 +226,27 @@ describe("publishScheduledListing", () => {
     expect(sent.products.map((p) => p.readinessStateId)).toEqual([1441577564343, 55]);
   });
 
+  test("every variation gets the listing's SKU when it has no per-variation one", async () => {
+    storeImages(3);
+    draftHolds({
+      ...VALID_SPEC,
+      newListing: {
+        ...VALID_SPEC.newListing,
+        sku: "HG-000763",
+        variations: {
+          products: [
+            { propertyValues: [{ propertyId: 513, name: "Finish", valueIds: [1], values: ["Glossy"] }] },
+            { propertyValues: [{ propertyId: 513, name: "Finish", valueIds: [2], values: ["Matte"] }], sku: "OWN-SKU" },
+          ],
+          skuOnProperty: [],
+        },
+      },
+    });
+    await publishScheduledListing(makeRow(), hooks());
+    const sent = vi.mocked(updateListingInventory).mock.calls[0][1];
+    expect(sent.products.map((p) => p.sku)).toEqual(["HG-000763", "OWN-SKU"]);
+  });
+
   test("authenticates with the stored refresh token and saves Etsy's rotated one", async () => {
     storeImages(3);
     await publishScheduledListing(makeRow(), hooks());
