@@ -12,7 +12,6 @@ Single source of open work. Checked against the code on 2026-09-19.
 ## Open
 
 ### New (19 Sept)
-- [ ] Personalization on/off toggle so a non-personalized listing can't go out as personalized (the form always has question slot 1).
 - [ ] Scheduling listings that have a video (blocked in `lib/scheduling/publish-guard.ts`).
 - [ ] My drafts: published scheduled listings remove their drafts; pending scheduled drafts show a clock badge.
 - [ ] Real-shop test of copy → edit → schedule after b88cd79 / 37aefb0.
@@ -41,6 +40,7 @@ Single source of open work. Checked against the code on 2026-09-19.
 
 ## Done
 
+- [x] Personalization on/off switch (off = no questions sent) — 793055d.
 - [x] Alt text window: all photos with a field under each, one Save; bigger tile button + "Edit alt text" button — ec128d5.
 - [x] Pasting comma-separated text into Tags splits it into tags (editor + bulk rows) — a130659.
 - [x] All text sizes +30% site-wide (`--text-*` theme overrides in `app/globals.css`) — e7ae00f. Not checked in a real browser.
