@@ -14,6 +14,8 @@ import { publishScheduledListing } from "@/lib/scheduling/publisher";
 import { processScheduledListing, type RunnerDeps } from "@/lib/scheduling/runner";
 import { deleteDraft } from "@/lib/drafts/store";
 import { deleteObjects } from "@/lib/storage/r2";
+import { enqueueJob } from "../queue";
+import { JOB_PRIORITY } from "../types";
 import type { JobHandler } from "../worker";
 
 const defaultDeps: RunnerDeps = {
@@ -38,6 +40,18 @@ export function scheduledListingHandler(deps: RunnerDeps = defaultDeps): JobHand
       shouldYield: ctx.shouldYield,
     });
     if (outcome === "continue") return { status: "continue" };
+    // The new listing belongs in the listings page's cache (and so in Active)
+    // straight away, not at the user's next manual refresh.
+    if (outcome === "published" && ctx.job.shopId) {
+      await enqueueJob({
+        userId: ctx.job.userId,
+        shopId: ctx.job.shopId,
+        type: "listing_refresh",
+        payload: { shopId: ctx.job.shopId },
+        priority: JOB_PRIORITY.background,
+        activeKey: `refresh:${ctx.job.userId}:${ctx.job.shopId}`,
+      }).catch((err) => console.error(`[jobs] queueing a refresh after scheduled listing ${id} failed`, err));
+    }
     return { status: "done", result: { outcome } };
   };
 }

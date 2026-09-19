@@ -64,6 +64,9 @@ describe("scheduled listings go through the queue", () => {
     await runWorker(workerDeps(deps));
     expect(db.scheduled.get(row.id)).toMatchObject({ status: "published", etsyListingId: "9001" });
     expect(jobs[0].status).toBe("done");
+    expect([...jobsDb.jobs.values()].filter((j) => j.type === "listing_refresh")).toMatchObject([
+      { userId: "alice", shopId: "111", priority: JOB_PRIORITY.background },
+    ]);
   });
 
   test("a worker that died mid-publish is resumed without creating a second Etsy listing", async () => {
