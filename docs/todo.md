@@ -12,7 +12,6 @@ Single source of open work. Checked against the code on 2026-09-19.
 ## Open
 
 ### New (19 Sept)
-- [ ] Pasting comma-separated text into Tags splits it into separate tags (today the input caps at 20 chars and only Enter/"," add a tag).
 - [ ] Alt text: bigger button; opens ALL listing photos at once (grid or stacked), alt text under each, one Save closes it.
 - [ ] Personalization on/off toggle so a non-personalized listing can't go out as personalized (the form always has question slot 1).
 - [ ] Scheduling listings that have a video (blocked in `lib/scheduling/publish-guard.ts`).
@@ -43,6 +42,7 @@ Single source of open work. Checked against the code on 2026-09-19.
 
 ## Done
 
+- [x] Pasting comma-separated text into Tags splits it into tags (editor + bulk rows) — a130659.
 - [x] All text sizes +30% site-wide (`--text-*` theme overrides in `app/globals.css`) — e7ae00f. Not checked in a real browser.
 - [x] Tags "Delete all" button (editor + bulk edit rows) — 3aa56df. Saving an empty tag list is still refused by the bulk save validator.
 - [x] Bulk edit left menu (AI Edits, Media, Listings, Optional, Inventory, Shipping) with per-field bulk apply bar — `BULK_GROUPS` in `lib/etsy/bulk-edit.ts`, `BulkApplyControl.tsx`.
