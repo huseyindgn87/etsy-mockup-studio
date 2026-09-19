@@ -31,7 +31,7 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-describe("POST /api/schedule/run", () => {
+describe("POST /api/schedule/run — job worker", () => {
   test("is disabled (503) until SCHEDULE_RUNNER_SECRET is set — and when it's too short", async () => {
     vi.stubEnv("SCHEDULE_RUNNER_SECRET", "");
     expect((await call(`Bearer ${SECRET}`)).status).toBe(503);
@@ -79,5 +79,53 @@ describe("POST /api/schedule/run", () => {
     expect(decideRouteAccess("/api/schedule/run", false)).toEqual({ action: "next" });
     expect(decideRouteAccess("/api/schedule", false)).toEqual({ action: "unauthorized" });
     expect(decideRouteAccess("/api/schedule/renders/x/image-00", false)).toEqual({ action: "unauthorized" });
+  });
+});
+
+describe("job worker — due vs. not-yet-due jobs", () => {
+  test("queues and processes jobs that are due", async () => {
+    vi.stubEnv("SCHEDULE_RUNNER_SECRET", SECRET);
+    vi.mocked(runJobsPass).mockResolvedValueOnce({
+      scheduledQueued: 2,
+      slices: [
+        { jobId: "j1", userId: "u1", type: "scheduled_listing", outcome: "done" },
+        { jobId: "j2", userId: "u2", type: "scheduled_listing", outcome: "done" },
+      ],
+      heldForBudget: [],
+    });
+    const res = await call(`Bearer ${SECRET}`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.scheduledQueued).toBe(2);
+    expect(body.slices).toHaveLength(2);
+    expect(body.slices[0].outcome).toBe("done");
+  });
+
+  test("skips jobs that are not yet due (future scheduled listings)", async () => {
+    vi.stubEnv("SCHEDULE_RUNNER_SECRET", SECRET);
+    vi.mocked(runJobsPass).mockResolvedValueOnce({
+      scheduledQueued: 0,
+      slices: [],
+      heldForBudget: [],
+    });
+    const res = await call(`Bearer ${SECRET}`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.scheduledQueued).toBe(0);
+    expect(body.slices).toHaveLength(0);
+    expect(runJobsPass).toHaveBeenCalledTimes(1);
+  });
+
+  test("respects Etsy budget limits and holds jobs for budget", async () => {
+    vi.stubEnv("SCHEDULE_RUNNER_SECRET", SECRET);
+    vi.mocked(runJobsPass).mockResolvedValueOnce({
+      scheduledQueued: 1,
+      slices: [],
+      heldForBudget: [0],
+    });
+    const res = await call(`Bearer ${SECRET}`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.heldForBudget).toContain(0);
   });
 });
