@@ -311,3 +311,22 @@ describe("search combined with existing filters", () => {
     });
   });
 });
+
+describe("My drafts schedule badge", () => {
+  test("a draft with a pending scheduled publish shows a clock badge; others don't", async () => {
+    mockFetch();
+    const drafts = [
+      { id: "d1", title: "Scheduled tee", thumbnailUrl: null, updatedAt: "2026-09-19T10:00:00Z", scheduledAt: "2026-09-21T15:00:00Z" },
+      { id: "d2", title: "Plain tee", thumbnailUrl: null, updatedAt: "2026-09-19T10:00:00Z", scheduledAt: null },
+    ];
+    const base = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (url: string) =>
+      url.startsWith("/api/drafts") ? jsonResponse({ drafts }) : base(url),
+    );
+    render(<ListingsPage />);
+    await screen.findByText("Blue Ceramic Mug");
+    fireEvent.click(screen.getByRole("button", { name: /My drafts/ }));
+    await screen.findByText("Scheduled tee");
+    expect(screen.getAllByLabelText(/^Scheduled for /)).toHaveLength(1);
+  });
+});

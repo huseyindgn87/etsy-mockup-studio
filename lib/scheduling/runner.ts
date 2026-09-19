@@ -60,6 +60,8 @@ export interface RunnerDeps {
   applyBulkEdit: (row: ScheduledListing, updates: ScheduledBulkUpdate[]) => Promise<ScheduledBulkResult[]>;
   /** Deletes exactly these R2 keys. */
   deleteImages: (keys: string[]) => Promise<void>;
+  /** Deletes the draft a scheduled publish came from, once it is on Etsy. */
+  deleteDraft?: (userId: string, draftId: string) => Promise<unknown>;
   now: () => Date;
 }
 
@@ -292,6 +294,11 @@ async function processClaimed(row: ScheduledListing, deps: RunnerDeps, now: Date
   });
   if (count === 0) return "lost" as const;
   await cleanupPublishedImages(row, deps.deleteImages);
+  if (row.draftId && deps.deleteDraft) {
+    await deps.deleteDraft(row.userId, row.draftId).catch((err) => {
+      console.error(`[schedule] deleting draft ${row.draftId} after publishing ${row.id} failed`, err);
+    });
+  }
   return "published" as const;
 }
 

@@ -26,15 +26,27 @@ export async function createDraft(userId: string): Promise<{ id: string }> {
 
 export async function listDrafts(userId: string): Promise<DraftSummary[]> {
   const rows = await prisma.listingDraft.findMany({
-    where: { userId },
+    where: { userId, scheduledListings: { none: { status: "published" } } },
     orderBy: { updatedAt: "desc" },
-    select: { id: true, title: true, hasThumbnail: true, updatedAt: true },
+    select: {
+      id: true,
+      title: true,
+      hasThumbnail: true,
+      updatedAt: true,
+      scheduledListings: {
+        where: { status: { in: ["pending", "publishing"] } },
+        orderBy: { scheduledAt: "asc" },
+        take: 1,
+        select: { scheduledAt: true },
+      },
+    },
   });
   return rows.map((r) => ({
     id: r.id,
     title: r.title.trim() || "Untitled listing",
     thumbnailUrl: r.hasThumbnail ? `/api/drafts/${r.id}/assets/thumbnail/thumb` : null,
     updatedAt: r.updatedAt.toISOString(),
+    scheduledAt: r.scheduledListings[0]?.scheduledAt.toISOString() ?? null,
   }));
 }
 

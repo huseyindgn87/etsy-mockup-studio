@@ -176,6 +176,40 @@ describe("a successful publish", () => {
     expect(deleted[19]).toBe(renderImageKey("alice", SET_A, 19));
   });
 
+  test("deletes the draft it came from once published", async () => {
+    const r = dueRow();
+    const deleteDraft = vi.fn(async () => true);
+    await runDueScheduledListings({ ...makeDeps(), deleteDraft });
+    expect(row(r.id).status).toBe("published");
+    expect(deleteDraft).toHaveBeenCalledWith("alice", r.draftId);
+  });
+
+  test("a failed publish keeps its draft", async () => {
+    dueRow();
+    const deleteDraft = vi.fn(async () => true);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    await runDueScheduledListings({
+      ...makeDeps(async () => {
+        throw new Error("Etsy said no");
+      }),
+      deleteDraft,
+    });
+    expect(deleteDraft).not.toHaveBeenCalled();
+  });
+
+  test("a draft delete failure leaves the listing published", async () => {
+    const r = dueRow();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const result = await runDueScheduledListings({
+      ...makeDeps(),
+      deleteDraft: vi.fn(async () => {
+        throw new Error("DB hiccup");
+      }),
+    });
+    expect(result.published).toEqual([r.id]);
+    expect(row(r.id).status).toBe("published");
+  });
+
   test("a storage failure during cleanup leaves the listing published", async () => {
     const r = dueRow();
     const deps = makeDeps();

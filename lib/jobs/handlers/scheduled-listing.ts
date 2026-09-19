@@ -12,6 +12,7 @@
 import { applyScheduledBulkEdit } from "@/lib/scheduling/bulk-publisher";
 import { publishScheduledListing } from "@/lib/scheduling/publisher";
 import { processScheduledListing, type RunnerDeps } from "@/lib/scheduling/runner";
+import { deleteDraft } from "@/lib/drafts/store";
 import { deleteObjects } from "@/lib/storage/r2";
 import type { JobHandler } from "../worker";
 
@@ -19,6 +20,7 @@ const defaultDeps: RunnerDeps = {
   publish: publishScheduledListing,
   applyBulkEdit: applyScheduledBulkEdit,
   deleteImages: deleteObjects,
+  deleteDraft,
   now: () => new Date(),
 };
 

@@ -87,6 +87,8 @@ export interface DraftSummary {
   title: string;
   thumbnailUrl: string | null;
   updatedAt: string;
+  /** When its pending scheduled publish runs; null when it isn't scheduled. */
+  scheduledAt: string | null;
 }
 
 /** The kinds of binary asset a draft can hold, one R2 object per (kind, itemId). */

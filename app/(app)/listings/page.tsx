@@ -610,6 +610,16 @@ export default function ListingsPage() {
                             >
                               {draft.title}
                             </Link>
+                            {draft.scheduledAt && (
+                              <span
+                                title={`Scheduled for ${formatSavedAt(draft.scheduledAt)}`}
+                                aria-label={`Scheduled for ${formatSavedAt(draft.scheduledAt)}`}
+                                className="flex shrink-0 items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary"
+                              >
+                                <span aria-hidden="true">🕒</span>
+                                {formatSavedAt(draft.scheduledAt)}
+                              </span>
+                            )}
                           </div>
                         </td>
                         <td className="px-4 py-3 text-zinc-600 dark:text-zinc-400">

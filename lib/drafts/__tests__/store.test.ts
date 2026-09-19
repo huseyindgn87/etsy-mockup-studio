@@ -12,6 +12,8 @@ interface Row {
   updatedAt: Date;
 }
 
+/** Per draft id: the statuses and times of its schedules, for `listDrafts`. */
+const schedulesByDraft = new Map<string, { status: string; scheduledAt: Date }[]>();
 const rows = new Map<string, Row>();
 /** The schedules the fake reports for whichever draft is being deleted. */
 const scheduledRows: { renderSetId: string | null; images: unknown }[] = [];
@@ -37,7 +39,16 @@ vi.mock("@/lib/db/prisma", () => ({
         return { id };
       }),
       findMany: vi.fn(async ({ where }: { where: { userId: string } }) =>
-        [...rows.values()].filter((r) => r.userId === where.userId),
+        [...rows.values()]
+          .filter((r) => r.userId === where.userId)
+          .filter((r) => !(schedulesByDraft.get(r.id) ?? []).some((s) => s.status === "published"))
+          .map((r) => ({
+            ...r,
+            scheduledListings: (schedulesByDraft.get(r.id) ?? [])
+              .filter((s) => s.status === "pending" || s.status === "publishing")
+              .sort((a, b) => a.scheduledAt.getTime() - b.scheduledAt.getTime())
+              .slice(0, 1),
+          })),
       ),
       findUnique: vi.fn(async ({ where }: { where: { id: string } }) => rows.get(where.id) ?? null),
       update: vi.fn(async ({ where, data }: { where: { id: string }; data: Partial<Row> }) => {
@@ -70,6 +81,7 @@ import { createDraft, deleteDraft, getDraftRow, listDrafts, saveDraft } from "..
 
 beforeEach(() => {
   rows.clear();
+  schedulesByDraft.clear();
   scheduledRows.length = 0;
   nextId = 1;
 });
@@ -110,6 +122,28 @@ describe("draft ownership isolation", () => {
     const ok = await deleteDraft("bob", id);
     expect(ok).toBe(false);
     expect(await getDraftRow("alice", id)).not.toBeNull();
+  });
+});
+
+describe("listDrafts and scheduling", () => {
+  test("filters published drafts in the query and reports a pending schedule's time", async () => {
+    const { prisma } = await import("@/lib/db/prisma");
+    const plain = await createDraft("alice");
+    const pending = await createDraft("alice");
+    const published = await createDraft("alice");
+    const at = new Date("2026-09-20T15:00:00Z");
+    schedulesByDraft.set(pending.id, [{ status: "pending", scheduledAt: at }]);
+    schedulesByDraft.set(published.id, [{ status: "published", scheduledAt: at }]);
+
+    const drafts = await listDrafts("alice");
+    expect(Object.fromEntries(drafts.map((d) => [d.id, d.scheduledAt]))).toEqual({
+      [plain.id]: null,
+      [pending.id]: at.toISOString(),
+    });
+    expect(vi.mocked(prisma.listingDraft.findMany).mock.calls.at(-1)![0]).toMatchObject({
+      where: { userId: "alice", scheduledListings: { none: { status: "published" } } },
+      select: { scheduledListings: { where: { status: { in: ["pending", "publishing"] } } } },
+    });
   });
 });
 
