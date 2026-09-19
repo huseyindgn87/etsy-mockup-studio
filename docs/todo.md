@@ -18,7 +18,6 @@ Single source of open work. Checked against the code on 2026-09-19.
 
 ### Backlog
 - [ ] Physical vs digital listing type (digital: file upload, no shipping/processing).
-- [ ] Combination table: select rows, then bulk price change (today the bulk bar applies to the filtered rows; no row checkboxes).
 - [ ] Listings table Score column.
 - [ ] Media Library for reusable images.
 - [ ] Product types beyond t-shirts (tumbler, poster, ornament, yard sign).
@@ -39,6 +38,7 @@ Single source of open work. Checked against the code on 2026-09-19.
 
 ## Done
 
+- [x] Combination table row checkboxes + select all; bulk bar applies to ticked rows (else every shown row) — 358f396.
 - [x] IP throttle cleanup: raw-IP rows in `auth_throttles` purged after their window — fc3cfd3.
 - [x] Listhouse logo clickable on the listings page, goes back to Active from My drafts — 4b728e9.
 - [x] Variations: pencil rename in place, keeping prices/quantities/SKUs/profiles/photos — caa7512. Not checked in a real browser.
