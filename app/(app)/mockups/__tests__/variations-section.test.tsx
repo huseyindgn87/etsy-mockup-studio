@@ -279,25 +279,11 @@ describe("Variations section — destructive changes", () => {
       },
     });
 
-  it("warns before removing a value whose combinations carry data, and keeps it on Cancel", () => {
+  it("removes a value on one click, without asking, and drops its data", () => {
     const state = renderSection(withPrices());
     fireEvent.click(section().getByRole("button", { name: "Remove S" }));
 
-    const dialog = screen.getByRole("alertdialog", { name: "Delete combination data?" });
-    expect(dialog).toHaveTextContent("Removing “S” deletes 2 combinations with price or SKU data.");
-    expect(within(dialog).getByRole("button", { name: "Cancel" })).toHaveFocus();
-
-    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
-    expect(optionNames("Size")).toEqual(["S", "M", "L"]);
-    expect(state.value.variationRows.price).toEqual({ "11": "20.00", "12": "22.00" });
-  });
-
-  it("applies the removal and drops its data on Delete", () => {
-    const state = renderSection(withPrices());
-    fireEvent.click(section().getByRole("button", { name: "Remove S" }));
-    fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Delete" }));
-
     expect(optionNames("Size")).toEqual(["M", "L"]);
     expect(state.value.variationRows.price).toEqual({ "12": "22.00" });
     expect(state.value.variationRows.sku).toEqual({});
@@ -554,7 +540,7 @@ describe("Variations section — per-combination tabs", () => {
       }),
     );
     fireEvent.click(section().getByRole("button", { name: "Remove Black" }));
-    expect(screen.getByRole("alertdialog")).toHaveTextContent("Removing “Black” deletes 1 photo assignment.");
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   });
 
   it("marks errored rows and tabs, and a refused publish jumps to the first error", () => {

@@ -122,7 +122,12 @@ export default function VariationsSection({
 
 export type VariationSubTab = SubTab;
 
-type CommitVariation = (next: VariationState, what: string, extra?: Partial<ListingFormValue>) => void;
+type CommitVariation = (
+  next: VariationState,
+  what: string,
+  extra?: Partial<ListingFormValue>,
+  options?: { ask?: boolean },
+) => void;
 
 export interface VariationBlockProps {
   value: ListingFormValue;
@@ -198,8 +203,8 @@ export function VariationBlock({
     }
   }
 
-  /** Applies a structural edit, asking first when it would delete combination data. */
-  const commit: CommitVariation = (next, what, extra = {}) => {
+  /** Applies a structural edit, asking first (unless `ask` is false) when it would delete combination data. */
+  const commit: CommitVariation = (next, what, extra = {}, { ask = true } = {}) => {
     const partial = { ...variationPartial(next, value.variationPhotos), ...extra };
     const loss = combinationDataLoss(value, next);
     const photosBefore = Object.keys(prunedVariationPhotos(value.variations, value.variationPhotos)).length;
@@ -208,7 +213,7 @@ export function VariationBlock({
       ...(loss.combinations > 0 ? [describeDataLoss(loss)] : []),
       ...(photosLost > 0 ? [`${photosLost} photo ${photosLost === 1 ? "assignment" : "assignments"}`] : []),
     ];
-    if (lost.length > 0) {
+    if (ask && lost.length > 0) {
       setPending({ message: `${what} deletes ${lost.join(" and ")}.`, partial });
     } else {
       patch(partial);
@@ -398,7 +403,7 @@ function VariationColumns({
   variationProperties: TaxonomyProperty[];
   propertiesLoading: boolean;
   propertiesError: string | null;
-  commit: (next: VariationState, what: string) => void;
+  commit: CommitVariation;
   patch: (partial: Partial<ListingFormValue>) => void;
 }) {
   const [drag, setDrag] = useState<{ column: number; index: number } | null>(null);
@@ -470,7 +475,7 @@ function VariationColumns({
             }
             onAdd={(input) => patch(variationPartial(addColumnValue(value, column, input), value.variationPhotos))}
             onRemove={(i) =>
-              commit(removeColumnValue(value, column, i), `Removing “${variations[column].values[i]}”`)
+              commit(removeColumnValue(value, column, i), `Removing “${variations[column].values[i]}”`, {}, { ask: false })
             }
             onMove={(from, to) => patch(variationPartial(moveColumnValue(value, column, from, to), value.variationPhotos))}
           />
