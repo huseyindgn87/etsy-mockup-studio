@@ -472,11 +472,12 @@ describe("Media tiles on each row", () => {
     await renderEditor(MEDIA_LISTINGS);
     openField("Photos", "Media");
     fireEvent.click(within(row(102)).getByRole("button", { name: "Alt text for photo 2" }));
-    const dialog = screen.getByRole("dialog");
-    expect(within(dialog).getByRole("textbox")).toHaveFocus();
-    fireEvent.change(within(dialog).getByRole("textbox"), { target: { value: "Mug on a desk" } });
+    const dialog = screen.getByRole("dialog", { name: "Alt text" });
+    const field = within(dialog).getByRole("textbox", { name: "Alt text, photo 2" });
+    expect(field).toHaveFocus();
+    fireEvent.change(field, { target: { value: "Mug on a desk" } });
     expect(within(dialog).getByText("487 characters remaining")).toBeInTheDocument();
-    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
     expect(within(row(102)).getByRole("button", { name: "Alt text for photo 2" })).toHaveAttribute("data-state", "filled");
     expect(within(row(101)).getByRole("button", { name: "Alt text for photo 2" })).toHaveAttribute("data-state", "empty");
 

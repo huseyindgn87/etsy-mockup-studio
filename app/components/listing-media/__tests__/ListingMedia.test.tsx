@@ -6,6 +6,7 @@ import { MAX_LISTING_IMAGES } from "@/lib/etsy/listing-image-limits";
 import { MAX_LISTING_VIDEOS } from "@/lib/etsy/video-limits";
 import {
   ListingMediaEditor,
+  AltTextModal,
   PhotoEnlargeModal,
   PhotoGrid,
   VideoSection,
@@ -46,7 +47,7 @@ function Harness({
   const [slots, setSlots] = useState(initial);
   const [alt, setAlt] = useState(altText);
   const [editing, setEditing] = useState<string | null>(null);
-  const [focusAlt, setFocusAlt] = useState(false);
+  const [altFocus, setAltFocus] = useState<string | null>(null);
   const editingSlot = slots.find((s) => s.slotId === editing);
   return (
     <>
@@ -55,14 +56,8 @@ function Harness({
         altTextBySlot={alt}
         onMove={(from, to) => setSlots((prev) => moveItem(prev, from, to))}
         onRemove={(slotId) => setSlots((prev) => prev.filter((s) => s.slotId !== slotId))}
-        onEnlarge={(slotId) => {
-          setFocusAlt(false);
-          setEditing(slotId);
-        }}
-        onEditAltText={(slotId) => {
-          setFocusAlt(true);
-          setEditing(slotId);
-        }}
+        onEnlarge={setEditing}
+        onEditAltText={setAltFocus}
         onAddOwn={onAddOwn}
       />
       {editingSlot && (
@@ -70,10 +65,20 @@ function Harness({
           slot={editingSlot}
           index={slots.indexOf(editingSlot)}
           altText={alt[editingSlot.slotId] ?? ""}
-          focusAltText={focusAlt}
           onAltTextChange={(text) => setAlt((prev) => withAltText(prev, editingSlot.slotId, text))}
           onMakeThumbnail={() => {}}
           onClose={() => setEditing(null)}
+        />
+      )}
+      {altFocus !== null && (
+        <AltTextModal
+          slots={slots}
+          altTextBySlot={alt}
+          focusSlotId={altFocus}
+          onSave={(changes) =>
+            setAlt((prev) => Object.entries(changes).reduce((acc, [id, text]) => withAltText(acc, id, text), prev))
+          }
+          onClose={() => setAltFocus(null)}
         />
       )}
       <output data-testid="alt-state">{JSON.stringify(alt)}</output>
@@ -159,14 +164,16 @@ describe("PhotoGrid alt text", () => {
   it("opens the alt text field for that image and saves text per image", () => {
     render(<Harness initial={makeSlots(3)} />);
     fireEvent.click(screen.getByRole("button", { name: "Alt text for photo 2" }));
-    const dialog = screen.getByRole("dialog", { name: "photo-2.jpg" });
-    const field = within(dialog).getByRole("textbox");
+    const dialog = screen.getByRole("dialog", { name: "Alt text" });
+    expect(within(dialog).getAllByRole("textbox")).toHaveLength(3);
+    const field = within(dialog).getByRole("textbox", { name: "Alt text, photo 2" });
     expect(field).toHaveFocus();
-    expect(within(dialog).getByText("500 characters remaining")).toBeInTheDocument();
 
     fireEvent.change(field, { target: { value: "Mug on a desk" } });
     expect(within(dialog).getByText("487 characters remaining")).toBeInTheDocument();
-    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    expect(screen.getByTestId("alt-state").textContent).toBe("{}");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 
     expect(JSON.parse(screen.getByTestId("alt-state").textContent!)).toEqual({ "own:o2": "Mug on a desk" });
     expect(screen.getByRole("button", { name: "Alt text for photo 2" })).toHaveAttribute("data-state", "filled");
@@ -179,6 +186,7 @@ describe("PhotoGrid alt text", () => {
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "x".repeat(600) } });
     expect(screen.getByRole("textbox")).toHaveValue("x".repeat(500));
     expect(screen.getByText("0 characters remaining")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(JSON.parse(screen.getByTestId("alt-state").textContent!)["own:o1"]).toHaveLength(500);
   });
 
@@ -312,8 +320,9 @@ describe("ListingMediaEditor on a listing that already exists", () => {
     drag(tile("Etsy photo 3"), tile("Etsy photo 1"));
     fireEvent.click(screen.getByRole("button", { name: "Remove photo 3" }));
     fireEvent.click(screen.getByRole("button", { name: "Alt text for photo 1" }));
-    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Back view" } });
-    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    const dialog = screen.getByRole("dialog", { name: "Alt text" });
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "Alt text, photo 1" }), { target: { value: "Back view" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
 
     expect(savedPayload(onSave).images).toEqual([
       { kind: "existing", imageId: 13, altText: "Back view" },
@@ -342,5 +351,28 @@ describe("ListingMediaEditor on a listing that already exists", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Remove video 2" }));
     expect(savedPayload(onSave).videos).toEqual([]);
+  });
+});
+
+describe("Alt text window", () => {
+  it("shows every photo, and Cancel drops the edits", () => {
+    render(<Harness initial={makeSlots(3)} altText={{ "own:o1": "Front view" }} />);
+    fireEvent.click(screen.getByRole("button", { name: "Edit alt text" }));
+    const dialog = screen.getByRole("dialog", { name: "Alt text" });
+    expect(within(dialog).getAllByRole("img")).toHaveLength(3);
+    expect(within(dialog).getByRole("textbox", { name: "Alt text, photo 1" })).toHaveValue("Front view");
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "Alt text, photo 3" }), { target: { value: "Side" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(JSON.parse(screen.getByTestId("alt-state").textContent!)).toEqual({ "own:o1": "Front view" });
+  });
+
+  it("one Save applies edits to several photos", () => {
+    render(<Harness initial={makeSlots(3)} />);
+    fireEvent.click(screen.getByRole("button", { name: "Edit alt text" }));
+    const dialog = screen.getByRole("dialog", { name: "Alt text" });
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "Alt text, photo 1" }), { target: { value: "Front" } });
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "Alt text, photo 3" }), { target: { value: "Side" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    expect(JSON.parse(screen.getByTestId("alt-state").textContent!)).toEqual({ "own:o1": "Front", "own:o3": "Side" });
   });
 });

@@ -158,6 +158,15 @@ export function PhotoGrid({
         >
           Upload your own
         </button>
+        {slots.length > 0 && (
+          <button
+            type="button"
+            onClick={() => onEditAltText(slots[0].slotId)}
+            className="h-8 rounded-full border border-black/10 px-3 text-xs font-medium hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
+          >
+            Edit alt text
+          </button>
+        )}
         <input
           ref={inputRef}
           type="file"
@@ -231,7 +240,7 @@ export function PhotoGrid({
                 aria-label={`Alt text for photo ${i + 1}`}
                 data-state={hasAltText ? "filled" : "empty"}
                 onClick={() => onEditAltText(slot.slotId)}
-                className={`absolute bottom-1 left-1 rounded-full px-1.5 py-0.5 text-[13px] font-medium ${
+                className={`absolute bottom-1 left-1 rounded-full px-2 py-1 text-xs font-semibold ${
                   hasAltText
                     ? "bg-primary text-white"
                     : "bg-black/70 text-white opacity-0 hover:bg-black/90 focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
@@ -351,6 +360,125 @@ export function PhotoEnlargeModal({
               Make listing thumbnail
             </button>
           )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Every photo's alt text in one window, each field under its photo. Edits
+ * stay local until Save, which applies the changed ones and closes; Cancel
+ * or × drops them.
+ */
+export function AltTextModal({
+  slots,
+  altTextBySlot,
+  focusSlotId,
+  onSave,
+  onClose,
+}: {
+  slots: PhotoSlot[];
+  altTextBySlot: Record<string, string>;
+  focusSlotId: string;
+  onSave: (changes: Record<string, string>) => void;
+  onClose: () => void;
+}) {
+  const [draft, setDraft] = useState(() =>
+    Object.fromEntries(slots.map((slot) => [slot.slotId, altTextBySlot[slot.slotId] ?? ""])),
+  );
+
+  function save() {
+    onSave(
+      Object.fromEntries(
+        Object.entries(draft).filter(([slotId, text]) => text !== (altTextBySlot[slotId] ?? "")),
+      ),
+    );
+    onClose();
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Alt text"
+        onClick={(e) => e.stopPropagation()}
+        className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-xl bg-white shadow-xl dark:bg-zinc-950"
+      >
+        <div className="flex items-center justify-between gap-2 border-b border-black/10 px-4 py-3 dark:border-white/15">
+          <p className="text-sm font-bold text-zinc-900 dark:text-zinc-50">Alt text</p>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="shrink-0 text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200"
+          >
+            ×
+          </button>
+        </div>
+
+        <ol className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-y-auto p-4 sm:grid-cols-2 lg:grid-cols-3">
+          {slots.map((slot, i) => {
+            const text = draft[slot.slotId] ?? "";
+            return (
+              <li key={slot.slotId} className="space-y-2">
+                <div className="relative aspect-square overflow-hidden rounded-lg bg-zinc-100 dark:bg-zinc-900">
+                  {slot.thumbnailUrl ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={slot.thumbnailUrl} alt={slot.label} className="h-full w-full object-contain" />
+                  ) : (
+                    <span className="flex h-full w-full items-center justify-center text-xs text-zinc-400">
+                      Rendering…
+                    </span>
+                  )}
+                  <span className="absolute left-1 top-1 rounded bg-black/60 px-1 text-[13px] font-medium text-white">
+                    {i === 0 ? "Thumbnail" : i + 1}
+                  </span>
+                </div>
+                <label className="block text-sm">
+                  <span className="flex justify-between text-xs text-zinc-500">
+                    <span>Photo {i + 1}</span>
+                    <span className={`font-mono ${text.length === MAX_ALT_TEXT_LENGTH ? "text-red-600" : ""}`}>
+                      {MAX_ALT_TEXT_LENGTH - text.length} characters remaining
+                    </span>
+                  </span>
+                  <textarea
+                    rows={3}
+                    aria-label={`Alt text, photo ${i + 1}`}
+                    value={text}
+                    maxLength={MAX_ALT_TEXT_LENGTH}
+                    autoFocus={slot.slotId === focusSlotId}
+                    onChange={(e) =>
+                      setDraft((prev) => ({
+                        ...prev,
+                        [slot.slotId]: e.target.value.slice(0, MAX_ALT_TEXT_LENGTH),
+                      }))
+                    }
+                    placeholder="Describe this image for screen readers and search…"
+                    className="mt-1 w-full resize-y rounded-lg border border-black/10 bg-white px-2 py-1.5 text-sm outline-none focus:border-primary dark:border-white/15 dark:bg-zinc-900"
+                  />
+                </label>
+              </li>
+            );
+          })}
+        </ol>
+
+        <div className="flex justify-end gap-2 border-t border-black/10 px-4 py-3 dark:border-white/15">
+          <button
+            type="button"
+            onClick={onClose}
+            className="h-9 rounded-full border border-black/10 px-4 text-sm font-medium hover:bg-black/[.04] dark:border-white/15 dark:hover:bg-white/[.06]"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={save}
+            className="h-9 rounded-full bg-primary px-5 text-sm font-medium text-white hover:bg-primary-dark"
+          >
+            Save
+          </button>
         </div>
       </div>
     </div>
@@ -539,6 +667,7 @@ export function ListingMediaEditor({
   onMoveVideo?: (from: number, to: number) => void;
 }) {
   const [enlarged, setEnlarged] = useState<{ slotId: string; focusAltText: boolean } | null>(null);
+  const [altTextFocus, setAltTextFocus] = useState<string | null>(null);
   const enlargedIndex = enlarged ? slots.findIndex((s) => s.slotId === enlarged.slotId) : -1;
   const enlargedSlot = enlargedIndex >= 0 ? slots[enlargedIndex] : null;
 
@@ -551,7 +680,7 @@ export function ListingMediaEditor({
           onMove={onMovePhoto}
           onRemove={onRemovePhoto}
           onEnlarge={(slotId) => setEnlarged({ slotId, focusAltText: false })}
-          onEditAltText={(slotId) => setEnlarged({ slotId, focusAltText: true })}
+          onEditAltText={setAltTextFocus}
           onAddOwn={onAddPhotos}
         />
       )}
@@ -573,6 +702,18 @@ export function ListingMediaEditor({
             if (enlargedIndex > 0) onMovePhoto(enlargedIndex, 0);
           }}
           onClose={() => setEnlarged(null)}
+        />
+      )}
+
+      {altTextFocus !== null && (
+        <AltTextModal
+          slots={slots}
+          altTextBySlot={altTextBySlot}
+          focusSlotId={altTextFocus}
+          onSave={(changes) => {
+            for (const [slotId, text] of Object.entries(changes)) onAltTextChange(slotId, text);
+          }}
+          onClose={() => setAltTextFocus(null)}
         />
       )}
     </>

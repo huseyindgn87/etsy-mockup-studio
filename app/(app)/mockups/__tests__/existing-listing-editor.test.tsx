@@ -421,10 +421,11 @@ describe("editor opened on an existing listing", () => {
     it("sends an alt text edit to Etsy", async () => {
       const photos = await openWithPhotos();
       fireEvent.click(photos.getByRole("button", { name: "Alt text for photo 2" }));
-      fireEvent.change(screen.getByPlaceholderText("Describe this image for screen readers and search…"), {
+      const dialog = screen.getByRole("dialog", { name: "Alt text" });
+      fireEvent.change(within(dialog).getByRole("textbox", { name: "Alt text, photo 2" }), {
         target: { value: "Back of the tee" },
       });
-      fireEvent.click(screen.getByRole("button", { name: "Close" }));
+      fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
       await waitFor(() => expect(warnsOnLeave()).toBe(true));
 
       fireEvent.click(syncButton());
