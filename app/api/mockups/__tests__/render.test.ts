@@ -767,7 +767,7 @@ describe("POST /api/mockups/render", () => {
     expect(createCalls).toHaveLength(0); // never reached Etsy
   });
 
-  test("mode:new blocks someone_else + not-a-supply + made-to-order before calling Etsy", async () => {
+  test("mode:new allows someone_else + not-a-supply + made-to-order with a production partner (POD sellers)", async () => {
     createCalls.length = 0;
     const mock = await png(80, 80, [0, 0, 0]);
 
@@ -792,10 +792,8 @@ describe("POST /api/mockups/render", () => {
         [{ field: "mockup", buf: mock, name: "m.png" }],
       ),
     );
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toMatch(/another company or person/i);
-    expect(createCalls).toHaveLength(0); // never reached Etsy
+    expect(res.status).toBe(200); // valid POD seller configuration
+    expect(createCalls).toHaveLength(1); // reaches Etsy
   });
 
   test("mode:new requires at least one production partner when who_made is someone_else", async () => {

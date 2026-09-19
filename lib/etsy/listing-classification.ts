@@ -59,16 +59,12 @@ export interface HowItsMade {
 }
 
 /**
- * Etsy rejects a physical listing that is none of: made by the seller,
- * a craft supply, or an item old enough to be vintage. A `someone_else`
- * item that's both "not a supply" and "made to order" (i.e. currently
- * produced, by a third party) fits none of those — Etsy's marketplace-
- * eligibility check blocks it with a generic `{"path":"/marketplace",
- * "type":"invalid_marketplace"}` error that never names the actual field.
- * This mirrors that one concrete, always-true rule so the app can block it
- * up front with a message that says what's actually wrong. Etsy also
- * requires a production partner to be named whenever someone else made the
- * item, regardless of when_made/is_supply.
+ * Etsy requires a production partner to be named whenever someone else made the
+ * item, regardless of when_made/is_supply. This is essential for print-on-demand
+ * sellers who disclose a third-party producer (e.g., a print shop). Etsy's
+ * official POD seller documentation explicitly allows and expects
+ * "Another company or person" + "A finished product" + "Made to order" when a
+ * production partner is selected.
  *
  * Returns a user-facing error message, or `null` when the combination is
  * fine to send to Etsy.
@@ -77,9 +73,6 @@ export function howItsMadeError(input: HowItsMade): string | null {
   if (input.whoMade !== "someone_else") return null;
   if (input.productionPartnerIds.length === 0) {
     return 'Select at least one production partner — required when "Another company or person" made this item.';
-  }
-  if (!input.isSupply && input.whenMade === "made_to_order") {
-    return 'Etsy doesn\'t allow "Another company or person" for a made-to-order item that isn\'t a supply. Mark it as "A supply or tool to make things", or choose a "When was it made" era instead of "Made to order".';
   }
   return null;
 }
