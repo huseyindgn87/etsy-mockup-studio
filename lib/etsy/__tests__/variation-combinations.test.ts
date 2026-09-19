@@ -10,6 +10,7 @@ import {
   moveColumnValue,
   removeColumn,
   removeColumnValue,
+  renameColumnValue,
   setColumnProperty,
   type VariationDimension,
   type VariationState,
@@ -235,5 +236,53 @@ describe("destructive-change detection", () => {
     expect(next.variationRows.price).toEqual({ "12": "22", "13": "" });
     expect(Object.keys(next.variationRows.sku)).toEqual(["12:21", "12:22"]);
     expect(next.variationRowEnabled).toEqual({});
+  });
+});
+
+describe("renameColumnValue", () => {
+  const priced = () =>
+    state([size(), color()], {
+      variationToggles: {
+        ...clearedVariationState().variationToggles,
+        price: { enabled: true, appliesTo: [1] },
+        quantity: { enabled: true, appliesTo: [0, 1] },
+      },
+      variationRows: {
+        ...clearedVariationState().variationRows,
+        price: { "21": "20.00", "22": "25.00" },
+        quantity: { "11:21": "3", "12:21": "4" },
+      },
+      variationRowEnabled: { "11:21": false },
+    });
+
+  test("changes only the name; every cell of that value moves to its new id", () => {
+    const result = renameColumnValue(priced(), 1, 0, "Jet Black")!;
+    expect(result.oldId).toBe(21);
+    expect(result.newId).toBe(-1);
+    expect(result.state.variations[1].values).toEqual(["Jet Black", "White"]);
+    expect(result.state.variations[1].valueIds).toEqual([-1, 22]);
+    expect(result.state.variationRows.price).toEqual({ "-1": "20.00", "22": "25.00" });
+    expect(result.state.variationRows.quantity).toEqual({ "11:-1": "3", "12:-1": "4" });
+    expect(result.state.variationRowEnabled).toEqual({ "11:-1": false });
+    expect(result.state.variations[0]).toEqual(size());
+  });
+
+  test("a matching id in another column is left alone", () => {
+    const s = state([size(), dimension(200, "Color", ["Black"], [11])], {
+      variationToggles: { ...clearedVariationState().variationToggles, sku: { enabled: true, appliesTo: [0, 1] } },
+      variationRows: { ...clearedVariationState().variationRows, sku: { "11:11": "SKU-1" } },
+    });
+    expect(renameColumnValue(s, 1, 0, "Onyx")!.state.variationRows.sku).toEqual({ "11:-1": "SKU-1" });
+  });
+
+  test("a custom variation's renamed value gets the next positive id", () => {
+    const custom = { ...size(), isCustom: true };
+    expect(renameColumnValue(state([custom]), 0, 1, "Medium")!.newId).toBe(14);
+  });
+
+  test("blank, unchanged and duplicate names are ignored", () => {
+    expect(renameColumnValue(priced(), 0, 0, "  ")).toBeNull();
+    expect(renameColumnValue(priced(), 0, 0, "S")).toBeNull();
+    expect(renameColumnValue(priced(), 0, 0, "m")).toBeNull();
   });
 });

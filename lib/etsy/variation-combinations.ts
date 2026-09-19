@@ -367,3 +367,58 @@ export function moveColumnValue(state: VariationState, index: number, from: numb
   values.splice(to, 0, ...values.splice(from, 1));
   return { ...state, variations: state.variations.map((v, i) => (i === index ? { ...v, valueIds, values } : v)) };
 }
+
+/**
+ * Renames one value. Its old id may be Etsy's id for the old name, so the
+ * value gets a fresh free-text id (as `addColumnValue` would give it) and
+ * every price, quantity, SKU, processing profile and on/off cell keyed by the
+ * old id moves to the new one — only the name changes. Blank names, no-op
+ * renames and names another value in the column already has are ignored.
+ * Returns the ids too, so the caller can move a photo assignment keyed by it.
+ */
+export function renameColumnValue(
+  state: VariationState,
+  index: number,
+  valueIndex: number,
+  name: string,
+): { state: VariationState; oldId: number; newId: number } | null {
+  const current = state.variations[index];
+  const trimmed = name.trim();
+  if (!current || valueIndex < 0 || valueIndex >= current.valueIds.length || !trimmed) return null;
+  if (current.values[valueIndex] === trimmed) return null;
+  if (current.values.some((v, i) => i !== valueIndex && v.trim().toLowerCase() === trimmed.toLowerCase())) return null;
+
+  const oldId = current.valueIds[valueIndex];
+  const newId = current.isCustom ? Math.max(0, ...current.valueIds) + 1 : Math.min(0, ...current.valueIds) - 1;
+  const remapKey = (key: string, columns: readonly number[]) =>
+    key
+      .split(":")
+      .map((part, p) => (columns[p] === index && part === String(oldId) ? String(newId) : part))
+      .join(":");
+  const remap = <T>(rows: Record<string, T>, columns: readonly number[]) =>
+    Object.fromEntries(Object.entries(rows).map(([k, v]) => [remapKey(k, columns), v]));
+
+  const allColumns = state.variations.map((_, i) => i);
+  const variationRows = { ...state.variationRows };
+  for (const field of COMBINATION_FIELDS) {
+    variationRows[field] = remap(state.variationRows[field], state.variationToggles[field].appliesTo);
+  }
+  return {
+    oldId,
+    newId,
+    state: {
+      ...state,
+      variations: state.variations.map((v, i) =>
+        i === index
+          ? {
+              ...v,
+              valueIds: v.valueIds.map((id, j) => (j === valueIndex ? newId : id)),
+              values: v.values.map((value, j) => (j === valueIndex ? trimmed : value)),
+            }
+          : v,
+      ),
+      variationRows,
+      variationRowEnabled: remap(state.variationRowEnabled, allColumns),
+    },
+  };
+}

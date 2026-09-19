@@ -275,8 +275,8 @@ describe("editor opened on an existing listing", () => {
     expect(variations.getByRole("textbox", { name: "Second variation name" })).toHaveValue("Color");
     const options = (name: string) =>
       within(variations.getByRole("list", { name })).getAllByRole("listitem").map((li) => li.textContent);
-    expect(options("Size options")).toEqual(["⠿Unisex Shirt / S×", "⠿Unisex Shirt / 2XL×"]);
-    expect(options("Color options")).toEqual(["⠿Ash×", "⠿Black×"]);
+    expect(options("Size options")).toEqual(["⠿Unisex Shirt / S✎×", "⠿Unisex Shirt / 2XL✎×"]);
+    expect(options("Color options")).toEqual(["⠿Ash✎×", "⠿Black✎×"]);
     expect(variations.getByText(/^4 combinations \(max \d+\)\.$/)).toBeInTheDocument();
 
     const shipping = openSection("Shipping");

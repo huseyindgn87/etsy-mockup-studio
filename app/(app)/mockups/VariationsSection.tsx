@@ -16,6 +16,7 @@ import {
   removeColumn,
   removeColumnValue,
   renameColumn,
+  renameColumnValue,
   setColumnProperty,
   setColumnScale,
   type CombinationModel,
@@ -24,6 +25,7 @@ import {
 } from "@/lib/etsy/variation-combinations";
 import {
   OFFERING_TABS,
+  photoPropertyIndex,
   prunedVariationPhotos,
   validateOfferings,
   type OfferingTab,
@@ -477,6 +479,17 @@ function VariationColumns({
             onRemove={(i) =>
               commit(removeColumnValue(value, column, i), `Removing “${variations[column].values[i]}”`, {}, { ask: false })
             }
+            onRenameValue={(i, name) => {
+              const renamed = renameColumnValue(value, column, i, name);
+              if (!renamed) return;
+              const photos = { ...value.variationPhotos };
+              const oldKey = String(renamed.oldId);
+              if (photoPropertyIndex(value.variations) === column && oldKey in photos) {
+                photos[String(renamed.newId)] = photos[oldKey];
+                delete photos[oldKey];
+              }
+              patch(variationPartial(renamed.state, photos));
+            }}
             onMove={(from, to) => patch(variationPartial(moveColumnValue(value, column, from, to), value.variationPhotos))}
           />
         ))}
@@ -504,6 +517,7 @@ function VariationColumn({
   onScale,
   onAdd,
   onRemove,
+  onRenameValue,
   onMove,
 }: {
   column: number;
@@ -517,8 +531,10 @@ function VariationColumn({
   onScale: (scaleId: number | null) => void;
   onAdd: (input: { name: string; valueId?: number | null }) => void;
   onRemove: (index: number) => void;
+  onRenameValue: (index: number, name: string) => void;
   onMove: (from: number, to: number) => void;
 }) {
+  const [editing, setEditing] = useState<{ index: number; draft: string } | null>(null);
   const variation = variations[column];
   const enabled = column <= variations.length;
   const ordinal = COLUMN_ORDINALS[column];
@@ -621,7 +637,7 @@ function VariationColumn({
                     setDrag(null);
                   }}
                   onDragEnd={() => setDrag(null)}
-                  className={`flex items-center gap-2 rounded-md border border-black/10 px-2 py-1.5 text-sm dark:border-white/15 ${
+                  className={`group flex items-center gap-2 rounded-md border border-black/10 px-2 py-1.5 text-sm dark:border-white/15 ${
                     drag?.column === column && drag.index === i ? "opacity-50" : ""
                   }`}
                 >
@@ -642,7 +658,42 @@ function VariationColumn({
                   >
                     ⠿
                   </button>
-                  <span className="min-w-0 flex-1 truncate">{name}</span>
+                  {editing?.index === i ? (
+                    <input
+                      type="text"
+                      autoFocus
+                      aria-label={`New name for ${name}`}
+                      value={editing.draft}
+                      onChange={(e) => setEditing({ index: i, draft: e.target.value })}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          onRenameValue(i, editing.draft);
+                          setEditing(null);
+                        } else if (e.key === "Escape") {
+                          setEditing(null);
+                        }
+                      }}
+                      onBlur={() => {
+                        onRenameValue(i, editing.draft);
+                        setEditing(null);
+                      }}
+                      className="min-w-0 flex-1 rounded border border-primary bg-white px-1 py-0.5 text-sm outline-none dark:bg-zinc-900"
+                    />
+                  ) : (
+                    <>
+                      <span className="min-w-0 flex-1 truncate">{name}</span>
+                      <button
+                        type="button"
+                        onClick={() => setEditing({ index: i, draft: name })}
+                        aria-label={`Rename ${name}`}
+                        title="Rename"
+                        className="shrink-0 text-zinc-400 opacity-0 hover:text-zinc-700 focus-visible:opacity-100 group-hover:opacity-100 dark:hover:text-zinc-200"
+                      >
+                        ✎
+                      </button>
+                    </>
+                  )}
                   <button
                     type="button"
                     onClick={() => onRemove(i)}

@@ -289,6 +289,30 @@ describe("Variations section — destructive changes", () => {
     expect(state.value.variationRows.sku).toEqual({});
   });
 
+  it("the pencil renames a value in place and keeps its prices and SKUs", () => {
+    const state = renderSection(withPrices());
+    fireEvent.click(section().getByRole("button", { name: "Rename S" }));
+    const input = section().getByRole("textbox", { name: "New name for S" });
+    expect(input).toHaveValue("S");
+    fireEvent.change(input, { target: { value: "Small" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(optionNames("Size")).toEqual(["Small", "M", "L"]);
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    const newId = state.value.variations[0].valueIds[0];
+    expect(state.value.variationRows.price).toEqual({ [String(newId)]: "20.00", "12": "22.00" });
+    expect(state.value.variationRows.sku).toEqual({ [`${newId}:21`]: "S-BLK" });
+  });
+
+  it("Escape cancels a rename", () => {
+    renderSection(withPrices());
+    fireEvent.click(section().getByRole("button", { name: "Rename M" }));
+    const input = section().getByRole("textbox", { name: "New name for M" });
+    fireEvent.change(input, { target: { value: "Medium" } });
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(optionNames("Size")).toEqual(["S", "M", "L"]);
+  });
+
   it("doesn't warn when the removed value has no data", () => {
     renderSection(withPrices());
     fireEvent.click(section().getByRole("button", { name: "Remove L" }));
