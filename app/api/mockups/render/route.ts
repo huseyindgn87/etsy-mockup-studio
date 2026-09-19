@@ -460,17 +460,16 @@ export async function POST(request: Request) {
       );
     }
     const sourceListingId = hasListingId ? (publish.listingId as number) : null;
-    if (mode === "new" && !publish.newListing?.title?.trim()) {
+    if (mode !== "existing" && !publish.newListing?.title?.trim()) {
       return NextResponse.json(
         { error: "publishTo.newListing.title is required for a new listing." },
         { status: 400 },
       );
     }
-    // A brand-new listing with no source to borrow a category from must
-    // supply its own — createDraftListing requires taxonomy_id outright.
+    // The category is the form's, never the source listing's — and
+    // createDraftListing requires taxonomy_id outright.
     if (
-      mode === "new" &&
-      sourceListingId == null &&
+      mode !== "existing" &&
       !(Number.isInteger(publish.newListing?.taxonomyId) && (publish.newListing!.taxonomyId as number) > 0)
     ) {
       return NextResponse.json(
@@ -546,7 +545,6 @@ export async function POST(request: Request) {
           howItsMade: howItsMade!,
           personalization,
           newListing: publish.newListing ?? {},
-          copyTitle: publish.copyTitle,
         };
         const resolved = await resolveDraftListingInput(plan);
         targetListingId = await createDraftListing(shopId, resolved.input);

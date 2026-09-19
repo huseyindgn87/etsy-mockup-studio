@@ -36,6 +36,8 @@ export interface ScheduledImage {
   filename: string;
   contentType: string;
   altText?: string;
+  /** The photo-grid slot it was rendered from — the runner reads its current alt text and variation links from the draft by it. */
+  slotId?: string;
 }
 
 /** What a scheduled job does when it runs. */
@@ -93,5 +95,5 @@ export interface ScheduleContentInput {
   /** The browser-generated id the images were uploaded under. */
   renderSetId: string;
   /** In rank order; image `i` was uploaded to slot `image-NN`. */
-  images: { filename: string; contentType: string; altText?: string }[];
+  images: { filename: string; contentType: string; altText?: string; slotId?: string }[];
 }

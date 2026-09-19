@@ -2,9 +2,10 @@
  * Publishes one claimed scheduled listing to Etsy, for the runner
  * (lib/scheduling/runner.ts). Server-only.
  *
- * Sends only what was fixed at schedule time — the stored listing content
- * and the images already rendered and uploaded to R2. Nothing is composited
- * here. Every step is safe to repeat on a retry: the listing is created once
+ * Sends the draft as it is saved now — its form, alt text and variation
+ * photos, rebuilt with the editor's own builder — with the images rendered
+ * and uploaded to R2 at schedule time (re-rendered by the editor whenever a
+ * save changes the photos). Nothing is composited here. Every step is safe to repeat on a retry: the listing is created once
  * (its id is recorded straight away), follow-up details are full replaces,
  * and images are uploaded with `overwrite` at their fixed ranks.
  *
@@ -20,7 +21,9 @@ import { uploadListingImage } from "@/lib/etsy/listing-images";
 import { refreshSession } from "@/lib/etsy/oauth";
 import { applyListingDetails, resolveDraftListingInput } from "@/lib/etsy/publish-listing";
 import { getCachedAccessToken, getDecryptedRefreshToken, saveConnectionTokens } from "@/lib/etsy/shop-connections";
+import { prisma } from "@/lib/db/prisma";
 import { getObject } from "@/lib/storage/r2";
+import { publishSpecFromDraft } from "./draft-spec";
 import { coerceScheduledImages, parseScheduledPublishSpec } from "./publish-spec";
 import type { PublishHooks } from "./runner";
 
@@ -47,10 +50,19 @@ export async function withShopAccessToken<T>(userId: string, shopId: string, fn:
 const message = (err: unknown) => (err instanceof Error ? err.message : "failed");
 
 export async function publishScheduledListing(row: ScheduledListing, hooks: PublishHooks): Promise<string> {
-  const parsed = parseScheduledPublishSpec(row.publishSpec);
+  const stored = coerceScheduledImages(row.images);
+  if (stored.length === 0) throw new Error("The scheduled listing has no images to publish.");
+  const draft = row.draftId
+    ? await prisma.listingDraft.findFirst({
+        where: { id: row.draftId, userId: row.userId },
+        select: { formData: true, photosData: true, sourceMode: true, sourceListingId: true },
+      })
+    : null;
+  if (!draft) throw new Error("The draft this schedule publishes no longer exists.");
+  const latest = publishSpecFromDraft(draft, stored);
+  const parsed = parseScheduledPublishSpec(latest.spec);
   if (!parsed.ok) throw new Error(`The scheduled listing's details are invalid: ${parsed.error}`);
-  const images = coerceScheduledImages(row.images);
-  if (images.length === 0) throw new Error("The scheduled listing has no images to publish.");
+  const images = latest.images;
   const shopId = Number(row.shopId);
 
   return withShopAccessToken(row.userId, row.shopId, async () => {

@@ -2,9 +2,26 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
-const { calls, objects } = vi.hoisted(() => ({
+const { calls, objects, draft } = vi.hoisted(() => ({
   calls: [] as string[],
   objects: new Map<string, Buffer>(),
+  /** What the draft holds when the runner reads it; `spec` stands in for the form (draft-spec is mocked). */
+  draft: { current: null as { spec: unknown } | null },
+}));
+
+vi.mock("@/lib/db/prisma", () => ({
+  prisma: {
+    listingDraft: {
+      findFirst: vi.fn(async () =>
+        draft.current
+          ? { formData: draft.current.spec, photosData: {}, sourceMode: null, sourceListingId: null }
+          : null,
+      ),
+    },
+  },
+}));
+vi.mock("../draft-spec", () => ({
+  publishSpecFromDraft: vi.fn((d: { formData: unknown }, images: unknown) => ({ spec: d.formData, images })),
 }));
 
 vi.mock("@/lib/etsy/auth", () => ({
@@ -117,7 +134,12 @@ beforeEach(() => {
   vi.clearAllMocks();
   calls.length = 0;
   objects.clear();
+  draft.current = { spec: VALID_SPEC };
 });
+
+const draftHolds = (spec: unknown) => {
+  draft.current = { spec };
+};
 
 describe("publishScheduledListing", () => {
   test("creates the listing, attaches 20 stored images in order, then activates it", async () => {
@@ -165,7 +187,8 @@ describe("publishScheduledListing", () => {
         },
       },
     };
-    await publishScheduledListing(makeRow({ publishSpec: spec }), hooks());
+    draftHolds(spec);
+    await publishScheduledListing(makeRow(), hooks());
     // uploadListingImage's mock gives rank r the id 100 + r.
     expect(updateVariationImages).toHaveBeenCalledWith(111, 4242, [
       { propertyId: 513, valueId: 9001, imageId: 103 },
@@ -219,17 +242,19 @@ describe("publishScheduledListing", () => {
         properties: [{ propertyId: 200, name: "Primary color", valueIds: [1], values: ["Black"] }],
       },
     };
-    await expect(publishScheduledListing(makeRow({ publishSpec: spec }), hooks())).rejects.toThrow(
+    draftHolds(spec);
+    await expect(publishScheduledListing(makeRow(), hooks())).rejects.toThrow(
       "Primary color: invalid value",
     );
     expect(uploadListingImage).not.toHaveBeenCalled();
     expect(activateListing).not.toHaveBeenCalled();
   });
 
-  test("an invalid stored spec, or no images, fails without calling Etsy", async () => {
-    await expect(
-      publishScheduledListing(makeRow({ publishSpec: { ...VALID_SPEC, mode: "existing" } }), hooks()),
-    ).rejects.toThrow(/details are invalid/);
+  test("an invalid draft, a deleted draft, or no images, fails without calling Etsy", async () => {
+    draftHolds({ ...VALID_SPEC, mode: "existing" });
+    await expect(publishScheduledListing(makeRow(), hooks())).rejects.toThrow(/details are invalid/);
+    draft.current = null;
+    await expect(publishScheduledListing(makeRow(), hooks())).rejects.toThrow(/no longer exists/);
     await expect(publishScheduledListing(makeRow({ images: [] as unknown as ScheduledListing["images"] }), hooks())).rejects.toThrow(/no images/);
     expect(refreshSession).not.toHaveBeenCalled();
     expect(createDraftListing).not.toHaveBeenCalled();

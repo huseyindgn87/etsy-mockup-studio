@@ -653,7 +653,7 @@ describe("POST /api/mockups/render", () => {
     expect(videoCalls).toEqual([]); // never reached Etsy
   }, 30_000);
 
-  test("mode:copy creates a draft seeded from the source and uploads there", async () => {
+  test("mode:copy publishes the edited form, borrowing only shipping and return policy from the source", async () => {
     uploadCalls.length = 0;
     createCalls.length = 0;
     const mock = await png(120, 100, [90, 100, 110]);
@@ -662,7 +662,22 @@ describe("POST /api/mockups/render", () => {
     const res = await POST(
       form(
         {
-          publishTo: { mode: "copy", listingId: 500, howItsMade: HOW_ITS_MADE_OK },
+          publishTo: {
+            mode: "copy",
+            listingId: 500,
+            howItsMade: HOW_ITS_MADE_OK,
+            newListing: {
+              title: "Edited copy title",
+              description: "Edited description",
+              tags: ["edited"],
+              taxonomyId: 777,
+              shopSectionId: 42,
+              readinessStateId: 654,
+              price: 19.5,
+              quantity: 4,
+              sku: "HG-000933",
+            },
+          },
           mockups: [{ name: "tee", width: 120, height: 100, calibration: {} }],
           designs: [{ name: "a" }],
           jobs: [{ mockup: 0, design: 0 }],
@@ -687,11 +702,16 @@ describe("POST /api/mockups/render", () => {
     expect(body.createdDraft).toBe(true);
     expect(createCalls).toHaveLength(1);
     expect(createCalls[0]).toMatchObject({
-      title: "Source tee (copy)",
-      taxonomyId: 1234,
+      title: "Edited copy title",
+      description: "Edited description",
+      tags: ["edited"],
+      taxonomyId: 777,
+      shopSectionId: 42,
+      readinessStateId: 654,
+      price: 19.5,
+      quantity: 4,
+      materials: [],
       shippingProfileId: 55,
-      readinessStateId: 321,
-      tags: ["a", "b"],
     });
     // uploaded to the NEW draft, not the source
     expect(uploadCalls.every((c) => c.listingId === 999001)).toBe(true);
@@ -705,7 +725,7 @@ describe("POST /api/mockups/render", () => {
     const noTitle = await POST(
       form(
         {
-          publishTo: { mode: "new", listingId: 500, newListing: {}, howItsMade: HOW_ITS_MADE_OK },
+          publishTo: { mode: "new", listingId: 500, newListing: { taxonomyId: 1234 }, howItsMade: HOW_ITS_MADE_OK },
           mockups: [{ name: "m", calibration: {} }],
           designs: [],
           jobs: [{ mockup: 0 }],
@@ -722,7 +742,7 @@ describe("POST /api/mockups/render", () => {
             mode: "new",
             listingId: 500,
             howItsMade: HOW_ITS_MADE_OK,
-            newListing: { title: "Blank draft", quantity: 7 },
+            newListing: { taxonomyId: 1234, title: "Blank draft", quantity: 7 },
           },
           mockups: [{ name: "m", calibration: {} }],
           designs: [],
@@ -736,7 +756,7 @@ describe("POST /api/mockups/render", () => {
       title: "Blank draft",
       quantity: 7,
       taxonomyId: 1234,
-      readinessStateId: 321, // falls back to the source listing's since none was chosen
+      readinessStateId: null, // never the source listing's
       tags: [],
       materials: [],
       // never borrowed from the source listing — always the caller's own choice
@@ -753,7 +773,7 @@ describe("POST /api/mockups/render", () => {
     const res = await POST(
       form(
         {
-          publishTo: { mode: "new", listingId: 500, newListing: { title: "No how-made" } },
+          publishTo: { mode: "new", listingId: 500, newListing: { taxonomyId: 1234, title: "No how-made" } },
           mockups: [{ name: "m", calibration: {} }],
           designs: [],
           jobs: [{ mockup: 0 }],
@@ -783,7 +803,7 @@ describe("POST /api/mockups/render", () => {
               whenMade: "made_to_order",
               productionPartnerIds: [123],
             },
-            newListing: { title: "Reseller item" },
+            newListing: { taxonomyId: 1234, title: "Reseller item" },
           },
           mockups: [{ name: "m", calibration: {} }],
           designs: [],
@@ -812,7 +832,7 @@ describe("POST /api/mockups/render", () => {
               whenMade: "made_to_order",
               productionPartnerIds: [],
             },
-            newListing: { title: "Reseller supply" },
+            newListing: { taxonomyId: 1234, title: "Reseller supply" },
           },
           mockups: [{ name: "m", calibration: {} }],
           designs: [],
@@ -843,7 +863,7 @@ describe("POST /api/mockups/render", () => {
               whenMade: "made_to_order",
               productionPartnerIds: [123, 456],
             },
-            newListing: { title: "Reseller supply" },
+            newListing: { taxonomyId: 1234, title: "Reseller supply" },
           },
           mockups: [{ name: "m", calibration: {} }],
           designs: [],
@@ -867,7 +887,7 @@ describe("POST /api/mockups/render", () => {
     const res = await POST(
       form(
         {
-          publishTo: { mode: "new", listingId: 500, howItsMade: HOW_ITS_MADE_OK, newListing: { title: "Plain" } },
+          publishTo: { mode: "new", listingId: 500, howItsMade: HOW_ITS_MADE_OK, newListing: { taxonomyId: 1234, title: "Plain" } },
           mockups: [{ name: "m", calibration: {} }],
           designs: [],
           jobs: [{ mockup: 0 }],
@@ -890,7 +910,7 @@ describe("POST /api/mockups/render", () => {
             mode: "new",
             listingId: 500,
             howItsMade: HOW_ITS_MADE_OK,
-            newListing: { title: "Personalized item" },
+            newListing: { taxonomyId: 1234, title: "Personalized item" },
             personalization: [
               {
                 questionText: "Engraving",
@@ -954,7 +974,7 @@ describe("POST /api/mockups/render", () => {
             mode: "new",
             listingId: 500,
             howItsMade: HOW_ITS_MADE_OK,
-            newListing: { title: "Two uploads" },
+            newListing: { taxonomyId: 1234, title: "Two uploads" },
             personalization: [
               { questionText: "Photo A", required: true, fieldType: "unlabeled_upload", maxAllowedFiles: 1 },
               { questionText: "Photo B", required: true, fieldType: "unlabeled_upload", maxAllowedFiles: 1 },
@@ -985,7 +1005,7 @@ describe("POST /api/mockups/render", () => {
             mode: "new",
             listingId: 500,
             howItsMade: HOW_ITS_MADE_OK,
-            newListing: { title: "Will fail personalization" },
+            newListing: { taxonomyId: 1234, title: "Will fail personalization" },
             personalization: [
               { questionText: "Engraving", required: true, fieldType: "text_input", maxAllowedCharacters: 50 },
             ],
@@ -1017,7 +1037,7 @@ describe("POST /api/mockups/render", () => {
             mode: "new",
             listingId: 500,
             howItsMade: HOW_ITS_MADE_OK,
-            newListing: { title: "Ready to ship tee", readinessStateId: 654 },
+            newListing: { taxonomyId: 1234, title: "Ready to ship tee", readinessStateId: 654 },
           },
           mockups: [{ name: "m", calibration: {} }],
           designs: [],
@@ -1043,7 +1063,7 @@ describe("POST /api/mockups/render", () => {
             mode: "new",
             listingId: 500,
             howItsMade: HOW_ITS_MADE_OK,
-            newListing: { title: "Featured tee", featuredRank: 1, shouldAutoRenew: false },
+            newListing: { taxonomyId: 1234, title: "Featured tee", featuredRank: 1, shouldAutoRenew: false },
           },
           mockups: [{ name: "m", calibration: {} }],
           designs: [],
@@ -1064,7 +1084,7 @@ describe("POST /api/mockups/render", () => {
             mode: "new",
             listingId: 500,
             howItsMade: HOW_ITS_MADE_OK,
-            newListing: { title: "Featured tee 2", featuredRank: 1 },
+            newListing: { taxonomyId: 1234, title: "Featured tee 2", featuredRank: 1 },
           },
           mockups: [{ name: "m", calibration: {} }],
           designs: [],
@@ -1166,6 +1186,7 @@ describe("POST /api/mockups/render", () => {
             listingId: 500,
             howItsMade: HOW_ITS_MADE_OK,
             newListing: {
+              taxonomyId: 1234,
               title: "Retry-safe draft",
               sku: "X-1",
               properties: [{ propertyId: 1, name: "Primary color", valueIds: [1], values: ["Red"] }],
@@ -1209,6 +1230,7 @@ describe("POST /api/mockups/render", () => {
             listingId: 500,
             howItsMade: HOW_ITS_MADE_OK,
             newListing: {
+              taxonomyId: 1234,
               title: "Tee with variations",
               price: 19.99,
               quantity: 5,
@@ -1294,6 +1316,7 @@ describe("POST /api/mockups/render", () => {
             listingId: 500,
             howItsMade: HOW_ITS_MADE_OK,
             newListing: {
+              taxonomyId: 1234,
               title: "Tee with a discontinued color",
               price: 19.99,
               quantity: 5,
@@ -1351,6 +1374,7 @@ describe("POST /api/mockups/render", () => {
             listingId: 500,
             howItsMade: HOW_ITS_MADE_OK,
             newListing: {
+              taxonomyId: 1234,
               title: "Tee with per-value images",
               price: 10,
               quantity: 1,
@@ -1423,6 +1447,7 @@ describe("POST /api/mockups/render", () => {
             listingId: 500,
             howItsMade: HOW_ITS_MADE_OK,
             newListing: {
+              taxonomyId: 1234,
               title: "Tee with photos per colour",
               price: 10,
               quantity: 1,
@@ -1484,6 +1509,7 @@ describe("POST /api/mockups/render", () => {
             listingId: 500,
             howItsMade: HOW_ITS_MADE_OK,
             newListing: {
+              taxonomyId: 1234,
               title: "Tee, inventory will fail",
               variations: {
                 products: [

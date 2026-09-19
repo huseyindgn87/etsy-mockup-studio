@@ -43,14 +43,15 @@ export interface RenderableDesign {
 }
 
 export type ScheduleImageSource =
-  | { kind: "render"; mockup: RenderableMockup; design: RenderableDesign; altText?: string }
-  | { kind: "own"; file: File; altText?: string };
+  | { kind: "render"; mockup: RenderableMockup; design: RenderableDesign; altText?: string; slotId?: string }
+  | { kind: "own"; file: File; altText?: string; slotId?: string };
 
 export interface PreparedImage {
   blob: Blob;
   filename: string;
   contentType: string;
   altText?: string;
+  slotId?: string;
 }
 
 function canvasToJpeg(canvas: HTMLCanvasElement, quality: number): Promise<Blob> {
@@ -171,13 +172,20 @@ export async function prepareScheduleImages(
         filename: `${source.design.name}_${source.mockup.name}.jpg`,
         contentType: "image/jpeg",
         altText: source.altText,
+        slotId: source.slotId,
       });
     } else {
       const contentType = source.file.type === "image/jpg" ? "image/jpeg" : source.file.type;
       if (!OWN_IMAGE_TYPES.includes(contentType)) {
         throw new Error(`Photo ${i + 1} (${source.file.name}) isn't a JPEG, PNG or GIF.`);
       }
-      prepared.push({ blob: source.file, filename: source.file.name, contentType, altText: source.altText });
+      prepared.push({
+        blob: source.file,
+        filename: source.file.name,
+        contentType,
+        altText: source.altText,
+        slotId: source.slotId,
+      });
     }
   }
   onProgress(capped.length, capped.length);
@@ -222,7 +230,12 @@ export async function uploadScheduleImages(
   onProgress(prepared.length, prepared.length);
   return {
     renderSetId,
-    images: prepared.map((p) => ({ filename: p.filename, contentType: p.contentType, altText: p.altText })),
+    images: prepared.map((p) => ({
+      filename: p.filename,
+      contentType: p.contentType,
+      altText: p.altText,
+      ...(p.slotId ? { slotId: p.slotId } : {}),
+    })),
   };
 }
 

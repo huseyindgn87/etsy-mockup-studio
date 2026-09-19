@@ -50,12 +50,10 @@ export interface PersonalizationQuestionSpec {
 export interface PublishSpec {
   /**
    * "existing" — append to `listingId` (never replaces unless `overwrite`). Requires `listingId`.
-   * "copy"     — new draft seeded from `listingId`, upload there. Requires `listingId`.
-   * "new"      — new draft from `newListing`, upload there. `listingId` is
-   *              optional here: when given, category/shipping/return-policy
-   *              are borrowed from it as fallbacks; when omitted (a listing
-   *              created from scratch, copying nothing), those fall back to
-   *              `newListing`'s own fields only, or are left unset.
+   * "copy"     — new draft from `newListing` (the edited form), upload there.
+   *              Requires `listingId`, the copied listing, whose shipping
+   *              profile and return policy are the only things read from it.
+   * "new"      — the same, `listingId` optional.
    * A live listing is never modified except in "existing" mode, and even then
    * images are only added unless the caller explicitly sets `overwrite`.
    */
@@ -64,7 +62,6 @@ export interface PublishSpec {
   startRank?: number;
   /** "existing" mode only. Replace the image at each rank. Default false. */
   overwrite?: boolean;
-  copyTitle?: string;
   /** Required for "copy" and "new" — see {@link HowItsMadeSpec}. */
   howItsMade?: HowItsMadeSpec;
   /** Optional, "copy"/"new" only — 0 to `PERSONALIZATION_MAX_QUESTIONS` questions. Omitted/empty -> no personalization is set. */
@@ -438,12 +435,16 @@ export function sanitizePersonalization(
 /** What creating a "copy" or "new" listing needs, once its {@link PublishSpec} is validated. */
 export interface ListingCreationPlan {
   mode: "copy" | "new";
-  /** The listing a "copy" (required) or "new" (optional) borrows category/shipping/return policy from. */
+  /**
+   * The listing a "copy" was made from (required) or a "new" one names
+   * (optional). Only its shipping profile and return policy are read — the
+   * form has no fields for them. Every piece of content comes from
+   * `newListing`, the form as it is now.
+   */
   sourceListingId: number | null;
   howItsMade: ValidHowItsMade;
   personalization: PersonalizationQuestionInput[];
   newListing: NonNullable<PublishSpec["newListing"]>;
-  copyTitle?: string;
 }
 
 export interface ResolvedListingInput {
@@ -453,61 +454,42 @@ export interface ResolvedListingInput {
 }
 
 /**
- * The `createDraftListing` input for a plan — reading the source listing's
- * structure from Etsy when there is one.
+ * The `createDraftListing` input for a plan. "copy" and "new" are the same:
+ * title, description, tags, price, quantity, category, processing profile and
+ * section are the form's, never the source listing's. The source is read only
+ * for its shipping profile and return policy, and is never written to.
  */
 export async function resolveDraftListingInput(plan: ListingCreationPlan): Promise<ResolvedListingInput> {
-  const { mode, sourceListingId, howItsMade } = plan;
-  // Absent for a listing created from scratch (mode "new", no source to
-  // copy anything from) — "copy" always has one (validated by the caller).
+  const { sourceListingId, howItsMade } = plan;
   const src = sourceListingId != null ? await getListingStructure(sourceListingId) : null;
   const nl = plan.newListing;
-  const quantity =
-    mode === "new" && Number.isInteger(nl.quantity) && (nl.quantity as number) > 0
-      ? (nl.quantity as number)
-      : (src?.quantity ?? 1);
-  const price =
-    mode === "new" && typeof nl.price === "number" && nl.price > 0
-      ? nl.price
-      : (src?.price ?? 1);
-  const taxonomyId =
-    mode === "new" && Number.isInteger(nl.taxonomyId) && (nl.taxonomyId as number) > 0
-      ? (nl.taxonomyId as number)
-      // Guaranteed positive here: either borrowed from a source, or
-      // pre-validated by the caller for the no-source "new" case.
-      : (src?.taxonomyId ?? 0);
-  const readinessStateId =
-    mode === "new" && Number.isInteger(nl.readinessStateId) && (nl.readinessStateId as number) > 0
-      ? (nl.readinessStateId as number)
-      : (src?.readinessStateId ?? null);
+  const quantity = Number.isInteger(nl.quantity) && (nl.quantity as number) > 0 ? (nl.quantity as number) : 1;
+  const price = typeof nl.price === "number" && nl.price > 0 ? nl.price : 1;
+  const title = typeof nl.title === "string" ? nl.title.trim() : "";
 
   return {
     price,
     quantity,
     input: {
-      title:
-        mode === "copy"
-          ? plan.copyTitle?.trim() || `${src!.title} (copy)`
-          : (nl.title as string).trim(),
-      description: mode === "copy" ? src!.description : nl.description || (nl.title as string),
+      title,
+      description: (typeof nl.description === "string" && nl.description) || title,
       quantity,
       price,
       whoMade: howItsMade.whoMade,
       isSupply: howItsMade.isSupply,
       whenMade: howItsMade.whenMade,
       productionPartnerIds: howItsMade.productionPartnerIds,
-      taxonomyId,
-      // Neither is required by createDraftListing — a from-scratch draft
-      // simply has none set until the user picks them in Etsy's own editor.
+      // Validated positive by every caller (parseScheduledPublishSpec, the render route).
+      taxonomyId: Number.isInteger(nl.taxonomyId) ? (nl.taxonomyId as number) : 0,
       shippingProfileId: src?.shippingProfileId ?? null,
       returnPolicyId: src?.returnPolicyId ?? null,
-      readinessStateId,
-      shopSectionId:
-        mode === "new" && typeof nl.shopSectionId === "number" && nl.shopSectionId > 0
-          ? nl.shopSectionId
+      readinessStateId:
+        Number.isInteger(nl.readinessStateId) && (nl.readinessStateId as number) > 0
+          ? (nl.readinessStateId as number)
           : null,
-      tags: mode === "copy" ? src!.tags : mode === "new" ? sanitizeTags(nl.tags) : [],
-      materials: mode === "copy" ? src!.materials : [],
+      shopSectionId: typeof nl.shopSectionId === "number" && nl.shopSectionId > 0 ? nl.shopSectionId : null,
+      tags: sanitizeTags(nl.tags),
+      materials: [],
     },
   };
 }
@@ -534,14 +516,14 @@ export async function applyListingDetails(
   resolved: ResolvedListingInput,
   onStepError: ListingStepErrorHandler,
 ): Promise<CleanVariations | null> {
-  const { mode, personalization } = plan;
+  const { personalization } = plan;
   const nl = plan.newListing;
   const { price, quantity } = resolved;
   let variations: CleanVariations | null = null;
 
   // featured_rank/should_auto_renew aren't part of createDraftListing either —
   // same follow-up-call pattern as properties/SKU/variations below.
-  if (mode === "new" && (nl.featuredRank != null || typeof nl.shouldAutoRenew === "boolean")) {
+  if ((nl.featuredRank != null || typeof nl.shouldAutoRenew === "boolean")) {
     try {
       await updateListingSettings(shopId, listingId, {
         featuredRank: nl.featuredRank,
@@ -568,53 +550,51 @@ export async function applyListingDetails(
 
   // Category-specific properties and SKU aren't part of createDraftListing —
   // Etsy sets them with separate calls once the listing exists.
-  if (mode === "new") {
-    for (const p of sanitizeProperties(nl.properties)) {
-      try {
-        await setListingProperty(shopId, listingId, p);
-      } catch (err) {
-        onStepError(p.name, err);
-      }
+  for (const p of sanitizeProperties(nl.properties)) {
+    try {
+      await setListingProperty(shopId, listingId, p);
+    } catch (err) {
+      onStepError(p.name, err);
     }
-    variations = sanitizeVariations(nl.variations);
-    if (variations) {
-      // A variation grid replaces the single default product outright —
-      // sending both would just have the second PUT overwrite the first.
-      try {
-        const saved = await updateListingInventory(listingId, {
-          products: variations.products.map((p) => ({
-            sku: p.sku,
-            propertyValues: p.propertyValues,
-            price: p.price ?? price,
-            quantity: p.quantity ?? quantity,
-            readinessStateId: p.readinessStateId,
-            enabled: p.enabled,
-          })),
-          priceOnProperty: variations.priceOnProperty,
-          quantityOnProperty: variations.quantityOnProperty,
-          skuOnProperty: variations.skuOnProperty,
-          readinessStateOnProperty: variations.readinessStateOnProperty,
-        });
-        const imagesByValue = resolveVariationImageValueIds(variations.imagesByValue, saved);
-        const matched = new Set(imagesByValue.map((i) => `${i.value}:${i.imageIndex}:${i.jobIndex}`));
-        const unmatched = variations.imagesByValue.filter((i) => !matched.has(`${i.value}:${i.imageIndex}:${i.jobIndex}`));
-        if (unmatched.length > 0) {
-          const names = unmatched.map((i) => `“${i.value ?? i.valueId}”`).join(", ");
-          onStepError("Variation photos", new Error(`${names} isn't an option in the saved inventory, so its photo wasn't attached.`));
-        }
-        variations = { ...variations, imagesByValue };
-      } catch (err) {
-        onStepError("Variations", err);
-        variations = null; // grid failed to save -> don't try to attach images to it
+  }
+  variations = sanitizeVariations(nl.variations);
+  if (variations) {
+    // A variation grid replaces the single default product outright —
+    // sending both would just have the second PUT overwrite the first.
+    try {
+      const saved = await updateListingInventory(listingId, {
+        products: variations.products.map((p) => ({
+          sku: p.sku,
+          propertyValues: p.propertyValues,
+          price: p.price ?? price,
+          quantity: p.quantity ?? quantity,
+          readinessStateId: p.readinessStateId,
+          enabled: p.enabled,
+        })),
+        priceOnProperty: variations.priceOnProperty,
+        quantityOnProperty: variations.quantityOnProperty,
+        skuOnProperty: variations.skuOnProperty,
+        readinessStateOnProperty: variations.readinessStateOnProperty,
+      });
+      const imagesByValue = resolveVariationImageValueIds(variations.imagesByValue, saved);
+      const matched = new Set(imagesByValue.map((i) => `${i.value}:${i.imageIndex}:${i.jobIndex}`));
+      const unmatched = variations.imagesByValue.filter((i) => !matched.has(`${i.value}:${i.imageIndex}:${i.jobIndex}`));
+      if (unmatched.length > 0) {
+        const names = unmatched.map((i) => `“${i.value ?? i.valueId}”`).join(", ");
+        onStepError("Variation photos", new Error(`${names} isn't an option in the saved inventory, so its photo wasn't attached.`));
       }
-    } else {
-      const sku = typeof nl.sku === "string" ? nl.sku.trim() : "";
-      if (sku) {
-        try {
-          await setListingInventorySku(listingId, { sku, price, quantity });
-        } catch (err) {
-          onStepError("SKU", err);
-        }
+      variations = { ...variations, imagesByValue };
+    } catch (err) {
+      onStepError("Variations", err);
+      variations = null; // grid failed to save -> don't try to attach images to it
+    }
+  } else {
+    const sku = typeof nl.sku === "string" ? nl.sku.trim() : "";
+    if (sku) {
+      try {
+        await setListingInventorySku(listingId, { sku, price, quantity });
+      } catch (err) {
+        onStepError("SKU", err);
       }
     }
   }

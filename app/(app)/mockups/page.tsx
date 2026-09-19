@@ -8,9 +8,11 @@ import { compose } from "@/lib/mockup/compose";
 import { quadList } from "@/lib/mockup/geometry";
 import type { Calibration, Overlay, Quad, Raster } from "@/lib/mockup/types";
 import { normalizeBlendMode } from "@/lib/mockup/validate";
-import { buildInventoryPayload, validateOfferings } from "@/lib/etsy/variation-offerings";
+import { publishSpecFromForm } from "@/lib/etsy/listing-publish-spec";
+import { validateOfferings } from "@/lib/etsy/variation-offerings";
 import { MAX_DRAFT_PSDS } from "@/lib/drafts/constants";
 import { publishBlockedBySchedule, scheduleBlocker } from "@/lib/scheduling/publish-guard";
+import { utcToWallTime } from "@/lib/scheduling/timezone";
 import type { ScheduledListingSummary, ScheduleTimeInput } from "@/lib/scheduling/types";
 import ScheduleDialog from "../schedule/ScheduleDialog";
 import {
@@ -1295,6 +1297,13 @@ function MockupsPageInner() {
     () => draftSnapshotKey({ ...draftPayload, photosData: { ...draftPayload.photosData, activeTab: undefined } }),
     [draftPayload],
   );
+  /** What the scheduled images are rendered from — alt text isn't here: the runner reads it from the saved draft. */
+  const photosKey = useMemo(() => {
+    const { mockups: m, designs: d, ownImages: o, imageOrder: order, removedJobKeys: removed } = draftPayload.photosData;
+    return draftSnapshotKey({ m, d, o, order, removed });
+  }, [draftPayload]);
+  /** The last successfully saved `photosKey` — a pending schedule is re-rendered when it moves away from the one scheduled. */
+  const [savedPhotosKey, setSavedPhotosKey] = useState<string | null>(null);
   /** The content last saved — or, until the first user edit, the content as loaded. Autosave only runs when it differs. */
   const lastSavedSnapshot = useRef<string | null>(null);
   const loadSettled = draftStatus !== "restoring" && hydrateListingId == null;
@@ -1349,6 +1358,7 @@ function MockupsPageInner() {
       });
       if (!res.ok) throw new Error(await errorFrom(res));
       lastSavedSnapshot.current = draftSnapshot;
+      setSavedPhotosKey(photosKey);
       setDraftStatus("saved");
       setDraftError(null);
       if (explicit) setCommitted({ revision: editRevision, snapshot: draftSnapshot, kind: "saved" });
@@ -1365,6 +1375,7 @@ function MockupsPageInner() {
     photoSlots,
     draftPayload,
     draftSnapshot,
+    photosKey,
     editRevision,
     router,
     searchParams,
@@ -1545,16 +1556,16 @@ function MockupsPageInner() {
     if (publishMode === "existing" && etsyMedia == null) {
       errors.push({ section: "photos", message: etsyMediaError ?? "Still loading this listing's current photos." });
     }
-    if (publishMode === "new" && !listingForm.title.trim()) {
+    if (publishMode !== "existing" && !listingForm.title.trim()) {
       errors.push({ section: "title", message: "Enter a title for the new draft (Title section)." });
     }
-    if (publishMode === "new" && publishId == null && listingForm.taxonomyId == null) {
+    if (publishMode !== "existing" && listingForm.taxonomyId == null) {
       errors.push({ section: "details", message: "Choose a category for the new listing (Details section)." });
     }
-    if (publishMode === "new" && listingForm.readinessStateId == null) {
+    if (publishMode !== "existing" && listingForm.readinessStateId == null) {
       errors.push({ section: "shipping", message: "Choose a processing profile for the new draft (Shipping section)." });
     }
-    if (publishMode === "new") {
+    if (publishMode !== "existing") {
       const offeringError = validateOfferings(listingForm, photoSlotIds)[0];
       if (offeringError) {
         const tab = VARIATION_SUB_TABS.find((t) => t.key === offeringError.tab)?.label ?? "";
@@ -1590,58 +1601,13 @@ function MockupsPageInner() {
   /**
    * The `publishTo` payload — everything about the listing itself, minus the
    * images. Shared by Publish (which sends it with the renders) and "Schedule
-   * for later" (which stores it, to be published unchanged when the time comes).
+   * for later" (which validates it; the runner rebuilds it from the saved draft).
    */
-  const buildPublishTo = useCallback((): Record<string, unknown> => {
-    const activePersonalization = listingForm.personalizationQuestions.filter(
-      (q) => q.questionText.trim() !== "",
-    );
-    const publishTo: Record<string, unknown> = {
-      mode: publishMode,
-      // Omitted (not sent as null) for a blank "new" draft — createDraftListing
-      // needs no source listing to borrow anything from.
-      ...(publishId != null ? { listingId: publishId } : {}),
-    };
-    if (publishMode !== "existing") {
-      publishTo.howItsMade = {
-        whoMade: listingForm.whoMade,
-        isSupply: listingForm.isSupply,
-        whenMade: listingForm.whenMade,
-        productionPartnerIds: listingForm.productionPartnerIds,
-      };
-      if (activePersonalization.length > 0) {
-        publishTo.personalization = activePersonalization;
-      }
-    }
-    if (publishMode === "new") {
-      const price = Number.parseFloat(listingForm.price);
-      const quantity = Number.parseInt(listingForm.quantity, 10);
-      publishTo.newListing = {
-        title: listingForm.title.trim(),
-        description: listingForm.description.trim(),
-        tags: listingForm.tags,
-        taxonomyId: listingForm.taxonomyId ?? undefined,
-        shopSectionId: listingForm.shopSectionId ?? undefined,
-        readinessStateId: listingForm.readinessStateId ?? undefined,
-        properties: Object.entries(listingForm.properties).map(([id, p]) => ({
-          propertyId: Number(id),
-          name: p.name,
-          valueIds: p.valueIds,
-          values: p.values,
-          scaleId: p.scaleId ?? undefined,
-        })),
-        price: Number.isFinite(price) && price > 0 ? price : undefined,
-        quantity: Number.isInteger(quantity) && quantity > 0 ? quantity : undefined,
-        sku: listingForm.sku.trim() || undefined,
-        variations: buildInventoryPayload(listingForm, photoSlotIds),
-        // featured_rank/should_auto_renew aren't settable on createDraftListing —
-        // the server sends them via a follow-up updateListing call.
-        featuredRank: listingForm.featureListing ? 1 : undefined,
-        shouldAutoRenew: listingForm.autoRenew,
-      };
-    }
-    return publishTo;
-  }, [listingForm, publishMode, publishId, photoSlotIds]);
+  const buildPublishTo = useCallback(
+    (): Record<string, unknown> =>
+      ({ ...publishSpecFromForm(listingForm, { mode: publishMode, listingId: publishId, photoSlotIds }) }),
+    [listingForm, publishMode, publishId, photoSlotIds],
+  );
 
   /** Makes the grid what Etsy now holds: its photos and videos, in its order, nothing left to upload. */
   const resetGridToEtsy = useCallback(
@@ -1831,6 +1797,9 @@ function MockupsPageInner() {
   const [schedule, setSchedule] = useState<ScheduledListingSummary | null>(null);
   /** What the browser is doing while a schedule is being rendered and uploaded. */
   const [scheduleProgress, setScheduleProgress] = useState<string | null>(null);
+  /** The photos the pending schedule's images were rendered from; follows the loaded draft until the first edit. */
+  const scheduledPhotosKey = useRef<string | null>(null);
+  const scheduleBusy = useRef(false);
 
   useEffect(() => {
     if (!draftId) return;
@@ -1850,15 +1819,16 @@ function MockupsPageInner() {
   const scheduleImageSources = useCallback((): ScheduleImageSource[] => {
     const sources: ScheduleImageSource[] = [];
     for (const ref of imageOrder) {
-      const altText = altTextBySlot[slotIdFor(ref)] || undefined;
+      const slotId = slotIdFor(ref);
+      const altText = altTextBySlot[slotId] || undefined;
       if (ref.kind === "job") {
         const [mockupId, designId] = ref.key.split("::");
         const mockup = included.find((m) => m.id === mockupId);
         const design = designs.find((d) => d.id === designId);
-        if (mockup && design) sources.push({ kind: "render", mockup, design, altText });
+        if (mockup && design) sources.push({ kind: "render", mockup, design, altText, slotId });
       } else if (ref.kind === "own") {
         const own = ownImages.find((o) => o.id === ref.id);
-        if (own) sources.push({ kind: "own", file: own.file, altText });
+        if (own) sources.push({ kind: "own", file: own.file, altText, slotId });
       }
     }
     return sources;
@@ -1879,6 +1849,8 @@ function MockupsPageInner() {
     const sources = scheduleImageSources();
     if (sources.length === 0) return "Add at least one photo first.";
 
+    const renderedKey = photosKey;
+    scheduleBusy.current = true;
     try {
       setScheduleProgress("Rendering images…");
       const prepared = await prepareScheduleImages(sources, (done, total) =>
@@ -1915,6 +1887,7 @@ function MockupsPageInner() {
         return error;
       }
       const body = (await res.json()) as { scheduledListing: ScheduledListingSummary };
+      scheduledPhotosKey.current = renderedKey;
       setSchedule(body.scheduledListing);
       setScheduleOpen(false);
       toast.show({
@@ -1934,9 +1907,66 @@ function MockupsPageInner() {
     } catch (err) {
       return err instanceof Error ? err.message : "Could not schedule this listing.";
     } finally {
+      scheduleBusy.current = false;
       setScheduleProgress(null);
     }
   }
+
+  useEffect(() => {
+    if (loadSettled && editRevision === 0) scheduledPhotosKey.current = photosKey;
+  }, [loadSettled, editRevision, photosKey]);
+
+  /**
+   * A save that changed the photos of a pending schedule re-renders and
+   * re-uploads its images, keeping its time. Everything else the runner reads
+   * from the saved draft when it runs.
+   */
+  const rerenderScheduledImages = useCallback(
+    async (target: ScheduledListingSummary, key: string) => {
+      scheduleBusy.current = true;
+      const fail = (reason: string) =>
+        toast.show({
+          id: "editor-schedule",
+          kind: "error",
+          message: `The scheduled listing still has its old photos: ${reason}`,
+        });
+      try {
+        const blocked =
+          publishBlocker() ?? scheduleBlocker({ publishMode, videoCount: videos.filter((v) => v).length });
+        if (blocked) return fail(blocked);
+        const sources = scheduleImageSources();
+        if (sources.length === 0) return fail("Add at least one photo first.");
+        const prepared = await prepareScheduleImages(sources, () => {});
+        const uploaded = await uploadScheduleImages(prepared, () => {});
+        const wall = utcToWallTime(new Date(target.scheduledAt), target.timezone);
+        const res = await fetch(`/api/schedule/${encodeURIComponent(target.id)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...wall, timezone: target.timezone, publishSpec: buildPublishTo(), ...uploaded }),
+        });
+        if (!res.ok) {
+          const error = await errorFrom(res);
+          await discardRenderSet(uploaded.renderSetId);
+          return fail(error);
+        }
+        const body = (await res.json()) as { scheduledListing: ScheduledListingSummary };
+        scheduledPhotosKey.current = key;
+        setSchedule(body.scheduledListing);
+        toast.show({ id: "editor-schedule", kind: "success", message: "Scheduled listing's photos updated." });
+      } catch (err) {
+        fail(err instanceof Error ? err.message : "re-rendering failed.");
+      } finally {
+        scheduleBusy.current = false;
+      }
+    },
+    [publishBlocker, publishMode, videos, scheduleImageSources, buildPublishTo, toast],
+  );
+
+  useEffect(() => {
+    if (!schedule || schedule.status !== "pending" || schedule.draftId !== draftId) return;
+    if (!savedPhotosKey || scheduleBusy.current || savedPhotosKey === scheduledPhotosKey.current) return;
+    void rerenderScheduledImages(schedule, savedPhotosKey);
+  }, [schedule, draftId, savedPhotosKey, rerenderScheduledImages]);
 
   const scheduledLabel = schedule ? scheduleTimeLabel(schedule) : null;
 
@@ -2022,14 +2052,14 @@ function MockupsPageInner() {
   }
 
   /** A new physical listing can't be created without one — Etsy rejects the draft otherwise. */
-  const needsReadinessState = publishMode === "new" && listingForm.readinessStateId == null;
+  const needsReadinessState = publishMode !== "existing" && listingForm.readinessStateId == null;
 
   /** One-line description of what Publish will do — mode and target are both fixed, chosen back on the Listings page. */
   const modeCaption = (() => {
     if (publishMode === "existing") return `Editing "${targetListing?.title}"`;
     if (publishMode === "copy") return `Copy of "${targetListing?.title}"`;
     return targetListing
-      ? `New draft, category & shipping borrowed from "${targetListing.title}"`
+      ? `New draft, shipping borrowed from "${targetListing.title}"`
       : "New draft, created from scratch";
   })();
 
