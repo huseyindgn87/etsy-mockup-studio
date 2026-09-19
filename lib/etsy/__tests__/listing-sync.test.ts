@@ -130,7 +130,7 @@ vi.mock("@/lib/db/prisma", () => {
       if (existing) {
         Object.assign(existing, input, { id: existing.id, removedAt: null });
       } else {
-        db.listing.push({ ...input, removedAt: null, syncedAt: null });
+        db.listing.push({ syncedAt: null, ...input, removedAt: null });
       }
     }
   });
@@ -212,12 +212,21 @@ interface FakeShop {
   listings: RawListing[];
   inventory: Map<number, unknown>;
   failInventory?: (listingId: number) => Response | null;
-  /** Listings whose page carries their inventory (Etsy's `includes=Inventory`). */
-  includeInventory?: (listingId: number) => boolean;
+  /** Fails a `/listings/batch` call for these ids. */
+  failDetails?: (listingIds: number[]) => Response | null;
+  /** Listings `/listings/batch/inventory` answers for (default: every one with an inventory). */
+  batchInventory?: (listingId: number) => boolean;
 }
 
 const inventoryCalls: number[] = [];
 const pageCalls: Array<{ state: string; offset: number }> = [];
+const detailCalls: number[][] = [];
+const batchInventoryCalls: number[][] = [];
+const allCalls = () => pageCalls.length + detailCalls.length + batchInventoryCalls.length + inventoryCalls.length;
+
+/** What the index carries: listing fields, no associations. */
+const indexFields = (l: RawListing): RawListing =>
+  Object.fromEntries(Object.entries(l).filter(([k]) => !["images", "videos", "personalization"].includes(k))) as RawListing;
 
 function serve(shop: FakeShop, clock?: { now: () => number }, callTimes?: number[]) {
   etsyFetch.mockImplementation(async (path: string, init?: RequestInit) => {
@@ -232,18 +241,40 @@ function serve(shop: FakeShop, clock?: { now: () => number }, callTimes?: number
       const body = shop.inventory.get(id);
       return body ? json(body) : json({ error: "Listing not found" }, false, 404);
     }
+    const batch = /^\/listings\/batch(\/inventory)?\?(.+)$/.exec(path);
+    if (batch) {
+      const params = new URLSearchParams(batch[2]);
+      const ids = params.get("listing_ids")!.split(",").map(Number);
+      expect(ids.length).toBeLessThanOrEqual(100);
+      const found = shop.listings.filter((l) => ids.includes(l.listing_id));
+      if (batch[1]) {
+        batchInventoryCalls.push(ids);
+        if (found.length < ids.length) return json({ error: "Listing not found" }, false, 404);
+        return json({
+          count: found.length,
+          results: found.map((l) => ({
+            listing_id: l.listing_id,
+            ...((shop.batchInventory?.(l.listing_id) ?? true) && shop.inventory.has(l.listing_id)
+              ? { inventory: shop.inventory.get(l.listing_id) }
+              : {}),
+          })),
+        });
+      }
+      expect(params.get("includes")).toBe("Images,Videos,Personalization");
+      detailCalls.push(ids);
+      const failure = shop.failDetails?.(ids);
+      if (failure) return failure;
+      return json({ count: found.length, results: found });
+    }
     const m = new RegExp(`^/shops/${shop.shopId}/listings\\?(.+)$`).exec(path);
     if (!m) throw new Error(`unexpected path: ${path}`);
     const params = new URLSearchParams(m[1]);
-    expect(params.get("includes")).toBe("Images,Videos,Personalization,Inventory");
+    expect(params.get("includes")).toBeNull();
     const state = params.get("state")!;
     const offset = Number(params.get("offset"));
     pageCalls.push({ state, offset });
     const all = shop.listings.filter((l) => l.state === state);
-    const page = all.slice(offset, offset + 100).map((l) =>
-      shop.includeInventory?.(l.listing_id) ? { ...l, inventory: shop.inventory.get(l.listing_id) } : l,
-    );
-    return json({ count: all.length, results: page });
+    return json({ count: all.length, results: all.slice(offset, offset + 100).map(indexFields) });
   });
 }
 
@@ -297,43 +328,201 @@ beforeEach(() => {
   for (const key of Object.keys(db) as (keyof typeof db)[]) db[key] = [];
   inventoryCalls.length = 0;
   pageCalls.length = 0;
+  detailCalls.length = 0;
+  batchInventoryCalls.length = 0;
 });
 
-describe("inventory comes with the listing pages", () => {
-  test("a shop of 250 listings costs its page calls only — no call per listing", async () => {
+const stamped = (id: number, title: string, modified = 1000, state = "active") =>
+  RAW_LISTING(id, title, state, { last_modified_timestamp: modified });
+
+function resetCalls() {
+  inventoryCalls.length = 0;
+  pageCalls.length = 0;
+  detailCalls.length = 0;
+  batchInventoryCalls.length = 0;
+}
+
+describe("incremental refresh", () => {
+  test("unchanged listings are skipped: a second refresh costs only the index pages", async () => {
+    const listings = Array.from({ length: 250 }, (_, i) => stamped(i + 1, `L${i + 1}`));
+    const shop: FakeShop = { shopId: 800, listings, inventory: new Map(listings.map((l) => [l.listing_id, SIMPLE_INVENTORY()])) };
+    serve(shop);
+    const clock = fakeClock();
+    await syncShopListings("u1", "800", () => {}, clock);
+    const before = structuredClone(db);
+
+    resetCalls();
+    clock.advance(60_000);
+    const { onEvent, events } = collect();
+    const result = await syncShopListings("u1", "800", onEvent, clock);
+
+    expect(result).toMatchObject({ total: 250, changed: 0, unchanged: 250, inserted: 0, updated: 0, removed: 0 });
+    // active: 3 pages; draft, inactive, sold_out, expired: 1 each.
+    expect(pageCalls).toHaveLength(7);
+    expect(detailCalls).toEqual([]);
+    expect(batchInventoryCalls).toEqual([]);
+    expect(inventoryCalls).toEqual([]);
+    expect(db).toEqual(before);
+    expect(events).toContainEqual(expect.objectContaining({ stage: "changes", message: "0 changed of 250 checked" }));
+  });
+
+  test("a changed listing is re-fetched, and only it", async () => {
+    const listings = Array.from({ length: 5 }, (_, i) => stamped(i + 1, `L${i + 1}`));
+    const shop: FakeShop = { shopId: 810, listings, inventory: new Map(listings.map((l) => [l.listing_id, SIMPLE_INVENTORY()])) };
+    serve(shop);
+    const clock = fakeClock();
+    await syncShopListings("u1", "810", () => {}, clock);
+    const untouched = structuredClone(listingRow("u1", "810", "2"));
+
+    resetCalls();
+    listings[2] = stamped(3, "L3 renamed", 2000);
+    shop.inventory.set(3, SIMPLE_INVENTORY(4500));
+    const { onEvent, events } = collect();
+    const result = await syncShopListings("u1", "810", onEvent, clock);
+
+    expect(result).toMatchObject({ total: 5, changed: 1, unchanged: 4, updated: 1, inserted: 0 });
+    expect(detailCalls).toEqual([[3]]);
+    expect(batchInventoryCalls).toEqual([[3]]);
+    expect(inventoryCalls).toEqual([]);
+    const row = listingRow("u1", "810", "3");
+    expect(row).toMatchObject({ title: "L3 renamed", etsyLastModifiedAt: new Date(2_000_000) });
+    expect(childrenOf("listingInventoryProduct", row.id)).toMatchObject([{ priceAmount: 4500 }]);
+    expect(listingRow("u1", "810", "2")).toEqual(untouched);
+    expect(events.at(-1)).toMatchObject({ stage: "changes", fetched: 1, total: 1, message: expect.stringContaining("1 changed of 5 checked") });
+  });
+
+  test("a new listing is added without re-fetching the others", async () => {
+    const listings = [stamped(1, "One"), stamped(2, "Two")];
+    const shop: FakeShop = { shopId: 820, listings, inventory: new Map([[1, SIMPLE_INVENTORY()], [2, SIMPLE_INVENTORY()]]) };
+    serve(shop);
+    await syncShopListings("u1", "820", () => {}, fakeClock());
+
+    resetCalls();
+    listings.push(stamped(3, "Three", 3000, "draft"));
+    shop.inventory.set(3, SIMPLE_INVENTORY(700));
+    const result = await syncShopListings("u1", "820", () => {}, fakeClock());
+
+    expect(result).toMatchObject({ total: 3, changed: 1, inserted: 1, updated: 0 });
+    expect(detailCalls).toEqual([[3]]);
+    const row = listingRow("u1", "820", "3");
+    expect(row).toMatchObject({ title: "Three", state: "draft", removedAt: null });
+    expect(row.syncedAt).toBeInstanceOf(Date);
+    expect(childrenOf("listingImage", row.id)).toHaveLength(1);
+    expect(childrenOf("listingInventoryProduct", row.id)).toMatchObject([{ priceAmount: 700 }]);
+  });
+
+  test("a listing deleted on Etsy is marked removed, not re-fetched, and comes back if Etsy lists it again", async () => {
+    const listings = [stamped(1, "Stays"), stamped(2, "Deleted")];
+    const shop: FakeShop = { shopId: 830, listings, inventory: new Map([[1, SIMPLE_INVENTORY()], [2, SIMPLE_INVENTORY()]]) };
+    serve(shop);
+    const clock = fakeClock();
+    await syncShopListings("u1", "830", () => {}, clock);
+
+    resetCalls();
+    const deleted = listings.pop()!;
+    const result = await syncShopListings("u1", "830", () => {}, clock);
+    expect(result).toMatchObject({ total: 1, changed: 0, removed: 1 });
+    expect(detailCalls).toEqual([]);
+    expect(listingRow("u1", "830", "2").removedAt).toBeInstanceOf(Date);
+    expect(listingRow("u1", "830", "1").removedAt).toBeNull();
+
+    resetCalls();
+    listings.push(deleted);
+    const back = await syncShopListings("u1", "830", () => {}, clock);
+    expect(back).toMatchObject({ changed: 1, updated: 1, removed: 0 });
+    expect(listingRow("u1", "830", "2").removedAt).toBeNull();
+  });
+
+  test("a row with no stored timestamp (first run, older rows) counts as changed", async () => {
+    const listings = [stamped(1, "A"), stamped(2, "B")];
+    serve({ shopId: 840, listings, inventory: new Map([[1, SIMPLE_INVENTORY()], [2, SIMPLE_INVENTORY()]]) });
+    await syncShopListings("u1", "840", () => {}, fakeClock());
+    listingRow("u1", "840", "1").etsyLastModifiedAt = null;
+
+    resetCalls();
+    const result = await syncShopListings("u1", "840", () => {}, fakeClock());
+    expect(result).toMatchObject({ changed: 1, unchanged: 1 });
+    expect(detailCalls).toEqual([[1]]);
+    expect(listingRow("u1", "840", "1").etsyLastModifiedAt).toEqual(new Date(1_000_000));
+  });
+
+  test("a state or quantity change counts as changed even with the same timestamp", async () => {
+    const listings = [stamped(1, "A"), stamped(2, "B"), stamped(3, "C")];
+    serve({ shopId: 850, listings, inventory: new Map(listings.map((l) => [l.listing_id, SIMPLE_INVENTORY()])) });
+    await syncShopListings("u1", "850", () => {}, fakeClock());
+
+    resetCalls();
+    listings[0].state = "sold_out";
+    listings[1].quantity = 0;
+    const result = await syncShopListings("u1", "850", () => {}, fakeClock());
+    expect(result).toMatchObject({ changed: 2, unchanged: 1 });
+    expect(detailCalls.flat().sort()).toEqual([1, 2]);
+    expect(listingRow("u1", "850", "1").state).toBe("sold_out");
+  });
+
+  test("a 704-listing shop with no changes refreshes in 12 Etsy calls", async () => {
+    const listings = Array.from({ length: 704 }, (_, i) => stamped(i + 1, `L${i + 1}`));
+    serve({ shopId: 860, listings, inventory: new Map(listings.map((l) => [l.listing_id, SIMPLE_INVENTORY()])) });
+    const first = await syncShopListings("u1", "860", () => {}, fakeClock());
+    // First run: 12 index pages + 8 detail + 8 batch-inventory calls.
+    expect(first.changed).toBe(704);
+    expect(allCalls()).toBe(28);
+
+    resetCalls();
+    const result = await syncShopListings("u1", "860", () => {}, fakeClock());
+    expect(result).toMatchObject({ total: 704, changed: 0, unchanged: 704 });
+    // active: 8 pages; draft, inactive, sold_out, expired: 1 each.
+    expect(allCalls()).toBe(12);
+  });
+});
+
+describe("changed listings are fetched in batches", () => {
+  test("250 changed listings cost 3 detail + 3 batch-inventory calls — no call per listing", async () => {
     const listings = Array.from({ length: 250 }, (_, i) => RAW_LISTING(i + 1, `L${i + 1}`));
-    serve({
-      shopId: 120,
-      listings,
-      inventory: new Map(listings.map((l) => [l.listing_id, SIMPLE_INVENTORY()])),
-      includeInventory: () => true,
-    });
+    serve({ shopId: 120, listings, inventory: new Map(listings.map((l) => [l.listing_id, SIMPLE_INVENTORY()])) });
     const result = await syncShopListings("u1", "120", () => {}, fakeClock());
 
     expect(result.total).toBe(250);
+    expect(detailCalls.map((c) => c.length)).toEqual([100, 100, 50]);
+    expect(batchInventoryCalls).toHaveLength(3);
     expect(inventoryCalls).toEqual([]);
-    // active: 3 pages; draft, inactive, sold_out, expired: 1 each.
-    expect(pageCalls).toHaveLength(7);
     expect(db.listingInventoryProduct.length).toBe(250);
     expect(db.listing.every((r) => r.syncedAt != null)).toBe(true);
   });
 
-  test("only a listing whose page lacks its inventory is fetched on its own", async () => {
+  test("only a listing the batch inventory lacks is fetched on its own", async () => {
     const listings = Array.from({ length: 5 }, (_, i) => RAW_LISTING(i + 1, `L${i + 1}`));
     serve({
       shopId: 121,
       listings,
       inventory: new Map(listings.map((l) => [l.listing_id, SIMPLE_INVENTORY()])),
-      includeInventory: (id) => id !== 3,
+      batchInventory: (id) => id !== 3,
     });
     await syncShopListings("u1", "121", () => {}, fakeClock());
     expect(inventoryCalls).toEqual([3]);
     expect(db.listingInventoryProduct.length).toBe(5);
   });
+
+  test("a listing deleted between the index and the batch inventory call (404) falls back to per-listing calls", async () => {
+    const listings = [RAW_LISTING(1, "A"), RAW_LISTING(2, "B")];
+    const shop: FakeShop = { shopId: 122, listings, inventory: new Map([[1, SIMPLE_INVENTORY()], [2, SIMPLE_INVENTORY()]]) };
+    serve(shop);
+    const realFetch = etsyFetch.getMockImplementation()!;
+    etsyFetch.mockImplementation(async (path, init) => {
+      if (path.startsWith("/listings/batch/inventory")) {
+        batchInventoryCalls.push([]);
+        return json({ error: "Listing not found" }, false, 404);
+      }
+      return realFetch(path, init);
+    });
+    await syncShopListings("u1", "122", () => {}, fakeClock());
+    expect(inventoryCalls.sort()).toEqual([1, 2]);
+    expect(db.listingInventoryProduct.length).toBe(2);
+  });
 });
 
 describe("syncShopListings pagination", () => {
-  test("pulls every page across every state until each state's count is exhausted", async () => {
+  test("pulls every index page across every state until each state's count is exhausted", async () => {
     const listings = [
       ...Array.from({ length: 250 }, (_, i) => RAW_LISTING(i + 1, `active ${i + 1}`, "active")),
       ...Array.from({ length: 50 }, (_, i) => RAW_LISTING(1000 + i, `draft ${i}`, "draft")),
@@ -350,22 +539,28 @@ describe("syncShopListings pagination", () => {
     expect(result.total).toBe(300);
     expect(result.inserted).toBe(300);
 
-    const fetchProgress = events.filter(
+    const indexProgress = events.filter(
       (e): e is Extract<RefreshProgressEvent, { type: "progress" }> => e.type === "progress" && e.stage === "listings",
     );
-    expect(fetchProgress.at(-1)).toMatchObject({ fetched: 300, total: 300 });
+    expect(indexProgress.at(-1)).toMatchObject({ fetched: 300, total: 300, message: "Checked 300 of 300 listings" });
     expect(events[0]).toEqual({ type: "status", stage: "listings", message: "Preparing to refresh" });
   });
 
-  test("reports every stage, in order, ending with inventory complete", async () => {
+  test("reports both stages, in order, ending with every changed listing updated", async () => {
     const listings = Array.from({ length: 30 }, (_, i) => RAW_LISTING(i + 1, `L${i + 1}`));
     serve({ shopId: 110, listings, inventory: new Map(listings.map((l) => [l.listing_id, SIMPLE_INVENTORY()])) });
     const { onEvent, events } = collect();
     await syncShopListings("u1", "110", onEvent, fakeClock());
 
     const stages = events.flatMap((e) => (e.type === "progress" ? [e.stage] : []));
-    expect([...new Set(stages)]).toEqual(["listings", "saving", "inventory"]);
-    expect(events.at(-1)).toMatchObject({ type: "progress", stage: "inventory", fetched: 30, total: 30 });
+    expect([...new Set(stages)]).toEqual(["listings", "changes"]);
+    expect(events.at(-1)).toMatchObject({
+      type: "progress",
+      stage: "changes",
+      fetched: 30,
+      total: 30,
+      message: "30 changed of 30 checked — updated 30 of 30",
+    });
   });
 });
 
@@ -605,7 +800,7 @@ describe("syncShopListings re-sync", () => {
     serve({ shopId: 300, listings: [listing("New title", "new alt")], inventory: new Map([[1, variationInventory(1500)]]) });
     const result = await syncShopListings("u1", "300", () => {}, clock);
 
-    expect(result).toMatchObject({ inserted: 0, updated: 1, removed: 0, total: 1, resumed: 0 });
+    expect(result).toMatchObject({ inserted: 0, updated: 1, removed: 0, total: 1, changed: 1 });
     expect(counts()).toEqual(firstCounts);
     expect(firstCounts).toMatchObject({ listing: 1, listingImage: 2, listingVideo: 1, listingInventoryProperty: 1, listingInventoryValue: 2, listingInventoryProduct: 2, listingInventoryProductValue: 2 });
 
@@ -634,7 +829,7 @@ describe("syncShopListings re-sync", () => {
 });
 
 describe("syncShopListings failure handling and resume", () => {
-  test("a mid-refresh page fetch error leaves previously stored data untouched", async () => {
+  test("a mid-refresh index page error leaves previously stored data untouched", async () => {
     const clock = fakeClock();
     serve({ shopId: 400, listings: [RAW_LISTING(1, "Untouched")], inventory: new Map([[1, SIMPLE_INVENTORY()]]) });
     await syncShopListings("u1", "400", () => {}, clock);
@@ -651,82 +846,50 @@ describe("syncShopListings failure handling and resume", () => {
     expect(db).toEqual(before);
   });
 
-  test("resumes after a mid-sync failure instead of starting over", async () => {
-    const listings = Array.from({ length: 60 }, (_, i) => RAW_LISTING(i + 1, `L${i + 1}`));
+  test("resumes after a mid-sync failure: finished chunks count as unchanged", async () => {
+    const listings = Array.from({ length: 150 }, (_, i) => stamped(i + 1, `L${i + 1}`));
     const inventory = new Map(listings.map((l) => [l.listing_id, SIMPLE_INVENTORY(1000 + l.listing_id)]));
     const clock = fakeClock();
-    const shop: FakeShop = { shopId: 500, listings, inventory };
-
-    // Etsy's listing ids come back in page order: the third inventory batch
-    // (listings 51–60) hits a server error on listing 55.
     let failing = true;
-    shop.failInventory = (id) => (failing && id === 55 ? json({ error: "Internal error" }, false, 500) : null);
+    const shop: FakeShop = {
+      shopId: 500,
+      listings,
+      inventory,
+      failDetails: (ids) => (failing && ids.includes(150) ? json({ error: "Internal error" }, false, 500) : null),
+    };
     serve(shop);
     await expect(syncShopListings("u1", "500", () => {}, clock)).rejects.toThrow("Internal error");
 
     const synced = () => db.listing.filter((r) => r.syncedAt).map((r) => Number(r.listingId)).sort((a, b) => a - b);
-    expect(synced()).toEqual(Array.from({ length: 50 }, (_, i) => i + 1));
-    // The failed batch wrote nothing.
-    expect(db.listingInventoryProduct).toHaveLength(50);
+    expect(synced()).toHaveLength(100);
+    expect(db.listing).toHaveLength(100);
 
     failing = false;
-    inventoryCalls.length = 0;
+    resetCalls();
     clock.advance(5 * 60_000);
-    const { onEvent, events } = collect();
-    const result = await syncShopListings("u1", "500", onEvent, clock);
+    const result = await syncShopListings("u1", "500", () => {}, clock);
 
-    expect(result).toMatchObject({ total: 60, inserted: 0, updated: 60, resumed: 50 });
-    expect(inventoryCalls.sort((a, b) => a - b)).toEqual(Array.from({ length: 10 }, (_, i) => 51 + i));
-    expect(synced()).toHaveLength(60);
-    expect(db.listing).toHaveLength(60);
-    expect(db.listingInventoryProduct).toHaveLength(60);
-    expect(db.listingImage).toHaveLength(60);
+    expect(result).toMatchObject({ total: 150, changed: 50, unchanged: 100, inserted: 50 });
+    expect(detailCalls.flat().sort((a, b) => a - b)).toEqual(Array.from({ length: 50 }, (_, i) => 101 + i));
+    expect(synced()).toHaveLength(150);
+    expect(db.listingInventoryProduct).toHaveLength(150);
     for (const row of db.listing) {
       expect(childrenOf("listingInventoryProduct", row.id)).toMatchObject([{ priceAmount: 1000 + Number(row.listingId) }]);
     }
-    expect(events).toContainEqual(expect.objectContaining({ type: "status", stage: "inventory", message: expect.stringContaining("Resuming") }));
-    expect(events.at(-1)).toMatchObject({ type: "progress", stage: "inventory", fetched: 60, total: 60 });
-  });
-
-  test("a resumed run still re-reads a listing Etsy modified after it was synced", async () => {
-    const listings = Array.from({ length: 30 }, (_, i) => RAW_LISTING(i + 1, `L${i + 1}`, "active", { last_modified_timestamp: 1 }));
-    const clock = fakeClock();
-    const shop: FakeShop = { shopId: 510, listings, inventory: new Map(listings.map((l) => [l.listing_id, SIMPLE_INVENTORY()])) };
-    let failing = true;
-    shop.failInventory = (id) => (failing && id === 30 ? json({ error: "Internal error" }, false, 500) : null);
-    serve(shop);
-    await expect(syncShopListings("u1", "510", () => {}, clock)).rejects.toThrow();
-
-    failing = false;
-    inventoryCalls.length = 0;
-    clock.advance(60_000);
-    listings[2].last_modified_timestamp = Math.floor(clock.now() / 1000);
-    const result = await syncShopListings("u1", "510", () => {}, clock);
-    expect(result.resumed).toBe(24);
-    expect(inventoryCalls.sort((a, b) => a - b)).toEqual([3, 26, 27, 28, 29, 30]);
-  });
-
-  test("a completed sync is never treated as resumable — the next run re-reads everything", async () => {
-    const listings = Array.from({ length: 10 }, (_, i) => RAW_LISTING(i + 1, `L${i + 1}`));
-    const clock = fakeClock();
-    serve({ shopId: 520, listings, inventory: new Map(listings.map((l) => [l.listing_id, SIMPLE_INVENTORY()])) });
-    await syncShopListings("u1", "520", () => {}, clock);
-    markSynced("u1", "520", clock.now());
-    clock.advance(1000);
-    inventoryCalls.length = 0;
-    const result = await syncShopListings("u1", "520", () => {}, clock);
-    expect(result.resumed).toBe(0);
-    expect(inventoryCalls).toHaveLength(10);
   });
 });
 
 describe("syncShopListings rate limiting", () => {
-  test("a 704-listing shop completes with inventory calls never exceeding the per-second limit", async () => {
-    const states = ["active", "draft", "inactive", "sold_out", "expired"];
+  test("per-listing inventory fallbacks never exceed the per-second limit on a 704-listing shop", async () => {
+    const states = ["active", "draft"];
     const listings = Array.from({ length: 704 }, (_, i) => RAW_LISTING(i + 1, `L${i + 1}`, states[i % 7 === 0 ? 1 : 0]));
     const clock = fakeClock();
     const callTimes: number[] = [];
-    serve({ shopId: 600, listings, inventory: new Map(listings.map((l) => [l.listing_id, SIMPLE_INVENTORY()])) }, clock, callTimes);
+    serve(
+      { shopId: 600, listings, inventory: new Map(listings.map((l) => [l.listing_id, SIMPLE_INVENTORY()])), batchInventory: () => false },
+      clock,
+      callTimes,
+    );
 
     const result = await syncShopListings("u1", "600", () => {}, clock);
 
@@ -772,7 +935,7 @@ describe("syncShopListings cross-user isolation", () => {
     clock.advance(1000);
     serve({ shopId: 700, listings: [richListing(1, "bob-one"), richListing(2, "bob-two")], inventory: new Map([[1, gridInventory(900)], [2, gridInventory(900)]]) });
     const bobFirst = await syncShopListings("bob", "700", () => {}, clock);
-    expect(bobFirst).toMatchObject({ inserted: 2, updated: 0, resumed: 0 });
+    expect(bobFirst).toMatchObject({ inserted: 2, updated: 0, changed: 2 });
     markSynced("bob", "700", clock.now());
     clock.advance(1000);
     serve({ shopId: 700, listings: [richListing(1, "bob-one-v2")], inventory: new Map([[1, gridInventory(950)]]) });
@@ -806,18 +969,14 @@ describe("syncShopListings cross-user isolation", () => {
     expect(listingRow("alice", "700", "2").removedAt).toBeNull();
   });
 
-  test("resume state is per user: another user's unfinished run doesn't let a sync skip listings", async () => {
-    const listings = Array.from({ length: 30 }, (_, i) => RAW_LISTING(i + 1, `L${i + 1}`));
-    const clock = fakeClock();
-    const shop: FakeShop = { shopId: 710, listings, inventory: new Map(listings.map((l) => [l.listing_id, SIMPLE_INVENTORY()])) };
-    shop.failInventory = (id) => (id === 30 ? json({ error: "Internal error" }, false, 500) : null);
-    serve(shop);
-    await expect(syncShopListings("alice", "710", () => {}, clock)).rejects.toThrow();
+  test("one user's stored timestamps never let another user's sync skip listings", async () => {
+    const listings = Array.from({ length: 30 }, (_, i) => RAW_LISTING(i + 1, `L${i + 1}`, "active", { last_modified_timestamp: 1000 }));
+    serve({ shopId: 710, listings, inventory: new Map(listings.map((l) => [l.listing_id, SIMPLE_INVENTORY()])) });
+    await syncShopListings("alice", "710", () => {}, fakeClock());
 
-    shop.failInventory = undefined;
-    inventoryCalls.length = 0;
-    const result = await syncShopListings("bob", "710", () => {}, clock);
-    expect(result.resumed).toBe(0);
-    expect(inventoryCalls).toHaveLength(30);
+    detailCalls.length = 0;
+    const result = await syncShopListings("bob", "710", () => {}, fakeClock());
+    expect(result).toMatchObject({ changed: 30, unchanged: 0, inserted: 30 });
+    expect(detailCalls.flat()).toHaveLength(30);
   });
 });

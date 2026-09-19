@@ -372,6 +372,7 @@ model Listing {
   personalizationInstructions String?
   personalizationCharCountMax Int?
   syncedAt                    DateTime?
+  etsyLastModifiedAt          DateTime?
 
   user                User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
   images              ListingImage[]

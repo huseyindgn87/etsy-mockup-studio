@@ -11,12 +11,12 @@ export interface ShopConnectionSummary {
   active: boolean;
 }
 
-type SyncStage = "listings" | "saving" | "inventory";
+type SyncStage = "listings" | "changes";
 
 type RefreshProgressEvent =
   | { type: "status"; stage?: SyncStage; message: string }
   | { type: "progress"; stage: SyncStage; fetched: number; total: number; message: string }
-  | { type: "done"; inserted: number; updated: number; removed: number; total: number; resumed: number }
+  | { type: "done"; inserted: number; updated: number; removed: number; total: number; changed: number; unchanged: number }
   | { type: "error"; message: string }
   /** The refresh job is waiting for a worker — `message` says its place in line. */
   | { type: "queued"; jobId: string; position: number | null; message: string }
@@ -24,9 +24,8 @@ type RefreshProgressEvent =
   | { type: "pending"; jobId: string; message: string };
 
 const STAGES: { id: SyncStage; label: string }[] = [
-  { id: "listings", label: "Fetching listings" },
-  { id: "saving", label: "Saving listings" },
-  { id: "inventory", label: "Fetching variations" },
+  { id: "listings", label: "Checking listings" },
+  { id: "changes", label: "Updating changed listings" },
 ];
 
 type Phase = "refreshing" | "error";
@@ -157,7 +156,7 @@ export default function RefreshShopModal({
           },
         });
         if (runIdRef.current !== runId) return;
-        if (job.status === "done") applyEvent({ type: "done", inserted: 0, updated: 0, removed: 0, total: 0, resumed: 0 });
+        if (job.status === "done") applyEvent({ type: "done", inserted: 0, updated: 0, removed: 0, total: 0, changed: 0, unchanged: 0 });
         else applyEvent({ type: "error", message: job.error || "Refresh failed." });
       }
     } catch (err) {

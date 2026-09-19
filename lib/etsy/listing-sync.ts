@@ -1,28 +1,29 @@
 /**
- * Pulls every listing (every state, fully paginated) for the active shop
- * straight from Etsy and reconciles it into our own tables — the listings
+ * Brings the active shop's cached listings in line with Etsy — the listings
  * page's on-demand "Refresh" action. Etsy is always the source of truth; these
  * tables exist only so the app can render instantly instead of live-querying
  * Etsy on every view.
  *
- * Strictly read-only against Etsy: every request here is a GET.
+ * Incremental. Strictly read-only against Etsy: every request here is a GET.
  *
- * Three stages, each reported to `onEvent`:
- *  1. `listings`  — every page of every state (100 listings per call), with
- *     images, videos, personalization and inventory as associations. Nothing is written until all pages
- *     have arrived, so a failure here leaves the database untouched.
- *  2. `saving`    — listing fields, images and videos upserted in batches;
- *     rows no longer on Etsy are marked removed.
- *  3. `inventory` — each listing's grid, written in batches: from its page
- *     when Etsy included it there (no extra call), else one rate-limited
- *     `getListingInventory` call. A listing's `syncedAt` is set in the same
- *     transaction as its grid, so it marks "fully synced".
+ * Two stages, each reported to `onEvent`:
+ *  1. `listings` — the lightweight index: every page of every state (100
+ *     listings per call, no associations). Each listing's
+ *     `last_modified_timestamp` is compared with the one stored with its row;
+ *     a listing is re-fetched only when it's new, its timestamp differs (or
+ *     either side has none), its state or quantity differs, it was marked
+ *     removed, or it never finished syncing. Stored rows the index no longer
+ *     lists are marked removed. Nothing is written until the whole index has
+ *     arrived, so a failure here leaves the database untouched.
+ *  2. `changes` — only the changed listings, 100 at a time: one
+ *     `/listings/batch` call (fields, images, videos, personalization) and one
+ *     `/listings/batch/inventory` call, falling back to a rate-limited
+ *     `getListingInventory` per listing when the batch can't answer for one.
+ *     Each chunk — fields, media, grid, `syncedAt` and the Etsy timestamp — is
+ *     written in one transaction, so a run that dies resumes by itself: the
+ *     next run finds the finished chunks unchanged.
  *
- * Resuming: a listing whose `syncedAt` is newer than the shop connection's
- * `lastSyncedAt` (set by the route only after a whole sync succeeds) was
- * finished by a run that didn't complete. A re-run skips its inventory call
- * unless Etsy reports it modified since, or that run is older than
- * {@link RESUME_WINDOW_MS}.
+ * A shop with no changes costs only its index pages.
  *
  * Server-only — pulls in Prisma; never import from a "use client" file.
  */
@@ -46,38 +47,43 @@ import {
 
 /** Etsy's per-request page cap. */
 const MAX_PAGE = 100;
-/** How many pages to fetch in parallel — mirrors `fetchAllShopListings`'s own concurrency. */
+/** How many index pages to fetch in parallel — mirrors `fetchAllShopListings`'s own concurrency. */
 const SYNC_CONCURRENCY = 4;
 /** Defensive cap so a runaway shop/count doesn't loop forever. */
 const SAFETY_CAP = 20_000;
 
 /**
- * Inventory calls per second. Etsy's per-app quota is 5/s; staying under it
+ * Per-listing inventory calls per second (the fallback when the batch
+ * inventory call can't answer). Etsy's per-app quota is 5/s; staying under it
  * leaves room for the rest of the app while a sync runs.
  */
 export const INVENTORY_REQUESTS_PER_SECOND = 4;
 const INVENTORY_CONCURRENCY = 4;
-/** Listings whose inventory is fetched and committed together. */
-const INVENTORY_BATCH_SIZE = 25;
-/** How old an unfinished run can be and still be resumed rather than redone. */
-export const RESUME_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** Changed listings fetched (one batch call + one batch inventory call) and committed together — Etsy's batch cap. */
+export const DETAIL_BATCH_SIZE = 100;
 
-export type SyncStage = "listings" | "saving" | "inventory";
+export type SyncStage = "listings" | "changes";
 
 export type RefreshProgressEvent =
   | { type: "status"; stage?: SyncStage; message: string }
   | { type: "progress"; stage: SyncStage; fetched: number; total: number; message: string }
-  | { type: "done"; inserted: number; updated: number; removed: number; total: number; resumed: number }
+  | ({ type: "done" } & SyncResult)
   | { type: "error"; message: string };
 
 export interface SyncResult {
   inserted: number;
   updated: number;
   removed: number;
+  /** Listings the index listed (checked). */
   total: number;
-  /** Listings whose inventory an earlier, unfinished run had already stored. */
-  resumed: number;
+  /** Listings re-fetched because they were new or changed. */
+  changed: number;
+  /** Listings whose stored copy already matched Etsy's timestamp — not fetched. */
+  unchanged: number;
 }
+
+export const changedMessage = (changed: number, checked: number): string =>
+  `${changed} changed of ${checked} checked`;
 
 export interface SyncOptions {
   now?: () => number;
@@ -89,6 +95,7 @@ async function etsyGetJson<T>(path: string): Promise<T> {
   return (await readEtsyResponse(res, `GET ${path}`)) as T;
 }
 
+/** An index page: listing fields only, no associations. */
 function listingsPagePath(shopId: string, state: EtsyListingState, offset: number): string {
   const query = new URLSearchParams({
     state,
@@ -96,9 +103,20 @@ function listingsPagePath(shopId: string, state: EtsyListingState, offset: numbe
     offset: String(offset),
     sort_on: "created",
     sort_order: "desc",
-    includes: "Images,Videos,Personalization,Inventory",
   });
   return `/shops/${shopId}/listings?${query.toString()}`;
+}
+
+function detailsPath(listingIds: string[]): string {
+  const query = new URLSearchParams({
+    listing_ids: listingIds.join(","),
+    includes: "Images,Videos,Personalization",
+  });
+  return `/listings/batch?${query.toString()}`;
+}
+
+function batchInventoryPath(listingIds: string[]): string {
+  return `/listings/batch/inventory?${new URLSearchParams({ listing_ids: listingIds.join(",") }).toString()}`;
 }
 
 interface SyncRawImage extends EtsyListingImage {
@@ -205,10 +223,16 @@ export interface SyncedListingRow {
   personalizationCharCountMax: number | null;
   images: SyncedImage[];
   videos: SyncedVideo[];
-  /** Etsy's last-modified time in ms — used to decide resumes, not stored. */
+  /** Etsy's last-modified time in ms, stored as `etsyLastModifiedAt`. */
   lastModifiedMs: number | null;
-  /** The inventory the listings page included, saving a call per listing; absent when it didn't. */
-  inventory?: RawInventory;
+}
+
+/** What the index tells us about a listing — enough to decide whether it changed. */
+export interface ListingIndexEntry {
+  listingId: string;
+  state: string;
+  quantity: number;
+  lastModifiedMs: number | null;
 }
 
 const positiveOrNull = (value: unknown): number | null =>
@@ -248,11 +272,15 @@ function mapVideos(raw: SyncRawListing["videos"]): SyncedVideo[] {
     }));
 }
 
+function lastModifiedMs(raw: SyncRawListing): number | null {
+  const modified = raw.last_modified_timestamp ?? raw.updated_timestamp;
+  return typeof modified === "number" ? modified * 1000 : null;
+}
+
 function mapRawListing(raw: SyncRawListing): SyncedListingRow {
   const questions = raw.personalization?.personalization_questions ?? [];
   const isPersonalizable = raw.is_personalizable === true || questions.length > 0;
   const first = questions[0];
-  const modified = raw.last_modified_timestamp ?? raw.updated_timestamp;
 
   return {
     listingId: String(raw.listing_id),
@@ -295,22 +323,20 @@ function mapRawListing(raw: SyncRawListing): SyncedListingRow {
       : null,
     images: mapImages(raw.images),
     videos: mapVideos(raw.videos),
-    lastModifiedMs: typeof modified === "number" ? modified * 1000 : null,
-    ...(raw.inventory && Array.isArray(raw.inventory.products) ? { inventory: raw.inventory } : {}),
+    lastModifiedMs: lastModifiedMs(raw),
   };
 }
 
 /**
- * Fetch every listing across every state for `shopId`, paging until each
- * state's Etsy-reported count is exhausted. Deliberately bypasses
- * `fetchAllShopListings`'s page cache — a manual refresh exists specifically
- * to see past whatever's cached — but every request still goes through
- * `etsyFetch`, so the 429 retry/backoff and quota logging still apply.
+ * The index: every listing across every state for `shopId`, paging until each
+ * state's Etsy-reported count is exhausted, without associations. Deliberately
+ * bypasses `fetchAllShopListings`'s page cache — a manual refresh exists
+ * specifically to see past whatever's cached.
  */
-async function fetchAllListingsForSync(
+async function fetchListingIndex(
   shopId: string,
   onProgress: (fetched: number, total: number) => void,
-): Promise<SyncedListingRow[]> {
+): Promise<ListingIndexEntry[]> {
   const firstPages = await Promise.all(
     ETSY_LISTING_STATES.map(async (state) => {
       const data = await etsyGetJson<EtsySyncListingsResponse>(listingsPagePath(shopId, state, 0));
@@ -350,9 +376,65 @@ async function fetchAllListingsForSync(
   await Promise.all(Array.from({ length: Math.min(SYNC_CONCURRENCY, jobs.length) }, worker));
 
   // A listing changing state mid-sync can show up on two state pages.
-  const byId = new Map<string, SyncedListingRow>();
-  for (const r of raw) byId.set(String(r.listing_id), mapRawListing(r));
+  const byId = new Map<string, ListingIndexEntry>();
+  for (const r of raw) {
+    byId.set(String(r.listing_id), {
+      listingId: String(r.listing_id),
+      state: r.state,
+      quantity: r.quantity ?? 0,
+      lastModifiedMs: lastModifiedMs(r),
+    });
+  }
   return [...byId.values()];
+}
+
+interface StoredListingState {
+  listingId: string;
+  state: string;
+  quantity: number;
+  removedAt: Date | null;
+  syncedAt: Date | null;
+  etsyLastModifiedAt: Date | null;
+}
+
+/**
+ * Whether the stored copy of a listing may differ from Etsy's. A missing
+ * timestamp on either side (first run, rows from before timestamps were
+ * stored) counts as changed.
+ */
+export function listingChanged(entry: ListingIndexEntry, stored: StoredListingState | undefined): boolean {
+  if (!stored || stored.removedAt || !stored.syncedAt) return true;
+  if (entry.lastModifiedMs == null || stored.etsyLastModifiedAt == null) return true;
+  if (stored.etsyLastModifiedAt.getTime() !== entry.lastModifiedMs) return true;
+  return stored.state !== entry.state || stored.quantity !== entry.quantity;
+}
+
+/**
+ * Full details for up to {@link DETAIL_BATCH_SIZE} changed listings: one
+ * batch call for fields and media, one for their inventory. A listing the
+ * batch no longer returns (deleted since the index) is left out.
+ */
+async function fetchDetails(
+  listingIds: string[],
+  limit: () => Promise<void>,
+): Promise<{ rows: SyncedListingRow[]; inventories: Map<string, RawInventory | null> }> {
+  const [details, batchInventory] = await Promise.all([
+    etsyGetJson<EtsySyncListingsResponse>(detailsPath(listingIds)),
+    // All-or-nothing on Etsy's side: one id it can't find 404s the whole call.
+    etsyGetJson<EtsySyncListingsResponse>(batchInventoryPath(listingIds)).catch((err) => {
+      if (err instanceof EtsyApiError && err.status === 404) return { count: 0, results: [] };
+      throw err;
+    }),
+  ]);
+  const rows = (details.results ?? []).map(mapRawListing);
+
+  const inventories = new Map<string, RawInventory | null>();
+  for (const r of batchInventory.results ?? []) {
+    if (r.inventory && Array.isArray(r.inventory.products)) inventories.set(String(r.listing_id), r.inventory);
+  }
+  const missing = rows.map((r) => r.listingId).filter((id) => !inventories.has(id));
+  for (const [id, inventory] of await fetchInventoryBatch(missing, limit)) inventories.set(id, inventory);
+  return { rows, inventories };
 }
 
 /**
@@ -412,34 +494,27 @@ async function fetchInventoryBatch(
 const TRANSACTION_TIMEOUT_MS = 120_000;
 
 /**
- * How many `Listing` rows go into one `INSERT ... ON CONFLICT DO UPDATE`
- * statement (with their images and videos in the same transaction). A
- * row-at-a-time upsert loop (~700 round trips for a mid-size shop) was
- * measured taking well over a minute against Neon — batching keeps a
- * full-shop reconciliation to a handful of statements.
- */
-const UPSERT_BATCH_SIZE = 100;
-
-/**
  * Upsert `rows` by `userId`+`shopId`+`listingId` and replace their images and
  * videos. `id` is generated here since raw SQL bypasses Prisma's
  * `@default(cuid())`; on a conflict it's discarded in favour of the existing
- * row's id (the `DO UPDATE` never touches `id`). `syncedAt` is left alone —
- * only the inventory stage sets it. Returns listingId → row id.
+ * row's id (the `DO UPDATE` never touches `id`). Called in the same
+ * transaction as the rows' grids, so `syncedAt` and the Etsy timestamp are
+ * written with them. Returns listingId → row id.
  */
 async function saveListingBatch(
   tx: Prisma.TransactionClient,
   userId: string,
   shopId: string,
   rows: SyncedListingRow[],
+  syncedAt: Date,
 ): Promise<Map<string, string>> {
   const valueRows = rows.map(
     (row) =>
-      Prisma.sql`(${randomUUID()}, ${userId}, ${shopId}, ${row.listingId}, ${row.title}, ${row.state}, ${row.url}, ${row.quantity}, ${row.price}, ${row.thumbnailUrl}, ${row.endingAt}, ${row.shopSectionId}, ${row.sku}, ${row.description}, ${row.tags}::text[], ${row.materials}::text[], ${row.listingType}, ${row.whoMade}, ${row.whenMade}, ${row.isSupply}, ${row.priceAmount}, ${row.priceDivisor}, ${row.currencyCode}, ${row.shippingProfileId}, ${row.returnPolicyId}, ${row.itemWeight}, ${row.itemWeightUnit}, ${row.itemLength}, ${row.itemWidth}, ${row.itemHeight}, ${row.itemDimensionsUnit}, ${row.processingMin}, ${row.processingMax}, ${row.isPersonalizable}, ${row.personalizationIsRequired}, ${row.personalizationInstructions}, ${row.personalizationCharCountMax}, NULL, NOW(), NOW())`,
+      Prisma.sql`(${randomUUID()}, ${userId}, ${shopId}, ${row.listingId}, ${row.title}, ${row.state}, ${row.url}, ${row.quantity}, ${row.price}, ${row.thumbnailUrl}, ${row.endingAt}, ${row.shopSectionId}, ${row.sku}, ${row.description}, ${row.tags}::text[], ${row.materials}::text[], ${row.listingType}, ${row.whoMade}, ${row.whenMade}, ${row.isSupply}, ${row.priceAmount}, ${row.priceDivisor}, ${row.currencyCode}, ${row.shippingProfileId}, ${row.returnPolicyId}, ${row.itemWeight}, ${row.itemWeightUnit}, ${row.itemLength}, ${row.itemWidth}, ${row.itemHeight}, ${row.itemDimensionsUnit}, ${row.processingMin}, ${row.processingMax}, ${row.isPersonalizable}, ${row.personalizationIsRequired}, ${row.personalizationInstructions}, ${row.personalizationCharCountMax}, ${row.lastModifiedMs == null ? null : new Date(row.lastModifiedMs)}, ${syncedAt}, NULL, NOW(), NOW())`,
   );
   await tx.$executeRaw`
     INSERT INTO "listings"
-      ("id", "userId", "shopId", "listingId", "title", "state", "url", "quantity", "price", "thumbnailUrl", "endingAt", "shopSectionId", "sku", "description", "tags", "materials", "listingType", "whoMade", "whenMade", "isSupply", "priceAmount", "priceDivisor", "currencyCode", "shippingProfileId", "returnPolicyId", "itemWeight", "itemWeightUnit", "itemLength", "itemWidth", "itemHeight", "itemDimensionsUnit", "processingMin", "processingMax", "isPersonalizable", "personalizationIsRequired", "personalizationInstructions", "personalizationCharCountMax", "removedAt", "createdAt", "updatedAt")
+      ("id", "userId", "shopId", "listingId", "title", "state", "url", "quantity", "price", "thumbnailUrl", "endingAt", "shopSectionId", "sku", "description", "tags", "materials", "listingType", "whoMade", "whenMade", "isSupply", "priceAmount", "priceDivisor", "currencyCode", "shippingProfileId", "returnPolicyId", "itemWeight", "itemWeightUnit", "itemLength", "itemWidth", "itemHeight", "itemDimensionsUnit", "processingMin", "processingMax", "isPersonalizable", "personalizationIsRequired", "personalizationInstructions", "personalizationCharCountMax", "etsyLastModifiedAt", "syncedAt", "removedAt", "createdAt", "updatedAt")
     VALUES ${Prisma.join(valueRows)}
     ON CONFLICT ("userId", "shopId", "listingId")
     DO UPDATE SET
@@ -476,6 +551,8 @@ async function saveListingBatch(
       "personalizationIsRequired" = EXCLUDED."personalizationIsRequired",
       "personalizationInstructions" = EXCLUDED."personalizationInstructions",
       "personalizationCharCountMax" = EXCLUDED."personalizationCharCountMax",
+      "etsyLastModifiedAt" = EXCLUDED."etsyLastModifiedAt",
+      "syncedAt" = EXCLUDED."syncedAt",
       "removedAt" = NULL,
       "updatedAt" = NOW()
   `;
@@ -599,14 +676,12 @@ function inventoryRows(
   });
 }
 
-/** Replace a batch's grids and mark those listings synced, in one transaction. */
+/** Replace a batch's grids. */
 async function saveInventoryBatch(
   tx: Prisma.TransactionClient,
   userId: string,
-  shopId: string,
   batch: { row: SyncedListingRow; rowId: string }[],
   inventories: Map<string, RawInventory | null>,
-  syncedAt: Date,
 ): Promise<void> {
   const rowIds = batch.map((b) => b.rowId);
   // Deleting properties cascades to their values and product links.
@@ -622,15 +697,14 @@ async function saveInventoryBatch(
   if (out.values.length > 0) await tx.listingInventoryValue.createMany({ data: out.values });
   if (out.products.length > 0) await tx.listingInventoryProduct.createMany({ data: out.products });
   if (out.productValues.length > 0) await tx.listingInventoryProductValue.createMany({ data: out.productValues });
-
-  await tx.listing.updateMany({ where: { userId, shopId, id: { in: rowIds } }, data: { syncedAt } });
 }
 
 /**
- * Bring this shop's stored listings in line with Etsy: upsert every fetched
- * listing (fields, images, videos, inventory grid) by `userId` + `shopId` +
- * `listingId`, and mark any stored row not present in this fetch as removed
- * (never deleted, so a listing that comes back later just gets revived).
+ * Bring this shop's stored listings in line with Etsy: read the index, mark
+ * stored rows it no longer lists as removed (never deleted, so a listing that
+ * comes back later just gets revived), then fetch and upsert — fields, images,
+ * videos, inventory grid, by `userId` + `shopId` + `listingId` — only the
+ * listings that are new or changed.
  */
 export async function syncShopListings(
   userId: string,
@@ -643,107 +717,69 @@ export async function syncShopListings(
 
   onEvent({ type: "status", stage: "listings", message: "Preparing to refresh" });
 
-  const rows = await fetchAllListingsForSync(shopId, (fetched, total) => {
+  const index = await fetchListingIndex(shopId, (fetched, total) => {
     onEvent({
       type: "progress",
       stage: "listings",
       fetched,
       total,
-      message: `Fetched ${fetched} of ${total} listings`,
+      message: `Checked ${fetched} of ${total} listings`,
     });
   });
 
-  const [existing, connection] = await Promise.all([
-    prisma.listing.findMany({
-      where: { userId, shopId },
-      select: { listingId: true, removedAt: true, syncedAt: true },
-    }),
-    prisma.etsyShopConnection.findUnique({
-      where: { userId_shopId: { userId, shopId } },
-      select: { lastSyncedAt: true },
-    }),
-  ]);
+  const existing = await prisma.listing.findMany({
+    where: { userId, shopId },
+    select: { listingId: true, state: true, quantity: true, removedAt: true, syncedAt: true, etsyLastModifiedAt: true },
+  });
   const existingById = new Map(existing.map((e) => [e.listingId, e]));
-  const fetchedIds = rows.map((r) => r.listingId);
-  const fetchedIdSet = new Set(fetchedIds);
+  const indexIds = index.map((e) => e.listingId);
+  const indexIdSet = new Set(indexIds);
 
-  const inserted = rows.filter((r) => !existingById.has(r.listingId)).length;
-  const updated = rows.length - inserted;
-  const removed = existing.filter((e) => !fetchedIdSet.has(e.listingId) && !e.removedAt).length;
-
-  const lastCompletedMs = connection?.lastSyncedAt?.getTime() ?? 0;
-  const startedMs = now();
-  const alreadySynced = (row: SyncedListingRow): boolean => {
-    const syncedMs = existingById.get(row.listingId)?.syncedAt?.getTime();
-    if (syncedMs == null) return false;
-    if (syncedMs <= lastCompletedMs) return false;
-    if (startedMs - syncedMs > RESUME_WINDOW_MS) return false;
-    return row.lastModifiedMs == null || row.lastModifiedMs <= syncedMs;
-  };
-
-  const rowIdByListingId = new Map<string, string>();
-  for (let i = 0; i < rows.length; i += UPSERT_BATCH_SIZE) {
-    const chunk = rows.slice(i, i + UPSERT_BATCH_SIZE);
-    const ids = await prisma.$transaction((tx) => saveListingBatch(tx, userId, shopId, chunk), {
-      timeout: TRANSACTION_TIMEOUT_MS,
-    });
-    for (const [listingId, rowId] of ids) rowIdByListingId.set(listingId, rowId);
-    const saved = Math.min(i + UPSERT_BATCH_SIZE, rows.length);
-    onEvent({
-      type: "progress",
-      stage: "saving",
-      fetched: saved,
-      total: rows.length,
-      message: `Saved ${saved} of ${rows.length} listings`,
+  const removed = existing.filter((e) => !indexIdSet.has(e.listingId) && !e.removedAt).length;
+  if (removed > 0) {
+    await prisma.listing.updateMany({
+      where: { userId, shopId, listingId: { notIn: indexIds }, removedAt: null },
+      data: { removedAt: new Date(now()) },
     });
   }
-  await prisma.listing.updateMany({
-    where: { userId, shopId, listingId: { notIn: fetchedIds }, removedAt: null },
-    data: { removedAt: new Date(now()) },
-  });
 
-  const pending = rows.filter((r) => !alreadySynced(r) && rowIdByListingId.has(r.listingId));
-  const resumed = rows.length - pending.length;
-  if (resumed > 0) {
-    onEvent({
-      type: "status",
-      stage: "inventory",
-      message: `Resuming — ${resumed} of ${rows.length} listings already have their variations`,
-    });
-  }
+  const changedIds = index.filter((e) => listingChanged(e, existingById.get(e.listingId))).map((e) => e.listingId);
+  const checked = index.length;
+  const changed = changedIds.length;
+  const summary = changedMessage(changed, checked);
+  onEvent({ type: "progress", stage: "changes", fetched: 0, total: changed, message: summary });
 
   const limit = createRateLimiter(INVENTORY_REQUESTS_PER_SECOND, now, sleep);
-  let done = resumed;
-  onEvent({
-    type: "progress",
-    stage: "inventory",
-    fetched: done,
-    total: rows.length,
-    message: `Loaded variations for ${done} of ${rows.length} listings`,
-  });
-  for (let i = 0; i < pending.length; i += INVENTORY_BATCH_SIZE) {
-    const batch = pending
-      .slice(i, i + INVENTORY_BATCH_SIZE)
-      .map((row) => ({ row, rowId: rowIdByListingId.get(row.listingId) as string }));
-    const inventories = await fetchInventoryBatch(
-      batch.filter((b) => !b.row.inventory).map((b) => b.row.listingId),
-      limit,
-    );
-    for (const b of batch) if (b.row.inventory) inventories.set(b.row.listingId, b.row.inventory);
-    const syncedAt = new Date(now());
-    await prisma.$transaction(
-      (tx) => saveInventoryBatch(tx, userId, shopId, batch, inventories, syncedAt),
-      { timeout: TRANSACTION_TIMEOUT_MS },
-    );
-    done += batch.length;
+  let inserted = 0;
+  let updated = 0;
+  for (let i = 0; i < changedIds.length; i += DETAIL_BATCH_SIZE) {
+    const { rows, inventories } = await fetchDetails(changedIds.slice(i, i + DETAIL_BATCH_SIZE), limit);
+    if (rows.length > 0) {
+      const syncedAt = new Date(now());
+      await prisma.$transaction(
+        async (tx) => {
+          const rowIds = await saveListingBatch(tx, userId, shopId, rows, syncedAt);
+          const batch = rows
+            .filter((row) => rowIds.has(row.listingId))
+            .map((row) => ({ row, rowId: rowIds.get(row.listingId) as string }));
+          await saveInventoryBatch(tx, userId, batch, inventories);
+        },
+        { timeout: TRANSACTION_TIMEOUT_MS },
+      );
+      for (const row of rows) {
+        if (existingById.has(row.listingId)) updated++;
+        else inserted++;
+      }
+    }
+    const done = Math.min(i + DETAIL_BATCH_SIZE, changed);
     onEvent({
       type: "progress",
-      stage: "inventory",
+      stage: "changes",
       fetched: done,
-      total: rows.length,
-      message: `Loaded variations for ${done} of ${rows.length} listings`,
+      total: changed,
+      message: `${summary} — updated ${done} of ${changed}`,
     });
   }
 
-  return { inserted, updated, removed, total: rows.length, resumed };
+  return { inserted, updated, removed, total: checked, changed, unchanged: checked - changed };
 }

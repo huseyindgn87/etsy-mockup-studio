@@ -47,7 +47,7 @@ describe("POST /api/etsy/shops/refresh", () => {
   test("runs the refresh job straight away inside the request — no cron or worker pass needed", async () => {
     syncMock.mockImplementation(async (_u, _s, onEvent) => {
       onEvent({ type: "progress", stage: "listings", fetched: 2, total: 2, message: "Fetched 2 of 2" });
-      return { inserted: 2, updated: 0, removed: 0, total: 2, resumed: 0 };
+      return { inserted: 2, updated: 0, removed: 0, total: 2, changed: 2, unchanged: 0 };
     });
     const res = await post();
     const seen = events(await res.text());

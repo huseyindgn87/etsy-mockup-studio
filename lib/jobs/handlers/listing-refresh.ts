@@ -1,13 +1,13 @@
 /**
  * `listing_refresh` jobs: a shop's full listings sync (lib/etsy/listing-sync.ts)
  * — the listings page's Refresh (interactive) or background work. The sync is
- * itself resumable: a run that dies keeps its finished batches, and the next
- * run skips listings it already has. Progress is checkpointed at most once a
+ * incremental, so it's resumable by itself: a run that dies keeps its finished
+ * batches, and the next run finds those listings unchanged. Progress is checkpointed at most once a
  * second (and at each stage change), which also keeps the lease alive.
  */
 
 import type { RefreshProgressEvent, SyncResult } from "@/lib/etsy/listing-sync";
-import { syncShopListings } from "@/lib/etsy/listing-sync";
+import { changedMessage, syncShopListings } from "@/lib/etsy/listing-sync";
 import { markShopSynced } from "@/lib/etsy/shop-connections";
 import { withShopAccessToken } from "@/lib/scheduling/publisher";
 import type { JobHandler } from "../worker";
@@ -53,7 +53,11 @@ export function listingRefreshHandler(deps: ListingRefreshDeps = defaultDeps): J
     const result = await deps.withShopToken(userId, shopId, () => deps.sync(userId, shopId, onEvent));
     await writes;
     await deps.markSynced(userId, shopId);
-    await ctx.checkpoint({ message: `Refreshed ${result.total} listings`, done: result.total, total: result.total });
+    await ctx.checkpoint({
+      message: changedMessage(result.changed, result.total),
+      done: result.changed,
+      total: result.changed,
+    });
     return { status: "done", result };
   };
 }
