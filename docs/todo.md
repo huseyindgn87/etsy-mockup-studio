@@ -12,6 +12,8 @@ Single source of open work. Checked against the code on 2026-09-19.
 ## Open
 
 ### New (19 Sept)
+- [ ] Variations: deleting an option (size S/M/L, a color…) happens on one click — no confirmation dialog.
+- [ ] Variations: pencil icon on hover over an option to rename it in place (like Vela); only the name changes — prices, quantities, SKUs, photos and every other setting of that option stay.
 - [ ] While a scheduled publish runs: blur the site, block edits, show "sending to Etsy" status.
 - [ ] Scheduling listings that have a video (blocked in `lib/scheduling/publish-guard.ts`).
 - [ ] Real-shop test of copy → edit → schedule after b88cd79 / 37aefb0.
