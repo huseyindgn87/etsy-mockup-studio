@@ -8,6 +8,9 @@ const SIDEBAR_ROUTES = ["/listings"] as const;
 /** The `id` a page gives its sidebar element, so the toggle can point at it via `aria-controls`. */
 export const SIDEBAR_ID = "app-sidebar";
 
+/** Fired by the wordmark on the listings page itself: go back to its home view (Active, not My drafts). */
+export const LISTINGS_HOME_EVENT = "listhouse:listings-home";
+
 export function hasSidebar(pathname: string): boolean {
   return SIDEBAR_ROUTES.some((r) => pathname === r || pathname.startsWith(`${r}/`));
 }

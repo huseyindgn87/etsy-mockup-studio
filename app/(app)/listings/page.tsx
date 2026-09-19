@@ -13,7 +13,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useMemo, useState } from "react";
 import type { DraftSummary } from "@/lib/drafts/types";
 import {
   deselectPage,
@@ -31,7 +31,7 @@ import {
   type ListingFilters,
   type Selection,
 } from "@/lib/listings/selection";
-import { SIDEBAR_ID, useSidebar } from "../SidebarContext";
+import { LISTINGS_HOME_EVENT, SIDEBAR_ID, useSidebar } from "../SidebarContext";
 import RefreshShopModal from "./RefreshShopModal";
 
 interface Listing {
@@ -311,6 +311,13 @@ export default function ListingsPage() {
   function resetSelectionFor(next: ListingFilters) {
     setRawSelection(emptySelection(filterKey(next)));
   }
+
+  const goHome = useEffectEvent(() => selectState("active"));
+  useEffect(() => {
+    const onHome = () => goHome();
+    window.addEventListener(LISTINGS_HOME_EVENT, onHome);
+    return () => window.removeEventListener(LISTINGS_HOME_EVENT, onHome);
+  }, []);
 
   function selectState(next: ListingState) {
     setViewingDrafts(false);

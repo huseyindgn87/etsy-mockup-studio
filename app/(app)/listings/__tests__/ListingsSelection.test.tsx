@@ -6,6 +6,7 @@ const { pushMock } = vi.hoisted(() => ({ pushMock: vi.fn() }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: pushMock }) }));
 vi.mock("../SidebarContext", () => ({
   SIDEBAR_ID: "app-sidebar",
+  LISTINGS_HOME_EVENT: "listhouse:listings-home",
   useSidebar: () => ({ open: true, toggle: () => {} }),
 }));
 

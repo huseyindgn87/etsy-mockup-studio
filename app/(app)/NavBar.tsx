@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { PanelLeft } from "lucide-react";
 import { APP_NAME } from "@/lib/brand";
-import { hasSidebar, SIDEBAR_ID, useSidebar } from "./SidebarContext";
+import { hasSidebar, LISTINGS_HOME_EVENT, SIDEBAR_ID, useSidebar } from "./SidebarContext";
 import UserMenu, { type MenuAccount } from "./UserMenu";
 
 const WORDMARK = APP_NAME.toUpperCase();
@@ -48,7 +48,13 @@ export default function NavBar({ account }: Props) {
             </button>
           )}
           {pathname === HOME_ROUTE ? (
-            <span className={`select-none ${WORDMARK_CLASS}`}>{WORDMARK}</span>
+            <button
+              type="button"
+              onClick={() => window.dispatchEvent(new Event(LISTINGS_HOME_EVENT))}
+              className={`${WORDMARK_CLASS} transition-colors hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2`}
+            >
+              {WORDMARK}
+            </button>
           ) : (
             <Link
               href={HOME_ROUTE}

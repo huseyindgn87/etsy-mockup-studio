@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 const { pushMock } = vi.hoisted(() => ({ pushMock: vi.fn() }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: pushMock }) }));
 vi.mock("../SidebarContext", () => ({
   SIDEBAR_ID: "app-sidebar",
+  LISTINGS_HOME_EVENT: "listhouse:listings-home",
   useSidebar: () => ({ open: true, toggle: () => {} }),
 }));
 
@@ -328,5 +329,17 @@ describe("My drafts schedule badge", () => {
     fireEvent.click(screen.getByRole("button", { name: /My drafts/ }));
     await screen.findByText("Scheduled tee");
     expect(screen.getAllByLabelText(/^Scheduled for /)).toHaveLength(1);
+  });
+});
+
+describe("wordmark home", () => {
+  test("from My drafts, the wordmark's home event goes back to Active listings", async () => {
+    await renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /My drafts/ }));
+    await waitFor(() => expect(screen.queryByText("Blue Ceramic Mug")).not.toBeInTheDocument());
+    act(() => {
+      window.dispatchEvent(new Event("listhouse:listings-home"));
+    });
+    await screen.findByText("Blue Ceramic Mug");
   });
 });

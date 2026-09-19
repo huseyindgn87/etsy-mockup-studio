@@ -3,7 +3,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { usePathname } from "next/navigation";
 import NavBar from "../NavBar";
-import { SidebarProvider, useSidebar } from "../SidebarContext";
+import { LISTINGS_HOME_EVENT, SidebarProvider, useSidebar } from "../SidebarContext";
 
 const { signOutMock } = vi.hoisted(() => ({ signOutMock: vi.fn() }));
 
@@ -75,18 +75,14 @@ describe("NavBar", () => {
       },
     );
 
-    it("on /listings itself is inert plain text — not a link, not focusable", () => {
+    it("on /listings itself is a button that sends the listings page back to its home view", () => {
       renderBar("/listings");
       expect(screen.queryByRole("link", { name: "LISTHOUSE" })).not.toBeInTheDocument();
-
-      const wordmark = screen.getByText("LISTHOUSE");
-      expect(wordmark.tagName).toBe("SPAN");
-      expect(wordmark).not.toHaveAttribute("href");
-      expect(wordmark).not.toHaveAttribute("tabindex");
-      expect(wordmark).not.toHaveAttribute("role");
-
-      wordmark.focus();
-      expect(wordmark).not.toHaveFocus();
+      const onHome = vi.fn();
+      window.addEventListener(LISTINGS_HOME_EVENT, onHome);
+      fireEvent.click(screen.getByRole("button", { name: "LISTHOUSE" }));
+      window.removeEventListener(LISTINGS_HOME_EVENT, onHome);
+      expect(onHome).toHaveBeenCalledTimes(1);
     });
 
     it("sits top-left, before the account menu", () => {
@@ -124,11 +120,12 @@ describe("NavBar", () => {
   describe("account menu", () => {
     it("the header carries only the sidebar toggle, the wordmark, and the account menu", () => {
       const { unmount } = renderBar("/listings");
-      expect(screen.getAllByRole("button").map((b) => b.getAttribute("aria-label"))).toEqual([
+      expect(screen.getAllByRole("button").map((b) => b.getAttribute("aria-label") ?? b.textContent)).toEqual([
         "Toggle sidebar",
+        "LISTHOUSE",
         "Account menu",
       ]);
-      expect(screen.queryAllByRole("link")).toHaveLength(0); // wordmark is inert text here
+      expect(screen.queryAllByRole("link")).toHaveLength(0); // on /listings the wordmark is a button
       expect(screen.getByRole("banner")).toHaveTextContent("LISTHOUSE");
       unmount();
 
