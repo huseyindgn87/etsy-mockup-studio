@@ -1155,23 +1155,13 @@ function MockupsPageInner() {
         const res = await fetch(`/api/etsy/listings/${copySourceListingId}/copy-source`);
         if (!res.ok) throw new Error(await errorFrom(res));
         const src = (await res.json()) as {
-          title: string;
-          description: string;
-          tags: string[];
-          price: number | null;
-          shopSectionId: number | null;
+          form: ListingFormValue;
           images: { dataUrl: string; fileName: string; altText?: string }[];
         };
         if (cancelled) return;
 
-        setListingForm((prev) => ({
-          ...prev,
-          title: src.title || prev.title,
-          description: src.description,
-          tags: src.tags,
-          price: src.price != null ? src.price.toFixed(2) : prev.price,
-          shopSectionId: src.shopSectionId,
-        }));
+        // Merge the source form into the current form, keeping draft-specific defaults
+        setListingForm((prev) => ({ ...prev, ...src.form }));
 
         const files: File[] = [];
         const altTexts: string[] = [];

@@ -1,6 +1,12 @@
 import { etsyFetch } from "@/lib/etsy/auth";
 import { decodeHtmlEntities, readEtsyResponse } from "@/lib/etsy/listings";
 import { MAX_LISTING_IMAGES } from "@/lib/etsy/listing-image-limits";
+import { fetchListingAttributes } from "@/lib/etsy/listing-attributes";
+import { fetchListingDetails } from "@/lib/etsy/listing-details";
+import { fetchListingInventories } from "@/lib/etsy/listing-inventory";
+import { getSellerTaxonomyTree, type TaxonomyNode } from "@/lib/etsy/taxonomy";
+import { listingFormFromSource, type EditorListingSource } from "@/lib/etsy/listing-editor-form";
+import type { ListingFormValue } from "@/app/(app)/mockups/ListingForm";
 
 /**
  * Everything the mockup editor needs to prefill a "copy" draft from an
@@ -10,13 +16,7 @@ import { MAX_LISTING_IMAGES } from "@/lib/etsy/listing-image-limits";
  * second round trip or a cross-origin fetch of Etsy's CDN.
  */
 export interface ListingCopySource {
-  listingId: number;
-  title: string;
-  description: string;
-  tags: string[];
-  /** Price in major currency units, or null when Etsy omitted it. */
-  price: number | null;
-  shopSectionId: number | null;
+  form: ListingFormValue;
   /** In rank order, each with the source photo's own alt text. */
   images: { dataUrl: string; fileName: string; altText: string }[];
 }
@@ -27,27 +27,10 @@ interface RawPrice {
   currency_code: string;
 }
 
-interface RawImage {
-  alt_text?: string | null;
-  url_fullxfull?: string;
-  url_570xN?: string;
-  url_340x270?: string;
-  url_170x135?: string;
-  url_75x75?: string;
-}
-
-interface RawListingDetail {
-  listing_id: number;
-  title?: string;
-  description?: string;
-  tags?: string[];
-  price?: RawPrice;
-  shop_section_id?: number | null;
-  images?: RawImage[];
-}
-
-function pickCopyImageUrl(img: RawImage): string | null {
-  return img.url_fullxfull ?? img.url_570xN ?? img.url_340x270 ?? img.url_170x135 ?? img.url_75x75 ?? null;
+interface RawPrice {
+  amount: number;
+  divisor: number;
+  currency_code: string;
 }
 
 function extensionFor(contentType: string): string {
@@ -77,26 +60,69 @@ async function fetchImageAsDataUrl(url: string, index: number): Promise<{ dataUr
   }
 }
 
+function taxonomyPath(nodes: TaxonomyNode[], id: number, prefix = ""): string | null {
+  for (const n of nodes) {
+    const path = prefix ? `${prefix} > ${n.name}` : n.name;
+    if (n.id === id) return path;
+    const found = taxonomyPath(n.children, id, path);
+    if (found) return found;
+  }
+  return null;
+}
+
 /**
- * Read one listing's title/description/tags/price/section/photos for the
- * "copy" flow's editor prefill. Deliberately excludes everything
- * `getListingStructure` already covers for the *publish*-time seed
- * (category, shipping, how-it's-made-adjacent fields) — those are re-derived
- * fresh from Etsy at publish time regardless of what the editor shows.
+ * Read a listing's all copyable fields (title/description/tags/price/section/
+ * category/variations/attributes/photos) for the "copy" flow's editor prefill.
+ * Fetches from the Etsy API to get the complete listing structure.
  */
 export async function getListingCopySource(listingId: number): Promise<ListingCopySource> {
-  const raw = (await readEtsyResponse(
-    await etsyFetch(`/listings/${listingId}?includes=Images`),
-    `GET /listings/${listingId}`,
-  )) as RawListingDetail;
+  const [detail] = await fetchListingDetails([listingId]);
+  if (!detail) throw new Error("Listing not found");
+  if (!detail.shopId) throw new Error("Shop id not available");
 
-  const sources = (raw.images ?? [])
+  const [inventories, attributes, tree] = await Promise.all([
+    fetchListingInventories([listingId]),
+    fetchListingAttributes(detail.shopId, [listingId]),
+    detail.taxonomyId ? getSellerTaxonomyTree().catch(() => []) : Promise.resolve([]),
+  ]);
+
+  const inventory = inventories.get(listingId) ?? null;
+  const listingAttributes = attributes.get(listingId) ?? [];
+
+  // Build EditorListingSource with all available data
+  const source: EditorListingSource = {
+    title: decodeHtmlEntities(detail.title ?? ""),
+    description: decodeHtmlEntities(detail.description ?? ""),
+    tags: detail.tags ?? [],
+    price: detail.price ?? null,
+    quantity: detail.quantity ?? 1,
+    sku: detail.sku ?? "",
+    shopSectionId: detail.shopSectionId ?? null,
+    readinessStateId: detail.readinessStateId ?? null,
+    whoMade: detail.whoMade ?? null,
+    whenMade: detail.whenMade ?? null,
+    isSupply: detail.isSupply ?? false,
+    productionPartnerIds: detail.productionPartnerIds ?? [],
+    taxonomyId: detail.taxonomyId ?? null,
+    taxonomyPath: detail.taxonomyId ? (taxonomyPath(tree, detail.taxonomyId) ?? "") : "",
+    attributes: listingAttributes,
+    personalizationQuestions: detail.personalizationQuestions ?? [],
+    featured: detail.featured ?? false,
+    autoRenew: detail.shouldAutoRenew ?? true,
+    inventory,
+  };
+
+  // Build the complete form using the existing function
+  const form = listingFormFromSource(source);
+
+  // Download images as data URLs
+  const imageData = (detail.images ?? [])
     .slice(0, MAX_LISTING_IMAGES)
-    .map((img) => ({ url: pickCopyImageUrl(img), altText: img.alt_text ?? "" }))
+    .map((img) => ({ url: img.url, altText: img.altText ?? "" }))
     .filter((img): img is { url: string; altText: string } => img.url != null);
 
   const downloaded = await Promise.all(
-    sources.map(async (src, i) => {
+    imageData.map(async (src, i) => {
       const img = await fetchImageAsDataUrl(src.url, i);
       return img ? { ...img, altText: src.altText } : null;
     }),
@@ -105,14 +131,5 @@ export async function getListingCopySource(listingId: number): Promise<ListingCo
     (img): img is { dataUrl: string; fileName: string; altText: string } => img != null,
   );
 
-  return {
-    listingId: raw.listing_id,
-    title: decodeHtmlEntities(raw.title ?? ""),
-    description: decodeHtmlEntities(raw.description ?? ""),
-    tags: Array.isArray(raw.tags) ? raw.tags : [],
-    price: raw.price && raw.price.divisor ? raw.price.amount / raw.price.divisor : null,
-    shopSectionId:
-      typeof raw.shop_section_id === "number" && raw.shop_section_id > 0 ? raw.shop_section_id : null,
-    images,
-  };
+  return { form, images };
 }
