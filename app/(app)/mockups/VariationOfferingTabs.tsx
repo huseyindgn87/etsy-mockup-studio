@@ -159,6 +159,7 @@ function RowTable({
   rowHeight = ROW_HEIGHT,
   scrollTo,
   renderRow,
+  leading,
 }: {
   label: string;
   names: string[];
@@ -168,6 +169,8 @@ function RowTable({
   rowHeight?: number;
   scrollTo: { index: number } | null;
   renderRow: (index: number, style: CSSProperties) => ReactNode;
+  /** A header cell before the names — the select-all checkbox of a table with row checkboxes. */
+  leading?: ReactNode;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [seen, setSeen] = useState(scrollTo);
@@ -182,7 +185,7 @@ function RowTable({
   return (
     <div className="space-y-2">
       <div role="table" aria-label={label} aria-rowcount={count + 1} className="rounded-lg border border-black/10 dark:border-white/15">
-        <TableHeader names={names} last={last} trailing={trailing} />
+        <TableHeader names={names} last={last} trailing={trailing} leading={leading} />
         <VirtualRows count={visible} rowHeight={rowHeight} scrollTo={scrollTo} renderRow={renderRow} />
       </div>
       {(hidden > 0 || expanded) && count > COLLAPSED_ROWS && (
@@ -199,18 +202,32 @@ function RowTable({
   );
 }
 
-function gridColumns(labelCount: number, trailing: string) {
-  return { gridTemplateColumns: `repeat(${labelCount}, minmax(0, 1fr)) ${trailing}` };
+/** Width of the row-selection checkbox column, when a table has one. */
+const SELECT_COLUMN = "1.25rem";
+
+function gridColumns(labelCount: number, trailing: string, leading?: string) {
+  return { gridTemplateColumns: `${leading ? `${leading} ` : ""}repeat(${labelCount}, minmax(0, 1fr)) ${trailing}` };
 }
 
-function TableHeader({ names, last, trailing }: { names: string[]; last: string; trailing: string }) {
+function TableHeader({
+  names,
+  last,
+  trailing,
+  leading,
+}: {
+  names: string[];
+  last: string;
+  trailing: string;
+  leading?: ReactNode;
+}) {
   return (
     <div
       role="row"
       aria-rowindex={1}
-      style={gridColumns(names.length, trailing)}
+      style={gridColumns(names.length, trailing, leading ? SELECT_COLUMN : undefined)}
       className="grid items-center gap-3 border-b border-black/10 px-2 py-1.5 text-xs font-medium text-zinc-500 dark:border-white/15"
     >
+      {leading && <span role="columnheader">{leading}</span>}
       {names.map((n, i) => (
         <span key={i} role="columnheader" className="truncate">
           {n}
@@ -337,9 +354,23 @@ interface FieldRowProps extends Omit<CellInputProps, "label" | "errorId" | "cell
   noun: string;
   style: CSSProperties;
   columns: CSSProperties;
+  /** Set on tables with row checkboxes (the bulk bar then applies to the ticked rows). */
+  selected?: boolean;
+  onSelect?: (key: string, selected: boolean) => void;
 }
 
-const FieldRow = memo(function FieldRow({ rowKey, labels, hidden, rowIndex, noun, style, columns, ...cell }: FieldRowProps) {
+const FieldRow = memo(function FieldRow({
+  rowKey,
+  labels,
+  hidden,
+  rowIndex,
+  noun,
+  style,
+  columns,
+  selected,
+  onSelect,
+  ...cell
+}: FieldRowProps) {
   const errorId = useId();
   const name = labels.join(" / ");
   return (
@@ -353,6 +384,17 @@ const FieldRow = memo(function FieldRow({ rowKey, labels, hidden, rowIndex, noun
         cell.error ? "bg-red-50 dark:bg-red-950/20" : ""
       } ${hidden ? "text-zinc-400 dark:text-zinc-500" : ""}`}
     >
+      {onSelect && (
+        <span role="cell">
+          <input
+            type="checkbox"
+            aria-label={`Select ${name}`}
+            checked={selected ?? false}
+            onChange={(e) => onSelect(rowKey, e.target.checked)}
+            className="accent-primary"
+          />
+        </span>
+      )}
       {labels.map((l, i) => (
         <span key={i} role="cell" className="truncate text-sm">
           {l}
@@ -515,6 +557,7 @@ export function FieldTabPanel({
   const indices = useMemo(() => (indicesKey ? indicesKey.split(",").map(Number) : []), [indicesKey]);
   const rows = useMemo(() => offeringRows(model, indices), [model, indices]);
   const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
   const [message, setMessage] = useState<{ error: boolean; text: string } | null>(null);
   const [seenJump, setSeenJump] = useState(jump);
   if (jump !== seenJump) {
@@ -540,7 +583,21 @@ export function FieldTabPanel({
   const symbol = useMemo(() => currencySymbol(currencyCode), [currencyCode]);
   const base = field === "readiness" ? (value.readinessStateId == null ? "" : String(value.readinessStateId)) : value[field];
   const kind: CellKind = field;
-  const columns = useMemo(() => gridColumns(indices.length, "minmax(10rem, 1.4fr)"), [indices.length]);
+  const selectable = tab !== "sku";
+  const columns = useMemo(
+    () => gridColumns(indices.length, "minmax(10rem, 1.4fr)", selectable ? SELECT_COLUMN : undefined),
+    [indices.length, selectable],
+  );
+  const selectedKeys = useMemo(() => rows.filter((r) => selected.has(r.key)).map((r) => r.key), [rows, selected]);
+  const onSelect = useStableHandler((key: string, on: boolean) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(key);
+      else next.delete(key);
+      return next;
+    }),
+  );
+  const allShownSelected = shown.length > 0 && shown.every((r) => selected.has(r.key));
   const listingWideErrorId = useId();
 
   if (variations.length === 0 || model.combinations.length === 0) {
@@ -562,7 +619,7 @@ export function FieldTabPanel({
   }
 
   function applyBulk(operation: BulkOperation, amount: string) {
-    const keys = indices.length > 0 ? shown.map((r) => r.key) : null;
+    const keys = indices.length === 0 ? null : selectedKeys.length > 0 ? selectedKeys : shown.map((r) => r.key);
     const result: BulkResult =
       tab === "processing"
         ? applyProcessingBulk(value, keys, operation as ProcessingOperation, amount, profiles ?? [])
@@ -646,6 +703,13 @@ export function FieldTabPanel({
         <>
           {tab === "sku" && <SkuGenerator onGenerate={generate} />}
           <RowFilter query={query} onQuery={setQuery} shown={shown.length} total={rows.length} />
+          {selectable && (
+            <p className="text-xs text-zinc-500">
+              {selectedKeys.length > 0
+                ? `Bulk changes apply to the ${selectedKeys.length} ticked ${selectedKeys.length === 1 ? "row" : "rows"}.`
+                : "Tick rows to apply a bulk change to just those; with none ticked it applies to every row shown."}
+            </p>
+          )}
           <RowTable
             label={`${Noun} per combination`}
             names={indices.map((i) => variations[i].name || `Variation ${i + 1}`)}
@@ -653,10 +717,32 @@ export function FieldTabPanel({
             trailing="minmax(10rem, 1.4fr)"
             count={shown.length}
             scrollTo={scrollTo}
+            leading={
+              selectable ? (
+                <input
+                  type="checkbox"
+                  aria-label="Select all shown rows"
+                  checked={allShownSelected}
+                  onChange={(e) =>
+                    setSelected((prev) => {
+                      const next = new Set(prev);
+                      for (const r of shown) {
+                        if (e.target.checked) next.add(r.key);
+                        else next.delete(r.key);
+                      }
+                      return next;
+                    })
+                  }
+                  className="accent-primary"
+                />
+              ) : undefined
+            }
             renderRow={(i, style) => {
               const row = shown[i];
               return (
                 <FieldRow
+                  selected={selectable ? selected.has(row.key) : undefined}
+                  onSelect={selectable ? onSelect : undefined}
                   key={row.key}
                   rowKey={row.key}
                   labels={row.labels}

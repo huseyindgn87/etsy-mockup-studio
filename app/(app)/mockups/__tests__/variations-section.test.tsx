@@ -368,7 +368,7 @@ describe("Variations section — per-combination tabs", () => {
 
     fireEvent.click(section().getByRole("checkbox", { name: "Individual price (Primary color)" }));
     expect(state.value.variationToggles.price).toEqual({ enabled: true, appliesTo: [1] });
-    expect(rowsOf("Price per combination").map((r) => within(r).getAllByRole("cell")[0].textContent)).toEqual(["Black", "White"]);
+    expect(rowsOf("Price per combination").map((r) => within(r).getAllByRole("cell")[1].textContent)).toEqual(["Black", "White"]);
     expect(section().getByLabelText("Price for Black")).toHaveValue("10");
     expect(section().getAllByText("$")).toHaveLength(2);
 
@@ -470,6 +470,30 @@ describe("Variations section — per-combination tabs", () => {
     fireEvent.click(section().getByRole("button", { name: "Apply" }));
     expect(section().getByRole("alert")).toHaveTextContent("That would make 3 prices negative — nothing was changed.");
     expect(state.value.variationRows.price["11:21"]).toBe("11.00");
+  });
+
+  it("with rows ticked, the bulk bar changes only those rows", () => {
+    const state = renderSection(
+      sizeByColor({
+        variationToggles: { ...EMPTY_LISTING_FORM.variationToggles, price: { enabled: true, appliesTo: [0, 1] } },
+        variationRows: { ...EMPTY_LISTING_FORM.variationRows, price: { "11:21": "10.00", "11:22": "10.00", "12:21": "10.00" } },
+        price: "9.00",
+      }),
+    );
+    openTab("Price");
+    fireEvent.click(section().getByLabelText("Select S / Black"));
+    fireEvent.click(section().getByLabelText("Select M / Black"));
+    expect(section().getByText("Bulk changes apply to the 2 ticked rows.")).toBeInTheDocument();
+    fireEvent.change(section().getByLabelText("Bulk operation"), { target: { value: "set" } });
+    fireEvent.change(section().getByLabelText("Bulk amount"), { target: { value: "15" } });
+    fireEvent.click(section().getByRole("button", { name: "Apply" }));
+    expect(state.value.variationRows.price).toEqual({ "11:21": "15.00", "11:22": "10.00", "12:21": "15.00" });
+    expect(section().getByRole("status")).toHaveTextContent("Applied to 2 of 2 rows.");
+
+    fireEvent.click(section().getByLabelText("Select all shown rows"));
+    expect(section().getByText("Bulk changes apply to the 6 ticked rows.")).toBeInTheDocument();
+    fireEvent.click(section().getByLabelText("Select all shown rows"));
+    expect(section().getByText(/with none ticked it applies to every row shown/)).toBeInTheDocument();
   });
 
   it("the processing bulk bar sets a profile on every shown row", () => {
