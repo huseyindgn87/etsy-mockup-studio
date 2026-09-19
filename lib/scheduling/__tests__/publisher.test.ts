@@ -88,6 +88,7 @@ import {
   activateListing,
   createDraftListing,
   setListingProperty,
+  updateListingInventory,
   updateVariationImages,
 } from "@/lib/etsy/listing-create";
 import { uploadListingImage } from "@/lib/etsy/listing-images";
@@ -196,6 +197,27 @@ describe("publishScheduledListing", () => {
     ]);
     expect(calls.indexOf("variation-images")).toBeGreaterThan(calls.indexOf("image:3"));
     expect(calls.indexOf("activate")).toBeGreaterThan(calls.indexOf("variation-images"));
+  });
+
+  test("every variation gets the listing's processing profile when it has no per-variation one", async () => {
+    storeImages(3);
+    draftHolds({
+      ...VALID_SPEC,
+      newListing: {
+        ...VALID_SPEC.newListing,
+        readinessStateId: 1441577564343,
+        variations: {
+          products: [
+            { propertyValues: [{ propertyId: 513, name: "Finish", valueIds: [1], values: ["Glossy"] }] },
+            { propertyValues: [{ propertyId: 513, name: "Finish", valueIds: [2], values: ["Matte"] }], readinessStateId: 55 },
+          ],
+          readinessStateOnProperty: [],
+        },
+      },
+    });
+    await publishScheduledListing(makeRow(), hooks());
+    const sent = vi.mocked(updateListingInventory).mock.calls[0][1];
+    expect(sent.products.map((p) => p.readinessStateId)).toEqual([1441577564343, 55]);
   });
 
   test("authenticates with the stored refresh token and saves Etsy's rotated one", async () => {

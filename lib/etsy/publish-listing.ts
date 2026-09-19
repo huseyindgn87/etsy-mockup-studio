@@ -582,7 +582,7 @@ export async function applyListingDetails(
           propertyValues: p.propertyValues,
           price: p.price ?? price,
           quantity: p.quantity ?? quantity,
-          readinessStateId: p.readinessStateId,
+          readinessStateId: p.readinessStateId ?? resolved.input.readinessStateId ?? undefined,
           enabled: p.enabled,
         })),
         priceOnProperty: variations.priceOnProperty,
