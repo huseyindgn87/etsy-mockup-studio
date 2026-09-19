@@ -62,6 +62,10 @@ Next.js (App Router, `proxy.ts` — see the block above), React, TypeScript, Tai
 - Etsy work a user waits on or that runs in the background goes through the job queue (`lib/jobs/`).
 - DB changes: a new Prisma migration; say it must be applied.
 
+# "devam" / "next"
+
+When the user writes only "devam" (or "next"): open `docs/todo.md`, take the first Open item, do it, run only the related tests, commit and push, mark it Done in `docs/todo.md` (commit and push that too), and reply with one line: commit hash + what was done.
+
 # Keeping this file current (mandatory)
 
 At the end of every session, update **Project state** below (and CLAUDE.md if anything it says changes), verify each fact (HEAD from `git log`, test counts from an actual run, pending steps from migrations and `.env.example`), and commit. Keep it short: one line per shipped item at most. Detailed history goes in `docs/agents-archive.md`, not here.
