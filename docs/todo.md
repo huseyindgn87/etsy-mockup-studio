@@ -12,7 +12,6 @@ Single source of open work. Checked against the code on 2026-09-19.
 ## Open
 
 ### New (19 Sept)
-- [ ] Variations: deleting an option (size S/M/L, a color…) happens on one click — no confirmation dialog.
 - [ ] Variations: pencil icon on hover over an option to rename it in place (like Vela); only the name changes — prices, quantities, SKUs, photos and every other setting of that option stay.
 - [ ] While a scheduled publish runs: blur the site, block edits, show "sending to Etsy" status.
 - [ ] Scheduling listings that have a video (blocked in `lib/scheduling/publish-guard.ts`).
@@ -42,6 +41,7 @@ Single source of open work. Checked against the code on 2026-09-19.
 
 ## Done
 
+- [x] Variations: deleting an option is one click, no confirmation — 48b0b40.
 - [x] My drafts: scheduled publish deletes its draft, published ones hidden, pending ones show a clock badge — 87534bf. Not run against the real DB.
 - [x] Personalization on/off switch (off = no questions sent) — 793055d.
 - [x] Alt text window: all photos with a field under each, one Save; bigger tile button + "Edit alt text" button — ec128d5.
