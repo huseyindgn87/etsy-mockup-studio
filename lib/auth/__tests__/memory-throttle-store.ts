@@ -35,5 +35,15 @@ export function createMemoryThrottleStore(): ThrottleStore & { rows: Map<string,
     async delete(key) {
       rows.delete(key);
     },
+    async deleteStale(prefixes, before) {
+      let count = 0;
+      for (const [key, row] of rows) {
+        if (prefixes.some((p) => key.startsWith(p)) && row.windowStart < before) {
+          rows.delete(key);
+          count++;
+        }
+      }
+      return count;
+    },
   };
 }

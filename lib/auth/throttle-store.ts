@@ -25,6 +25,8 @@ export interface ThrottleStore {
   updateIfFailuresAtLeast(key: string, minFailures: number, patch: ThrottlePatch): Promise<boolean>;
   set(key: string, patch: ThrottlePatch): Promise<void>;
   delete(key: string): Promise<void>;
+  /** Deletes the rows under `prefixes` whose window started before `before`. */
+  deleteStale(prefixes: readonly string[], before: Date): Promise<number>;
 }
 
 export const prismaThrottleStore: ThrottleStore = {
@@ -47,5 +49,11 @@ export const prismaThrottleStore: ThrottleStore = {
   },
   async delete(key) {
     await prisma.authThrottle.deleteMany({ where: { key } });
+  },
+  async deleteStale(prefixes, before) {
+    const { count } = await prisma.authThrottle.deleteMany({
+      where: { OR: prefixes.map((prefix) => ({ key: { startsWith: prefix } })), windowStart: { lt: before } },
+    });
+    return count;
   },
 };

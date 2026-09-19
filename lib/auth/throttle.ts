@@ -26,10 +26,31 @@ export const IP_REGISTRATION_LIMIT = 5;
 export const IP_REGISTRATION_WINDOW_MS = 60 * 60_000;
 
 let store: ThrottleStore = prismaThrottleStore;
+let lastIpSweep = 0;
 
 /** Tests only. */
 export function setThrottleStore(next: ThrottleStore): void {
   store = next;
+  lastIpSweep = 0;
+}
+
+/** How often (per server instance) raw-IP rows past their window are purged. */
+export const IP_SWEEP_INTERVAL_MS = 10 * 60_000;
+const IP_PREFIXES = ["login-ip:", "register-ip:"] as const;
+
+/**
+ * Per-IP rows hold raw IP addresses, so once their window is over they're
+ * deleted rather than kept: opportunistically, at most every
+ * {@link IP_SWEEP_INTERVAL_MS}, whenever an IP limit is checked. Best effort —
+ * a failed sweep never blocks a sign-in.
+ */
+async function sweepStaleIpRows(now: Date): Promise<void> {
+  if (now.getTime() - lastIpSweep < IP_SWEEP_INTERVAL_MS) return;
+  lastIpSweep = now.getTime();
+  const longestWindow = Math.max(IP_LOGIN_WINDOW_MS, IP_REGISTRATION_WINDOW_MS);
+  await store.deleteStale(IP_PREFIXES, new Date(now.getTime() - longestWindow)).catch((err) => {
+    console.error("[auth] purging old IP throttle rows failed", err);
+  });
 }
 
 export function lockDurationMs(level: number): number {
@@ -92,7 +113,8 @@ async function hitWindow(key: string, windowMs: number, now: Date): Promise<void
   }
 }
 
-export function checkIpLogin(ip: string, now: Date = new Date()): Promise<WindowGate> {
+export async function checkIpLogin(ip: string, now: Date = new Date()): Promise<WindowGate> {
+  await sweepStaleIpRows(now);
   return checkWindow(`login-ip:${ip}`, IP_LOGIN_FAILURE_LIMIT, IP_LOGIN_WINDOW_MS, now);
 }
 
@@ -103,6 +125,7 @@ export function recordIpLoginFailure(ip: string, now: Date = new Date()): Promis
 /** Counts a sign-up from `ip` if it's under the hourly limit. */
 export async function takeRegistrationSlot(ip: string, now: Date = new Date()): Promise<WindowGate> {
   const key = `register-ip:${ip}`;
+  await sweepStaleIpRows(now);
   const gate = await checkWindow(key, IP_REGISTRATION_LIMIT, IP_REGISTRATION_WINDOW_MS, now);
   if (gate.ok) await hitWindow(key, IP_REGISTRATION_WINDOW_MS, now);
   return gate;
