@@ -184,6 +184,19 @@ describe("a successful publish", () => {
     expect(deleteDraft).toHaveBeenCalledWith("alice", r.draftId);
   });
 
+  test("a failed attempt that deleted its unfinished listing retries with a fresh one", async () => {
+    const r = dueRow();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    await runDueScheduledListings(
+      makeDeps(async (_row, hooks) => {
+        await hooks.onListingCreated("9001");
+        await hooks.onListingDeleted();
+        throw new Error("Image 1: Etsy 500 — nothing was left on Etsy.");
+      }),
+    );
+    expect(row(r.id)).toMatchObject({ status: "pending", etsyListingId: null, attemptCount: 1 });
+  });
+
   test("a failed publish keeps its draft", async () => {
     dueRow();
     const deleteDraft = vi.fn(async () => true);

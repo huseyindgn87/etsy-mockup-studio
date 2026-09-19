@@ -15,6 +15,7 @@
 
 import type { ScheduledListing } from "@prisma/client";
 import { withEtsyAccessToken } from "@/lib/etsy/auth";
+import { deleteEtsyListing } from "@/lib/etsy/bulk-apply";
 import { currentEtsyContext, withEtsyContext } from "@/lib/etsy/client";
 import { activateListing, createDraftListing, updateVariationImages } from "@/lib/etsy/listing-create";
 import { uploadListingImage } from "@/lib/etsy/listing-images";
@@ -74,49 +75,73 @@ export async function publishScheduledListing(row: ScheduledListing, hooks: Publ
       await hooks.onListingCreated(String(listingId));
     }
 
-    // Unlike the editor's Publish, any failed step fails the attempt: the
-    // listing is about to go live, so it must never go live half set up.
-    const variations = await applyListingDetails(shopId, listingId, parsed.plan, resolved, (step, err) => {
-      throw new Error(`${step}: ${message(err)}`);
-    });
-
-    const imageIds: number[] = [];
-    for (let i = 0; i < images.length; i++) {
-      const image = images[i];
-      const object = await getObject(image.key);
-      if (!object) throw new Error(`Image ${i + 1} is missing from storage.`);
+    // A listing reaches Etsy complete or not at all: if any step before
+    // activation fails, the unfinished (never active) listing is deleted.
+    try {
+      await completeListing(shopId, listingId, parsed.plan, resolved, images);
+    } catch (err) {
       try {
-        const uploaded = await uploadListingImage({
-          shopId,
-          listingId,
-          bytes: new Uint8Array(object.body),
-          filename: image.filename,
-          contentType: image.contentType,
-          rank: i + 1,
-          overwrite: true,
-          altText: image.altText,
-        });
-        imageIds.push(uploaded.listingImageId);
-      } catch (err) {
-        throw new Error(`Image ${i + 1}: ${message(err)}`);
+        await deleteEtsyListing(listingId);
+        await hooks.onListingDeleted();
+      } catch (deleteErr) {
+        throw new Error(
+          `${message(err)} — and the unfinished Etsy draft listing ${listingId} couldn't be deleted (${message(deleteErr)}). Delete it on Etsy, or reconnect the shop with delete permission (listings_d).`,
+        );
       }
-    }
-
-    // The stored images are the photo grid in order, so `imageIndex` is their position.
-    const variationImages = (variations?.imagesByValue ?? []).flatMap((v) =>
-      v.imageIndex != null && imageIds[v.imageIndex] != null
-        ? [{ propertyId: v.propertyId, valueId: v.valueId, imageId: imageIds[v.imageIndex] }]
-        : [],
-    );
-    if (variationImages.length > 0) {
-      try {
-        await updateVariationImages(shopId, listingId, variationImages);
-      } catch (err) {
-        throw new Error(`Variation photos: ${message(err)}`);
-      }
+      throw new Error(`${message(err)} — nothing was left on Etsy.`);
     }
 
     await activateListing(shopId, listingId);
     return String(listingId);
   });
+}
+
+async function completeListing(
+  shopId: number,
+  listingId: number,
+  plan: Parameters<typeof applyListingDetails>[2],
+  resolved: Parameters<typeof applyListingDetails>[3],
+  images: ReturnType<typeof publishSpecFromDraft>["images"],
+): Promise<void> {
+  // Unlike the editor's Publish, any failed step fails the attempt: the
+  // listing is about to go live, so it must never go live half set up.
+  const variations = await applyListingDetails(shopId, listingId, plan, resolved, (step, err) => {
+    throw new Error(`${step}: ${message(err)}`);
+  });
+
+  const imageIds: number[] = [];
+  for (let i = 0; i < images.length; i++) {
+    const image = images[i];
+    const object = await getObject(image.key);
+    if (!object) throw new Error(`Image ${i + 1} is missing from storage.`);
+    try {
+      const uploaded = await uploadListingImage({
+        shopId,
+        listingId,
+        bytes: new Uint8Array(object.body),
+        filename: image.filename,
+        contentType: image.contentType,
+        rank: i + 1,
+        overwrite: true,
+        altText: image.altText,
+      });
+      imageIds.push(uploaded.listingImageId);
+    } catch (err) {
+      throw new Error(`Image ${i + 1}: ${message(err)}`);
+    }
+  }
+
+  // The stored images are the photo grid in order, so `imageIndex` is their position.
+  const variationImages = (variations?.imagesByValue ?? []).flatMap((v) =>
+    v.imageIndex != null && imageIds[v.imageIndex] != null
+      ? [{ propertyId: v.propertyId, valueId: v.valueId, imageId: imageIds[v.imageIndex] }]
+      : [],
+  );
+  if (variationImages.length > 0) {
+    try {
+      await updateVariationImages(shopId, listingId, variationImages);
+    } catch (err) {
+      throw new Error(`Variation photos: ${message(err)}`);
+    }
+  }
 }

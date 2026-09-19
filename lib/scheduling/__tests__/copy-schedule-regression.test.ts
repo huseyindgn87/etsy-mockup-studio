@@ -69,6 +69,7 @@ vi.mock("@/lib/etsy/listing-create", () => ({
   updateListingPersonalization: record("updateListingPersonalization"),
   updateListingSettings: record("updateListingSettings"),
 }));
+vi.mock("@/lib/etsy/bulk-apply", () => ({ deleteEtsyListing: record("deleteEtsyListing") }));
 vi.mock("@/lib/etsy/listing-images", () => ({
   uploadListingImage: record("uploadListingImage", (p) => ({
     listingImageId: 100 + (p as { rank: number }).rank,
@@ -211,7 +212,7 @@ function schedule(form: ListingFormValue, altText: Record<string, string>): Sche
 }
 
 const calls = (name: string) => etsy.filter((c) => c.call === name).map((c) => c.args);
-const hooks = () => ({ onListingCreated: vi.fn(async () => {}) });
+const hooks = () => ({ onListingCreated: vi.fn(async () => {}), onListingDeleted: vi.fn(async () => {}) });
 
 beforeEach(() => {
   etsy.length = 0;

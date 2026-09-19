@@ -47,6 +47,8 @@ export function retryDelayMs(failedAttempts: number): number {
 export interface PublishHooks {
   /** Called as soon as Etsy creates the listing, so a retry reuses it instead of creating a duplicate. */
   onListingCreated: (etsyListingId: string) => Promise<void>;
+  /** Called once a failed attempt has deleted its unfinished listing from Etsy, so the next attempt starts fresh. */
+  onListingDeleted: () => Promise<void>;
 }
 
 export interface RunnerDeps {
@@ -280,6 +282,13 @@ async function processClaimed(row: ScheduledListing, deps: RunnerDeps, now: Date
         await prisma.scheduledListing.updateMany({
           where: { id: row.id, status: "publishing" },
           data: { etsyListingId: listingId },
+        });
+      },
+      onListingDeleted: async () => {
+        etsyListingId = null;
+        await prisma.scheduledListing.updateMany({
+          where: { id: row.id, status: "publishing" },
+          data: { etsyListingId: null },
         });
       },
     });

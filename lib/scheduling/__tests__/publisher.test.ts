@@ -70,6 +70,11 @@ vi.mock("@/lib/etsy/listing-create", () => ({
     calls.push("settings");
   }),
 }));
+vi.mock("@/lib/etsy/bulk-apply", () => ({
+  deleteEtsyListing: vi.fn(async () => {
+    calls.push("delete");
+  }),
+}));
 vi.mock("@/lib/etsy/listing-images", () => ({
   uploadListingImage: vi.fn(async (p: { rank: number }) => {
     calls.push(`image:${p.rank}`);
@@ -84,6 +89,7 @@ vi.mock("@/lib/storage/r2", () => ({
 
 import type { ScheduledListing } from "@prisma/client";
 import { withEtsyAccessToken } from "@/lib/etsy/auth";
+import { deleteEtsyListing } from "@/lib/etsy/bulk-apply";
 import {
   activateListing,
   createDraftListing,
@@ -129,7 +135,7 @@ function storeImages(n: number) {
   for (const image of storedImages("alice", n)) objects.set(image.key, Buffer.from(`bytes of ${image.key}`));
 }
 
-const hooks = () => ({ onListingCreated: vi.fn(async () => {}) });
+const hooks = () => ({ onListingCreated: vi.fn(async () => {}), onListingDeleted: vi.fn(async () => {}) });
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -265,11 +271,33 @@ describe("publishScheduledListing", () => {
       },
     };
     draftHolds(spec);
-    await expect(publishScheduledListing(makeRow(), hooks())).rejects.toThrow(
-      "Primary color: invalid value",
+    const h = hooks();
+    await expect(publishScheduledListing(makeRow(), h)).rejects.toThrow(
+      "Primary color: invalid value — nothing was left on Etsy.",
     );
     expect(uploadListingImage).not.toHaveBeenCalled();
     expect(activateListing).not.toHaveBeenCalled();
+    expect(deleteEtsyListing).toHaveBeenCalledWith(4242);
+    expect(h.onListingDeleted).toHaveBeenCalledTimes(1);
+  });
+
+  test("a failed image upload deletes the unfinished listing from Etsy", async () => {
+    storeImages(3);
+    vi.mocked(uploadListingImage).mockRejectedValueOnce(new Error("Etsy 500"));
+    await expect(publishScheduledListing(makeRow(), hooks())).rejects.toThrow("Image 1: Etsy 500");
+    expect(deleteEtsyListing).toHaveBeenCalledWith(4242);
+    expect(activateListing).not.toHaveBeenCalled();
+  });
+
+  test("when the delete is refused too, it says the draft is still on Etsy and keeps its id for the retry", async () => {
+    storeImages(3);
+    vi.mocked(uploadListingImage).mockRejectedValueOnce(new Error("Etsy 500"));
+    vi.mocked(deleteEtsyListing).mockRejectedValueOnce(new Error("403 insufficient scope"));
+    const h = hooks();
+    await expect(publishScheduledListing(makeRow(), h)).rejects.toThrow(
+      "couldn't be deleted (403 insufficient scope)",
+    );
+    expect(h.onListingDeleted).not.toHaveBeenCalled();
   });
 
   test("an invalid draft, a deleted draft, or no images, fails without calling Etsy", async () => {

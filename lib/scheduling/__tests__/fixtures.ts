@@ -15,6 +15,7 @@ export const VALID_SPEC = {
     description: "A spooky mug.",
     tags: ["mug", "halloween"],
     taxonomyId: 1234,
+    shippingProfileId: 77,
     readinessStateId: 55,
     price: 12.5,
     quantity: 3,

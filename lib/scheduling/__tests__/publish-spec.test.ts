@@ -127,3 +127,37 @@ describe("render keys", () => {
     expect(() => renderImageKey("alice", "../x", 0)).toThrow();
   });
 });
+
+describe("profiles Etsy requires", () => {
+  const withListing = (overrides: Record<string, unknown>) => ({
+    ...VALID_SPEC,
+    newListing: { ...VALID_SPEC.newListing, ...overrides },
+  });
+
+  test("a listing without a processing profile can't be scheduled", () => {
+    expect(parseScheduledPublishSpec(withListing({ readinessStateId: undefined }))).toEqual({
+      ok: false,
+      error: "Choose a processing profile for the new listing (Shipping tab).",
+    });
+  });
+
+  test("per-variation processing profiles are enough when every variation has one", () => {
+    const products = [
+      { propertyValues: [{ propertyId: 513, name: "Size", valueIds: [1], values: ["S"] }], readinessStateId: 5 },
+      { propertyValues: [{ propertyId: 513, name: "Size", valueIds: [2], values: ["M"] }], readinessStateId: 6 },
+    ];
+    expect(parseScheduledPublishSpec(withListing({ readinessStateId: undefined, variations: { products } })).ok).toBe(true);
+    expect(
+      parseScheduledPublishSpec(
+        withListing({ readinessStateId: undefined, variations: { products: [products[0], { ...products[1], readinessStateId: undefined }] } }),
+      ).ok,
+    ).toBe(false);
+  });
+
+  test("a listing without a shipping profile can't be scheduled", () => {
+    expect(parseScheduledPublishSpec(withListing({ shippingProfileId: undefined }))).toEqual({
+      ok: false,
+      error: "Choose a shipping profile for the new listing (Shipping tab).",
+    });
+  });
+});
