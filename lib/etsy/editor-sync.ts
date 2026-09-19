@@ -14,6 +14,7 @@ const FIELD_GROUP: Record<FormKey, Group> = {
   title: "title",
   description: "description",
   tags: "tags",
+  materials: "materials",
   taxonomyId: "category",
   taxonomyPath: "category",
   shopSectionId: "section",
@@ -23,6 +24,8 @@ const FIELD_GROUP: Record<FormKey, Group> = {
   quantity: "inventory",
   sku: "inventory",
   readinessStateId: "inventory",
+  shippingProfileId: "shippingProfile",
+  returnPolicyId: "returnPolicy",
   whoMade: "howMade",
   isSupply: "howMade",
   whenMade: "howMade",
@@ -42,6 +45,9 @@ type Group =
   | "title"
   | "description"
   | "tags"
+  | "materials"
+  | "shippingProfile"
+  | "returnPolicy"
   | "category"
   | "section"
   | "attributes"
@@ -79,6 +85,14 @@ export function editorSyncPatch(
   if (groups.has("title")) patch.title = current.title;
   if (groups.has("description")) patch.description = current.description;
   if (groups.has("tags")) patch.tags = current.tags;
+  if (groups.has("materials")) {
+    if (current.materials.length > 0) patch.materials = current.materials;
+    else unsynced.push({ field: "Materials", reason: "Etsy's API documents no way to empty a listing's materials" });
+  }
+  if (groups.has("shippingProfile") && current.shippingProfileId != null) {
+    patch.shippingProfileId = current.shippingProfileId;
+  }
+  if (groups.has("returnPolicy") && current.returnPolicyId != null) patch.returnPolicyId = current.returnPolicyId;
   if (groups.has("howMade")) {
     patch.whoMade = current.whoMade;
     patch.whenMade = current.whenMade;

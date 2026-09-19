@@ -4,7 +4,8 @@
  * which rebuilds it from the saved draft when it runs.
  *
  * A "copy" is published exactly like a "new" listing: everything comes from
- * the form, nothing from the listing it was copied from.
+ * the form, nothing from the listing it was copied from (its shipping profile
+ * and return policy were stored in the form when the draft was made).
  */
 
 import type { ListingFormValue } from "@/app/(app)/mockups/ListingForm";
@@ -37,9 +38,12 @@ export function publishSpecFromForm(
     title: form.title.trim(),
     description: form.description.trim(),
     tags: form.tags,
+    materials: form.materials,
     taxonomyId: form.taxonomyId ?? undefined,
     shopSectionId: form.shopSectionId ?? undefined,
     readinessStateId: form.readinessStateId ?? undefined,
+    shippingProfileId: form.shippingProfileId ?? undefined,
+    returnPolicyId: form.returnPolicyId ?? undefined,
     properties: Object.entries(form.properties).map(([id, p]) => ({
       propertyId: Number(id),
       name: p.name,

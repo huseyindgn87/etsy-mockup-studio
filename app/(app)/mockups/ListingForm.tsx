@@ -95,6 +95,7 @@ export interface ListingFormValue {
   title: string;
   description: string;
   tags: string[];
+  materials: string[];
   taxonomyId: number | null;
   taxonomyPath: string;
   shopSectionId: number | null;
@@ -106,6 +107,10 @@ export interface ListingFormValue {
   sku: string;
   /** Etsy's processing-profile id — required on every physical listing. */
   readinessStateId: number | null;
+  /** No field shows it: copied from the source listing and stored with the draft. */
+  shippingProfileId: number | null;
+  /** No field shows it: copied from the source listing and stored with the draft. */
+  returnPolicyId: number | null;
   /**
    * Etsy's "How it's made" classification — `who_made`/`is_supply`/`when_made`
    * plus production partners (required when `whoMade` is "someone_else").
@@ -159,6 +164,7 @@ export const EMPTY_LISTING_FORM: ListingFormValue = {
   title: "",
   description: "",
   tags: [],
+  materials: [],
   taxonomyId: null,
   taxonomyPath: "",
   shopSectionId: null,
@@ -168,6 +174,8 @@ export const EMPTY_LISTING_FORM: ListingFormValue = {
   quantity: "1",
   sku: "",
   readinessStateId: null,
+  shippingProfileId: null,
+  returnPolicyId: null,
   whoMade: "i_did",
   isSupply: false,
   whenMade: "made_to_order",
@@ -300,6 +308,18 @@ export default function ListingForm({
   }
   function removeTag(t: string) {
     patch({ tags: value.tags.filter((x) => x !== t) });
+  }
+
+  // ---- materials ----
+  const [materialDraft, setMaterialDraft] = useState("");
+  function addMaterial() {
+    const m = materialDraft.trim();
+    setMaterialDraft("");
+    if (!m || value.materials.some((existing) => existing.toLowerCase() === m.toLowerCase())) return;
+    patch({ materials: [...value.materials, m] });
+  }
+  function removeMaterial(m: string) {
+    patch({ materials: value.materials.filter((x) => x !== m) });
   }
 
   // ---- category picker ----
@@ -586,6 +606,42 @@ export default function ListingForm({
                 className="min-w-[100px] flex-1 border-none bg-transparent px-1 py-0.5 text-sm outline-none"
               />
             )}
+          </div>
+        </div>
+        <div className="text-sm">
+          <span className="text-xs text-zinc-500">Materials</span>
+          <div className="mt-1 flex flex-wrap items-center gap-1.5 rounded-lg border border-black/10 p-1.5 dark:border-white/15">
+            {value.materials.map((m) => (
+              <span
+                key={m}
+                className="flex items-center gap-1 rounded-full bg-black/[.06] px-2 py-0.5 text-xs dark:bg-white/10"
+              >
+                {m}
+                <button
+                  type="button"
+                  onClick={() => removeMaterial(m)}
+                  aria-label={`Remove ${m} material`}
+                  className="text-zinc-500 hover:text-red-600"
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+            <input
+              type="text"
+              aria-label="Add a material"
+              value={materialDraft}
+              onChange={(e) => setMaterialDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === ",") {
+                  e.preventDefault();
+                  addMaterial();
+                }
+              }}
+              onBlur={addMaterial}
+              placeholder={value.materials.length === 0 ? "Type a material, press Enter…" : ""}
+              className="min-w-[100px] flex-1 border-none bg-transparent px-1 py-0.5 text-sm outline-none"
+            />
           </div>
         </div>
       </EditorSectionCard>

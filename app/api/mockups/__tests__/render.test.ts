@@ -673,6 +673,9 @@ describe("POST /api/mockups/render", () => {
               taxonomyId: 777,
               shopSectionId: 42,
               readinessStateId: 654,
+              shippingProfileId: 88,
+              returnPolicyId: 99,
+              materials: ["cotton"],
               price: 19.5,
               quantity: 4,
               sku: "HG-000933",
@@ -710,8 +713,9 @@ describe("POST /api/mockups/render", () => {
       readinessStateId: 654,
       price: 19.5,
       quantity: 4,
-      materials: [],
-      shippingProfileId: 55,
+      materials: ["cotton"],
+      shippingProfileId: 88,
+      returnPolicyId: 99,
     });
     // uploaded to the NEW draft, not the source
     expect(uploadCalls.every((c) => c.listingId === 999001)).toBe(true);

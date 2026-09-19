@@ -23,12 +23,15 @@ export interface EditorListingSource {
   title: string;
   description: string;
   tags: string[];
+  materials: string[];
   /** Major currency units. */
   price: number | null;
   quantity: number;
   sku: string;
   shopSectionId: number | null;
   readinessStateId: number | null;
+  shippingProfileId: number | null;
+  returnPolicyId: number | null;
   whoMade: string | null;
   whenMade: string | null;
   isSupply: boolean;
@@ -48,9 +51,12 @@ export interface CachedListingRow {
   title: string;
   description: string | null;
   tags: string[];
+  materials: string[];
   quantity: number;
   sku: string | null;
   shopSectionId: number | null;
+  shippingProfileId: string | null;
+  returnPolicyId: string | null;
   whoMade: string | null;
   whenMade: string | null;
   isSupply: boolean | null;
@@ -142,11 +148,14 @@ export function sourceFromCache(row: CachedListingRow): EditorListingSource {
     title: row.title,
     description: row.description ?? "",
     tags: row.tags,
+    materials: row.materials,
     price: row.priceAmount != null && row.priceDivisor ? row.priceAmount / row.priceDivisor : null,
     quantity: row.quantity,
     sku: row.sku ?? "",
     shopSectionId: row.shopSectionId,
     readinessStateId: null,
+    shippingProfileId: positiveId(row.shippingProfileId),
+    returnPolicyId: positiveId(row.returnPolicyId),
     whoMade: row.whoMade,
     whenMade: row.whenMade,
     isSupply: row.isSupply === true,
@@ -267,6 +276,7 @@ export function listingFormFromSource(src: EditorListingSource): ListingFormValu
     title: src.title,
     description: src.description,
     tags: src.tags,
+    materials: src.materials,
     taxonomyId: src.taxonomyId,
     taxonomyPath: src.taxonomyPath,
     shopSectionId: src.shopSectionId,
@@ -276,6 +286,8 @@ export function listingFormFromSource(src: EditorListingSource): ListingFormValu
     quantity: String(first?.quantity ?? src.quantity),
     sku: first?.sku || src.sku,
     readinessStateId: src.readinessStateId ?? (readiness.length > 0 ? readiness[0] : null),
+    shippingProfileId: src.shippingProfileId,
+    returnPolicyId: src.returnPolicyId,
     whoMade,
     isSupply: src.isSupply,
     whenMade,

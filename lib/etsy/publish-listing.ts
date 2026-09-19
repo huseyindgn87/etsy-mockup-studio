@@ -8,7 +8,6 @@
  */
 
 import {
-  getListingStructure,
   setListingInventorySku,
   setListingProperty,
   updateListingInventory,
@@ -28,7 +27,7 @@ import { MAX_COMBINATIONS_HARD_CAP } from "@/lib/etsy/variation-limits";
  * Etsy's "How it's made" classification — `who_made`/`is_supply`/`when_made`
  * plus production partners (required when `who_made` is `someone_else`).
  * Always the user's own choice on the How it's made tab; never borrowed from
- * `listingId`'s source listing (see `getListingStructure`).
+ * `listingId`'s source listing.
  */
 export interface HowItsMadeSpec {
   whoMade?: string;
@@ -51,8 +50,7 @@ export interface PublishSpec {
   /**
    * "existing" — append to `listingId` (never replaces unless `overwrite`). Requires `listingId`.
    * "copy"     — new draft from `newListing` (the edited form), upload there.
-   *              Requires `listingId`, the copied listing, whose shipping
-   *              profile and return policy are the only things read from it.
+   *              Requires `listingId`, the copied listing, which is never read.
    * "new"      — the same, `listingId` optional.
    * A live listing is never modified except in "existing" mode, and even then
    * images are only added unless the caller explicitly sets `overwrite`.
@@ -70,10 +68,15 @@ export interface PublishSpec {
     title?: string;
     description?: string;
     tags?: string[];
+    materials?: string[];
     taxonomyId?: number;
     shopSectionId?: number | null;
-    /** Required by Etsy for every physical listing; falls back to the source listing's when omitted. */
+    /** Required by Etsy for every physical listing. */
     readinessStateId?: number;
+    /** Copied from the source listing onto the draft; the form has no field for it. */
+    shippingProfileId?: number | null;
+    /** Copied from the source listing onto the draft; the form has no field for it. */
+    returnPolicyId?: number | null;
     properties?: {
       propertyId: number;
       valueIds: number[];
@@ -437,9 +440,8 @@ export interface ListingCreationPlan {
   mode: "copy" | "new";
   /**
    * The listing a "copy" was made from (required) or a "new" one names
-   * (optional). Only its shipping profile and return policy are read — the
-   * form has no fields for them. Every piece of content comes from
-   * `newListing`, the form as it is now.
+   * (optional). Never read: every value comes from `newListing`, the form
+   * (and the draft's stored shipping profile / return policy) as it is now.
    */
   sourceListingId: number | null;
   howItsMade: ValidHowItsMade;
@@ -453,15 +455,27 @@ export interface ResolvedListingInput {
   quantity: number;
 }
 
+const positiveIdOrNull = (n: unknown): number | null =>
+  typeof n === "number" && Number.isSafeInteger(n) && n > 0 ? n : null;
+
+export function sanitizeMaterials(materials: unknown): string[] {
+  if (!Array.isArray(materials)) return [];
+  const out: string[] = [];
+  for (const m of materials) {
+    const t = typeof m === "string" ? m.trim() : "";
+    if (t && !out.some((x) => x.toLowerCase() === t.toLowerCase())) out.push(t);
+  }
+  return out;
+}
+
 /**
  * The `createDraftListing` input for a plan. "copy" and "new" are the same:
- * title, description, tags, price, quantity, category, processing profile and
- * section are the form's, never the source listing's. The source is read only
- * for its shipping profile and return policy, and is never written to.
+ * every value comes from `newListing` — the form, plus the shipping profile and
+ * return policy stored on the draft when it was copied. The source listing is
+ * never read or written.
  */
 export async function resolveDraftListingInput(plan: ListingCreationPlan): Promise<ResolvedListingInput> {
-  const { sourceListingId, howItsMade } = plan;
-  const src = sourceListingId != null ? await getListingStructure(sourceListingId) : null;
+  const { howItsMade } = plan;
   const nl = plan.newListing;
   const quantity = Number.isInteger(nl.quantity) && (nl.quantity as number) > 0 ? (nl.quantity as number) : 1;
   const price = typeof nl.price === "number" && nl.price > 0 ? nl.price : 1;
@@ -481,15 +495,15 @@ export async function resolveDraftListingInput(plan: ListingCreationPlan): Promi
       productionPartnerIds: howItsMade.productionPartnerIds,
       // Validated positive by every caller (parseScheduledPublishSpec, the render route).
       taxonomyId: Number.isInteger(nl.taxonomyId) ? (nl.taxonomyId as number) : 0,
-      shippingProfileId: src?.shippingProfileId ?? null,
-      returnPolicyId: src?.returnPolicyId ?? null,
+      shippingProfileId: positiveIdOrNull(nl.shippingProfileId),
+      returnPolicyId: positiveIdOrNull(nl.returnPolicyId),
       readinessStateId:
         Number.isInteger(nl.readinessStateId) && (nl.readinessStateId as number) > 0
           ? (nl.readinessStateId as number)
           : null,
       shopSectionId: typeof nl.shopSectionId === "number" && nl.shopSectionId > 0 ? nl.shopSectionId : null,
       tags: sanitizeTags(nl.tags),
-      materials: [],
+      materials: sanitizeMaterials(nl.materials),
     },
   };
 }

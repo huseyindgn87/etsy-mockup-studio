@@ -43,7 +43,7 @@ vi.mock("@/lib/etsy/shop-connections", () => ({
   saveConnectionTokens: vi.fn(async () => {}),
 }));
 vi.mock("@/lib/etsy/listing-create", () => ({
-  // The source listing on Etsy — none of its content may reach the new listing.
+  // The source listing on Etsy — never read at publish time.
   getListingStructure: record("getListingStructure", () => ({
     title: "SOURCE title",
     description: "SOURCE description",
@@ -95,6 +95,7 @@ const COPIED: ListingFormValue = {
   title: "SOURCE title",
   description: "SOURCE description",
   tags: ["source-tag"],
+  materials: ["source material"],
   taxonomyId: 1,
   taxonomyPath: "Source",
   shopSectionId: 9,
@@ -104,6 +105,8 @@ const COPIED: ListingFormValue = {
   quantity: "99",
   sku: "",
   readinessStateId: 2,
+  shippingProfileId: 55,
+  returnPolicyId: 66,
   whoMade: "i_did",
   isSupply: false,
   whenMade: "made_to_order",
@@ -139,6 +142,7 @@ const FINAL: ListingFormValue = {
   title: "HG-000933 Final title",
   description: "Final description",
   tags: ["final", "comfort colors"],
+  materials: ["cotton", "ink"],
   taxonomyId: 1623,
   taxonomyPath: "Clothing > T-shirts",
   shopSectionId: 5150,
@@ -148,6 +152,8 @@ const FINAL: ListingFormValue = {
   quantity: "7",
   sku: "HG-000933",
   readinessStateId: 777,
+  shippingProfileId: 88,
+  returnPolicyId: 99,
   whoMade: "someone_else",
   isSupply: false,
   whenMade: "made_to_order",
@@ -234,13 +240,13 @@ describe("a copied listing, edited, scheduled and edited again", () => {
           whenMade: "made_to_order",
           productionPartnerIds: [31],
           taxonomyId: 1623,
-          // Not in the form: the only things read from the source.
-          shippingProfileId: 55,
-          returnPolicyId: 66,
+          // Stored on the draft, not re-read from the source.
+          shippingProfileId: 88,
+          returnPolicyId: 99,
           readinessStateId: 777,
           shopSectionId: 5150,
           tags: ["final", "comfort colors"],
-          materials: [],
+          materials: ["cotton", "ink"],
         },
       ],
     ]);
@@ -258,9 +264,9 @@ describe("a copied listing, edited, scheduled and edited again", () => {
     ]);
     expect(calls("activateListing")).toEqual([[111, 4242]]);
 
-    // The live source listing is read for shipping/return policy only, never written to.
-    const writes = etsy.filter((c) => c.call !== "getListingStructure");
-    expect(JSON.stringify(writes.map((c) => c.args))).not.toContain(String(SOURCE_ID));
+    // The live source listing is never read nor written.
+    expect(calls("getListingStructure")).toEqual([]);
+    expect(JSON.stringify(etsy.map((c) => c.args))).not.toContain(String(SOURCE_ID));
   });
 
   test("a variation grid edited after scheduling is what Etsy gets, photos linked by the final grid", async () => {

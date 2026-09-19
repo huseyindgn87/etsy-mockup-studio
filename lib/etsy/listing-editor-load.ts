@@ -81,6 +81,8 @@ export async function loadListingForEditor(
         featured: detail.featured,
         autoRenew: detail.shouldAutoRenew,
         readinessStateId: detail.readinessStateId,
+        shippingProfileId: detail.shippingProfileId,
+        returnPolicyId: detail.returnPolicyId,
       });
       return { form: listingFormFromSource(source), source: "cache", warning: null };
     } catch (err) {
@@ -104,11 +106,14 @@ export async function loadListingForEditor(
     title: detail.title,
     description: detail.description,
     tags: detail.tags,
+    materials: detail.materials,
     price: detail.price,
     quantity: detail.quantity,
     sku: detail.sku,
     shopSectionId: detail.shopSectionId,
     readinessStateId: detail.readinessStateId,
+    shippingProfileId: detail.shippingProfileId,
+    returnPolicyId: detail.returnPolicyId,
     whoMade: detail.whoMade,
     whenMade: detail.whenMade,
     isSupply: detail.isSupply,

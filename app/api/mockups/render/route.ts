@@ -478,7 +478,7 @@ export async function POST(request: Request) {
       );
     }
     // Required for every new draft (copy or new) — never borrowed from the
-    // source listing (see `getListingStructure`) and never defaulted here;
+    // source listing and never defaulted here;
     // a combination Etsy would reject is caught now, with a clear message,
     // instead of surfacing as a bare 400 once it reaches Etsy.
     let howItsMade: ValidHowItsMade | undefined;
