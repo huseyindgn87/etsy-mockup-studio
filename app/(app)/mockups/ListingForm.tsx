@@ -1324,8 +1324,15 @@ function PersonalizationSection({
   value: ListingFormValue;
   patch: (partial: Partial<ListingFormValue>) => void;
 }) {
+  const [switchedOn, setSwitchedOn] = useState(false);
+  const enabled = switchedOn || value.personalizationQuestions.some((q) => q.questionText.trim() !== "");
   const slot0 = value.personalizationQuestions[0] ?? EMPTY_PERSONALIZATION_QUESTION;
   const slot1 = value.personalizationQuestions[1] ?? null;
+
+  function setEnabled(on: boolean) {
+    setSwitchedOn(on);
+    if (!on) patch({ personalizationQuestions: [] });
+  }
 
   function setSlot0(q: PersonalizationQuestionInput) {
     patch({ personalizationQuestions: slot1 ? [q, slot1] : [q] });
@@ -1342,15 +1349,36 @@ function PersonalizationSection({
 
   return (
     <EditorSectionCard section="personalization" className="max-w-2xl space-y-6">
-      <p className="text-sm text-zinc-500">
-        Let buyers customize this listing — a text box, a list of options, or a file upload.
-        Etsy allows up to {PERSONALIZATION_MAX_QUESTIONS} personalization questions per listing;
-        this form offers 2.
-      </p>
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          role="switch"
+          aria-checked={enabled}
+          aria-label="Personalization"
+          onClick={() => setEnabled(!enabled)}
+          className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${enabled ? "bg-primary" : "bg-zinc-300 dark:bg-zinc-700"}`}
+        >
+          <span
+            aria-hidden="true"
+            className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${enabled ? "left-[1.125rem]" : "left-0.5"}`}
+          />
+        </button>
+        <span className="text-sm font-medium">
+          {enabled ? "This listing is personalized" : "Not personalized"}
+        </span>
+      </div>
 
-      <PersonalizationFieldEditor index={0} question={slot0} onChange={setSlot0} />
+      {enabled && (
+        <p className="text-sm text-zinc-500">
+          Let buyers customize this listing — a text box, a list of options, or a file upload.
+          Etsy allows up to {PERSONALIZATION_MAX_QUESTIONS} personalization questions per listing;
+          this form offers 2.
+        </p>
+      )}
 
-      {slot1 ? (
+      {enabled && <PersonalizationFieldEditor index={0} question={slot0} onChange={setSlot0} />}
+
+      {!enabled ? null : slot1 ? (
         <PersonalizationFieldEditor index={1} question={slot1} onChange={setSlot1} onRemove={removeSlot1} />
       ) : (
         <div className="flex items-center justify-between rounded-lg border border-dashed border-black/20 px-4 py-3 dark:border-white/25">
