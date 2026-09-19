@@ -11,6 +11,7 @@ import {
   RefreshCw,
   Share2,
   Trash2,
+  X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { DraftSummary } from "@/lib/drafts/types";
@@ -146,6 +147,8 @@ export default function ListingsPage() {
   // Bumped after a successful shop refresh to force the counts + listings
   // effects below to re-fetch from the (now updated) DB-backed cache.
   const [dataVersion, setDataVersion] = useState(0);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
 
   const filters: ListingFilters = useMemo(() => ({ state, sectionId }), [state, sectionId]);
   /**
@@ -212,6 +215,14 @@ export default function ListingsPage() {
       })
       .catch(() => setSections([]));
   }, []);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearchQuery(searchQuery);
+      setOffset(0);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
 
   /** Every listing matching the current filters, unpaginated — for "select all matching" and Export. */
   const fetchAllMatching = useCallback(async (): Promise<Listing[]> => {
@@ -315,8 +326,20 @@ export default function ListingsPage() {
     resetSelectionFor({ state, sectionId: next });
   }
 
+  function matchesSearch(listing: Listing): boolean {
+    if (!debouncedSearchQuery) return true;
+    const query = debouncedSearchQuery.toLowerCase();
+    return (
+      listing.title.toLowerCase().includes(query) ||
+      (listing.sku?.toLowerCase().includes(query) ?? false)
+    );
+  }
+
   const total = data?.count ?? 0;
-  const listings = useMemo(() => data?.listings ?? [], [data]);
+  const listings = useMemo(
+    () => (data?.listings ?? []).filter(matchesSearch),
+    [data, debouncedSearchQuery],
+  );
   const pageIds = useMemo(() => listings.map((l) => l.listingId), [listings]);
   const showingFrom = total === 0 ? 0 : offset + 1;
   const showingTo = Math.min(offset + PAGE_SIZE, total);
@@ -686,6 +709,30 @@ export default function ListingsPage() {
               {notice}
             </div>
           )}
+
+          <div className="mb-3 flex gap-2">
+            <div className="relative flex-1">
+              <input
+                type="text"
+                placeholder="Search by title or SKU…"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                data-testid="search-input"
+                className="h-9 w-full rounded-lg border border-black/10 bg-white px-3 py-2 text-sm outline-none focus:border-primary dark:border-white/15 dark:bg-zinc-950"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery("")}
+                  aria-label="Clear search"
+                  data-testid="search-clear"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-zinc-400 transition-colors hover:text-zinc-700 dark:hover:text-zinc-300"
+                >
+                  <X size={16} aria-hidden />
+                </button>
+              )}
+            </div>
+          </div>
 
           <div className="overflow-x-auto rounded-xl border border-black/10 bg-white dark:border-white/15 dark:bg-zinc-950">
             <table className="w-full min-w-[820px] text-left text-sm">
