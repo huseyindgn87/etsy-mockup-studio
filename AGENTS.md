@@ -73,6 +73,8 @@ _Last updated 2026-09-19._
 - **HEAD:** the "Shrink AGENTS.md" commit. Code unchanged since 37aefb0; last full test count 1416 at 113b60d, last related-suite run 662 passing at 37aefb0.
 - **In progress:** nothing.
 - **Never verified against real Etsy/DB end to end:** job queue (real save/refresh/scheduled publish), incremental refresh, scheduled publishes and bulk edits, bulk editing, variation photos, Sync to Etsy, AI Edits (real API). Much UI verified only in jsdom, not a real browser. Details in the archive's "Known gaps".
-- **Known TODO:** emailed unlock link for `emailLocked` accounts (with password reset); legal pages' `[FILL: …]` placeholders; no billing yet; `TODO.md` is stale (all five tasks shipped).
+- **Known TODO:** see `docs/todo.md`.
 - **Pending manual steps for the maintainer:** set `TURNSTILE_SITE_KEY`/`TURNSTILE_SECRET_KEY` before deploying; `ANTHROPIC_API_KEY` for AI Edits; `SCHEDULE_RUNNER_SECRET` (≥32 chars) for the job worker; `TWO_FACTOR_ENCRYPTION_KEY` (≥32 chars) for 2FA; `ETSY_SCOPES=listings_r listings_w listings_d shops_r` + reconnect the shop to allow Delete. All in `.env.example`. No hosted cron exists for `jobs:run`.
 - All migrations through `20260919090000_listing_last_modified` are applied.
+
+Open tasks live in docs/todo.md — read it when asked what's next.
